@@ -1,14 +1,34 @@
 import { randomUUID } from 'node:crypto'
-import { asc, eq } from 'drizzle-orm'
-import type { Channel, CreateChannelInput, CreateProjectInput, Project } from '../../shared/types'
+import { and, asc, eq } from 'drizzle-orm'
+import type {
+  AuditEvent,
+  Channel,
+  CreateChannelInput,
+  CreateProjectInput,
+  Message,
+  Project,
+  TaskRun,
+} from '../../shared/types'
 import type { DatabaseClient } from './client'
-import { channels, projects } from './schema'
+import { auditEvents, channels, messages, projects, taskRuns } from './schema'
+
+export interface StartTaskRunInput {
+  channelId: string
+  modelConfigId: string
+  content: string
+}
 
 export interface Repositories {
   listProjects(): Promise<Project[]>
   createProjectWithInitialChannel(input: CreateProjectInput): Promise<{ project: Project; channel: Channel }>
   listChannels(projectId: string): Promise<Channel[]>
   createChannel(input: CreateChannelInput): Promise<Channel>
+  createStartedTaskRun(input: StartTaskRunInput): Promise<TaskRun>
+  getTaskRun(id: string): Promise<TaskRun | undefined>
+  transitionTaskRun(id: string, from: 'running', to: 'completed' | 'failed' | 'cancelled', metadata: Record<string, string>): Promise<TaskRun | undefined>
+  recoverRunningTaskRuns(): Promise<number>
+  listMessages(channelId: string): Promise<Message[]>
+  listAuditEvents(channelId: string): Promise<AuditEvent[]>
 }
 
 export function createRepositories(client: DatabaseClient): Repositories {
@@ -63,6 +83,123 @@ export function createRepositories(client: DatabaseClient): Repositories {
       }
       client.db.insert(channels).values(channel).run()
       return channel
+    },
+
+    async createStartedTaskRun(input: StartTaskRunInput): Promise<TaskRun> {
+      const timestamp = new Date().toISOString()
+      const queuedRun: TaskRun = {
+        id: randomUUID(),
+        channelId: input.channelId,
+        modelConfigId: input.modelConfigId,
+        status: 'queued',
+        startedAt: null,
+        finishedAt: null,
+        errorMessage: null,
+        createdAt: timestamp,
+      }
+      const message: Message = {
+        id: randomUUID(),
+        channelId: input.channelId,
+        taskRunId: queuedRun.id,
+        role: 'ceo',
+        authorName: 'CEO',
+        content: input.content,
+        status: 'sent',
+        createdAt: timestamp,
+      }
+      const auditEvent: AuditEvent = {
+        id: randomUUID(),
+        channelId: input.channelId,
+        taskRunId: queuedRun.id,
+        eventType: 'task_run_started',
+        metadataJson: JSON.stringify({ messageId: message.id }),
+        createdAt: timestamp,
+      }
+
+      return client.db.transaction((tx) => {
+        tx.insert(taskRuns).values(queuedRun).run()
+        const runningRun = tx.update(taskRuns)
+          .set({ status: 'running', startedAt: timestamp })
+          .where(and(eq(taskRuns.id, queuedRun.id), eq(taskRuns.status, 'queued')))
+          .returning()
+          .get()
+        if (!runningRun) throw new Error('TaskRun cannot transition from queued to running')
+        tx.insert(messages).values(message).run()
+        tx.insert(auditEvents).values(auditEvent).run()
+        return runningRun
+      })
+    },
+
+    async getTaskRun(id: string): Promise<TaskRun | undefined> {
+      return client.db.select().from(taskRuns).where(eq(taskRuns.id, id)).get()
+    },
+
+    async transitionTaskRun(
+      id: string,
+      from: 'running',
+      to: 'completed' | 'failed' | 'cancelled',
+      metadata: Record<string, string>,
+    ): Promise<TaskRun | undefined> {
+      const timestamp = new Date().toISOString()
+      return client.db.transaction((tx) => {
+        const current = tx.select().from(taskRuns).where(eq(taskRuns.id, id)).get()
+        if (!current || current.status !== from) return undefined
+        const next = tx.update(taskRuns)
+          .set({
+            status: to,
+            finishedAt: to === 'completed' || to === 'failed' || to === 'cancelled' ? timestamp : current.finishedAt,
+            errorMessage: to === 'failed' ? metadata.errorMessage ?? 'TaskRun failed' : current.errorMessage,
+          })
+          .where(and(eq(taskRuns.id, id), eq(taskRuns.status, from)))
+          .returning()
+          .get()
+        if (!next) return undefined
+        tx.insert(auditEvents).values({
+          id: randomUUID(),
+          channelId: next.channelId,
+          taskRunId: next.id,
+          eventType: `task_run_${to}`,
+          metadataJson: JSON.stringify(metadata),
+          createdAt: timestamp,
+        }).run()
+        return next
+      })
+    },
+
+    async recoverRunningTaskRuns(): Promise<number> {
+      const timestamp = new Date().toISOString()
+      return client.db.transaction((tx) => {
+        const runningRuns = tx.select().from(taskRuns).where(eq(taskRuns.status, 'running')).all()
+        for (const run of runningRuns) {
+          tx.update(taskRuns)
+            .set({ status: 'paused' })
+            .where(and(eq(taskRuns.id, run.id), eq(taskRuns.status, 'running')))
+            .run()
+          tx.insert(auditEvents).values({
+            id: randomUUID(),
+            channelId: run.channelId,
+            taskRunId: run.id,
+            eventType: 'task_run_paused',
+            metadataJson: JSON.stringify({ reason: 'restart_recovery' }),
+            createdAt: timestamp,
+          }).run()
+        }
+        return runningRuns.length
+      })
+    },
+
+    async listMessages(channelId: string): Promise<Message[]> {
+      return client.db.select().from(messages)
+        .where(eq(messages.channelId, channelId))
+        .orderBy(asc(messages.createdAt), asc(messages.id))
+        .all()
+    },
+
+    async listAuditEvents(channelId: string): Promise<AuditEvent[]> {
+      return client.db.select().from(auditEvents)
+        .where(eq(auditEvents.channelId, channelId))
+        .orderBy(asc(auditEvents.createdAt), asc(auditEvents.id))
+        .all()
     },
   }
 }

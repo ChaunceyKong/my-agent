@@ -1,5 +1,6 @@
 import { IpcChannel } from '../../shared/ipc-channels'
-import type { CreateChannelInput, CreateProjectInput } from '../../shared/types'
+import type { CreateChannelInput, CreateProjectInput, SendMessageInput } from '../../shared/types'
+import type { TaskRunService } from '../core/task-run-service'
 import { validateWorkspaceRoot } from '../core/workspace-validator'
 import type { Repositories } from '../database/repositories'
 
@@ -15,9 +16,10 @@ export interface IpcHandlerDependencies {
   ipcMain: IpcHandlerRegistrar
   dialog: DirectoryPicker
   repositories: Repositories
+  taskRuns?: TaskRunService
 }
 
-export function registerHandlers({ ipcMain, dialog, repositories }: IpcHandlerDependencies): void {
+export function registerHandlers({ ipcMain, dialog, repositories, taskRuns }: IpcHandlerDependencies): void {
   ipcMain.handle(IpcChannel.ProjectList, () => repositories.listProjects())
   ipcMain.handle(IpcChannel.ProjectCreate, async (_event, input: CreateProjectInput) => {
     const workspacePath = input.browseForWorkspace
@@ -32,6 +34,15 @@ export function registerHandlers({ ipcMain, dialog, repositories }: IpcHandlerDe
   })
   ipcMain.handle(IpcChannel.ChannelList, (_event, projectId: string) => repositories.listChannels(projectId))
   ipcMain.handle(IpcChannel.ChannelCreate, (_event, input: CreateChannelInput) => repositories.createChannel(input))
+  ipcMain.handle(IpcChannel.MessageSend, (_event, input: SendMessageInput) => {
+    if (!taskRuns) throw new Error('TaskRun service is unavailable')
+    return taskRuns.startTaskRun(input.channelId, input.modelConfigId, input.content)
+      .then((taskRun) => ({ taskRunId: taskRun.id }))
+  })
+  ipcMain.handle(IpcChannel.TaskRunCancel, async (_event, taskRunId: string) => {
+    if (!taskRuns) throw new Error('TaskRun service is unavailable')
+    await taskRuns.cancelTaskRun(taskRunId)
+  })
 }
 
 async function pickWorkspacePath(dialog: DirectoryPicker): Promise<string> {

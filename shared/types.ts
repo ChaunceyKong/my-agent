@@ -53,6 +53,42 @@ export interface SendMessageInput {
   modelConfigId: string
 }
 
+export type MessageRole = 'ceo' | 'agent'
+export type MessageStatus = 'sent' | 'streaming' | 'completed' | 'failed'
+
+export interface Message {
+  id: string
+  channelId: string
+  taskRunId: string | null
+  role: MessageRole
+  authorName: string
+  content: string
+  status: MessageStatus
+  createdAt: string
+}
+
+export type TaskRunStatus = 'queued' | 'running' | 'cancelled' | 'failed' | 'completed' | 'paused'
+
+export interface TaskRun {
+  id: string
+  channelId: string
+  modelConfigId: string
+  status: TaskRunStatus
+  startedAt: string | null
+  finishedAt: string | null
+  errorMessage: string | null
+  createdAt: string
+}
+
+export interface AuditEvent {
+  id: string
+  channelId: string
+  taskRunId: string | null
+  eventType: string
+  metadataJson: string
+  createdAt: string
+}
+
 export interface StreamEvent {
   taskRunId: string
   type: 'delta' | 'complete' | 'error'

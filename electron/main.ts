@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import type { OpenDialogOptions } from 'electron'
 import { join } from 'node:path'
+import { createTaskRunService } from './core/task-run-service'
 import { createDatabase } from './database/client'
 import { createRepositories } from './database/repositories'
 import { registerHandlers } from './ipc/register-handlers'
@@ -23,12 +24,16 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   const database = createDatabase({ filePath: join(app.getPath('userData'), 'agent-team.sqlite') })
+  const repositories = createRepositories(database)
+  const taskRuns = createTaskRunService(repositories)
+  await taskRuns.recoverInterruptedTaskRuns()
   registerHandlers({
     ipcMain,
     dialog: { showOpenDialog: (options) => dialog.showOpenDialog(options as OpenDialogOptions) },
-    repositories: createRepositories(database),
+    repositories,
+    taskRuns,
   })
   createWindow()
 

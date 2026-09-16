@@ -1,7 +1,9 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron'
 import type { OpenDialogOptions } from 'electron'
 import { join } from 'node:path'
 import { createTaskRunService } from './core/task-run-service'
+import { createCloudConsentService } from './core/cloud-consent-service'
+import { createModelClient } from './core/model-client'
 import { createDatabase } from './database/client'
 import { createRepositories } from './database/repositories'
 import { registerHandlers } from './ipc/register-handlers'
@@ -28,12 +30,20 @@ app.whenReady().then(async () => {
   const database = createDatabase({ filePath: join(app.getPath('userData'), 'agent-team.sqlite') })
   const repositories = createRepositories(database)
   const taskRuns = createTaskRunService(repositories)
+  const consent = createCloudConsentService(repositories)
+  const modelClient = createModelClient({
+    repositories,
+    consent,
+    taskRuns,
+    crypto: safeStorage,
+  })
   await taskRuns.recoverInterruptedTaskRuns()
   registerHandlers({
     ipcMain,
     dialog: { showOpenDialog: (options) => dialog.showOpenDialog(options as OpenDialogOptions) },
     repositories,
     taskRuns,
+    modelClient,
   })
   createWindow()
 

@@ -1,6 +1,7 @@
 import { IpcChannel } from '../../shared/ipc-channels'
-import type { CreateChannelInput, CreateProjectInput, SendMessageInput } from '../../shared/types'
+import type { CreateChannelInput, CreateProjectInput, SaveModelConfigInput, SendMessageInput } from '../../shared/types'
 import type { TaskRunService } from '../core/task-run-service'
+import type { ModelClient } from '../core/model-client'
 import { validateWorkspaceRoot } from '../core/workspace-validator'
 import type { Repositories } from '../database/repositories'
 
@@ -17,9 +18,10 @@ export interface IpcHandlerDependencies {
   dialog: DirectoryPicker
   repositories: Repositories
   taskRuns?: TaskRunService
+  modelClient?: ModelClient
 }
 
-export function registerHandlers({ ipcMain, dialog, repositories, taskRuns }: IpcHandlerDependencies): void {
+export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, modelClient }: IpcHandlerDependencies): void {
   ipcMain.handle(IpcChannel.ProjectList, () => repositories.listProjects())
   ipcMain.handle(IpcChannel.ProjectCreate, async (_event, input: CreateProjectInput) => {
     const workspacePath = input.browseForWorkspace
@@ -34,6 +36,14 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns }: Ip
   })
   ipcMain.handle(IpcChannel.ChannelList, (_event, projectId: string) => repositories.listChannels(projectId))
   ipcMain.handle(IpcChannel.ChannelCreate, (_event, input: CreateChannelInput) => repositories.createChannel(input))
+  ipcMain.handle(IpcChannel.ModelList, () => {
+    if (!modelClient) throw new Error('Model client is unavailable')
+    return modelClient.listModelConfigs()
+  })
+  ipcMain.handle(IpcChannel.ModelSave, (_event, input: SaveModelConfigInput) => {
+    if (!modelClient) throw new Error('Model client is unavailable')
+    return modelClient.saveModelConfig(input)
+  })
   ipcMain.handle(IpcChannel.MessageSend, (_event, input: SendMessageInput) => {
     if (!taskRuns) throw new Error('TaskRun service is unavailable')
     return taskRuns.startTaskRun(input.channelId, input.modelConfigId, input.content)

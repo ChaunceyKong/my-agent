@@ -1,0 +1,169 @@
+import type {
+  ModelConfigSummary,
+  ModelProviderPreset,
+  SaveModelConfigInput,
+  StreamChatInput,
+  StreamEvent,
+} from '../../shared/types'
+import type { ModelConfigRecord, Repositories } from '../database/repositories'
+import type { CloudConsentService } from './cloud-consent-service'
+
+const DEFAULT_BASE_URL: Record<ModelProviderPreset, string> = {
+  openai: 'https://api.openai.com/v1',
+  deepseek: 'https://api.deepseek.com',
+}
+
+export interface CryptoAdapter {
+  isEncryptionAvailable(): boolean
+  encryptString(value: string): Buffer
+  decryptString(value: Buffer): string
+}
+
+export interface ModelClient {
+  saveModelConfig(input: SaveModelConfigInput): Promise<ModelConfigSummary>
+  listModelConfigs(): Promise<ModelConfigSummary[]>
+  recordCloudConsent(projectId: string, modelConfigId: string): Promise<void>
+  requireCloudConsent(projectId: string, modelConfigId: string): Promise<void>
+  streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void): Promise<void>
+}
+
+export interface ModelClientDependencies {
+  repositories: Repositories
+  consent: CloudConsentService
+  taskRuns: { canAcceptChunk(id: string): Promise<boolean> }
+  crypto: CryptoAdapter
+  fetch?: typeof globalThis.fetch
+}
+
+export function createModelClient({
+  repositories,
+  consent,
+  taskRuns,
+  crypto,
+  fetch: fetchImpl = globalThis.fetch,
+}: ModelClientDependencies): ModelClient {
+  return {
+    async saveModelConfig(input: SaveModelConfigInput): Promise<ModelConfigSummary> {
+      if (!crypto.isEncryptionAvailable()) throw new Error('Secure credential storage is unavailable')
+      const baseUrl = normalizeBaseUrl(input.baseUrl || DEFAULT_BASE_URL[input.providerPreset])
+      const encryptedApiKey = crypto.encryptString(input.apiKey).toString('base64')
+      const saved = await repositories.saveModelConfig({
+        providerPreset: input.providerPreset,
+        baseUrl,
+        modelName: input.modelName,
+        encryptedApiKey,
+      })
+      return summarize(saved)
+    },
+
+    async listModelConfigs(): Promise<ModelConfigSummary[]> {
+      return (await repositories.listModelConfigs()).map(summarize)
+    },
+
+    recordCloudConsent: (projectId, modelConfigId) => consent.recordCloudConsent(projectId, modelConfigId),
+    requireCloudConsent: (projectId, modelConfigId) => consent.requireCloudConsent(projectId, modelConfigId),
+
+    async streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void): Promise<void> {
+      if (!await taskRuns.canAcceptChunk(input.taskRunId)) return
+      await consent.requireCloudConsent(input.projectId, input.modelConfigId)
+      const modelConfig = await repositories.getModelConfig(input.modelConfigId)
+      if (!modelConfig) throw new Error('Model configuration not found')
+
+      try {
+        const apiKey = crypto.decryptString(Buffer.from(modelConfig.encryptedApiKey, 'base64'))
+        const response = await fetchImpl(`${normalizeBaseUrl(modelConfig.baseUrl)}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: modelConfig.modelName,
+            messages: input.messages,
+            stream: true,
+          }),
+        })
+        if (!response.ok) throw new Error(`Model request failed with status ${response.status}`)
+        if (!response.body) throw new Error('Model response did not include a stream')
+        await consumeEventStream(response.body, input.taskRunId, taskRuns, onEvent)
+      } catch (error) {
+        await emitIfAccepted(taskRuns, input.taskRunId, onEvent, {
+          taskRunId: input.taskRunId,
+          type: 'error',
+          content: error instanceof Error ? error.message : 'Model request failed',
+        })
+      }
+    },
+  }
+}
+
+async function consumeEventStream(
+  body: ReadableStream<Uint8Array>,
+  taskRunId: string,
+  taskRuns: { canAcceptChunk(id: string): Promise<boolean> },
+  onEvent: (event: StreamEvent) => void,
+): Promise<void> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    buffer += decoder.decode(value, { stream: !done })
+    const blocks = buffer.split(/\r?\n\r?\n/)
+    buffer = done ? '' : blocks.pop() ?? ''
+
+    for (const block of blocks) {
+      const data = block.split(/\r?\n/)
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
+        .join('\n')
+      if (!data) continue
+      if (data === '[DONE]') {
+        await emitIfAccepted(taskRuns, taskRunId, onEvent, { taskRunId, type: 'complete' })
+        await reader.cancel()
+        return
+      }
+      const parsed = JSON.parse(data) as { choices?: Array<{ delta?: { content?: unknown } }>; error?: { message?: unknown } }
+      if (parsed.error) throw new Error(typeof parsed.error.message === 'string' ? parsed.error.message : 'Model stream failed')
+      const content = parsed.choices?.[0]?.delta?.content
+      if (typeof content === 'string' && content.length > 0) {
+        const accepted = await emitIfAccepted(taskRuns, taskRunId, onEvent, { taskRunId, type: 'delta', content })
+        if (!accepted) {
+          await reader.cancel()
+          return
+        }
+      }
+    }
+
+    if (done) {
+      await emitIfAccepted(taskRuns, taskRunId, onEvent, { taskRunId, type: 'complete' })
+      return
+    }
+  }
+}
+
+async function emitIfAccepted(
+  taskRuns: { canAcceptChunk(id: string): Promise<boolean> },
+  taskRunId: string,
+  onEvent: (event: StreamEvent) => void,
+  event: StreamEvent,
+): Promise<boolean> {
+  if (!await taskRuns.canAcceptChunk(taskRunId)) return false
+  onEvent(event)
+  return true
+}
+
+function normalizeBaseUrl(baseUrl: string): string {
+  return baseUrl.replace(/\/+$/, '')
+}
+
+function summarize(config: ModelConfigRecord): ModelConfigSummary {
+  return {
+    id: config.id,
+    providerPreset: config.providerPreset,
+    baseUrl: config.baseUrl,
+    modelName: config.modelName,
+    hasApiKey: config.encryptedApiKey.length > 0,
+  }
+}

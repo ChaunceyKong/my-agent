@@ -6,16 +6,30 @@ import type {
   CreateChannelInput,
   CreateProjectInput,
   Message,
+  ModelProviderPreset,
   Project,
   TaskRun,
 } from '../../shared/types'
 import type { DatabaseClient } from './client'
-import { auditEvents, channels, messages, projects, taskRuns } from './schema'
+import { auditEvents, channels, cloudConsents, messages, modelConfigs, projects, taskRuns } from './schema'
 
 export interface StartTaskRunInput {
   channelId: string
   modelConfigId: string
   content: string
+}
+
+export interface SaveModelConfigRecordInput {
+  providerPreset: ModelProviderPreset
+  baseUrl: string
+  modelName: string
+  encryptedApiKey: string
+}
+
+export interface ModelConfigRecord extends SaveModelConfigRecordInput {
+  id: string
+  createdAt: string
+  updatedAt: string
 }
 
 export interface Repositories {
@@ -29,6 +43,11 @@ export interface Repositories {
   recoverRunningTaskRuns(): Promise<number>
   listMessages(channelId: string): Promise<Message[]>
   listAuditEvents(channelId: string): Promise<AuditEvent[]>
+  saveModelConfig(input: SaveModelConfigRecordInput): Promise<ModelConfigRecord>
+  listModelConfigs(): Promise<ModelConfigRecord[]>
+  getModelConfig(id: string): Promise<ModelConfigRecord | undefined>
+  recordCloudConsent(projectId: string, modelConfigId: string): Promise<void>
+  hasCloudConsent(projectId: string, modelConfigId: string): Promise<boolean>
 }
 
 export function createRepositories(client: DatabaseClient): Repositories {
@@ -200,6 +219,45 @@ export function createRepositories(client: DatabaseClient): Repositories {
         .where(eq(auditEvents.channelId, channelId))
         .orderBy(asc(auditEvents.createdAt), asc(auditEvents.id))
         .all()
+    },
+
+    async saveModelConfig(input: SaveModelConfigRecordInput): Promise<ModelConfigRecord> {
+      const timestamp = new Date().toISOString()
+      const modelConfig: ModelConfigRecord = {
+        id: randomUUID(),
+        ...input,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }
+      client.db.insert(modelConfigs).values(modelConfig).run()
+      return modelConfig
+    },
+
+    async listModelConfigs(): Promise<ModelConfigRecord[]> {
+      return client.db.select().from(modelConfigs)
+        .orderBy(asc(modelConfigs.createdAt), asc(modelConfigs.id))
+        .all()
+    },
+
+    async getModelConfig(id: string): Promise<ModelConfigRecord | undefined> {
+      return client.db.select().from(modelConfigs).where(eq(modelConfigs.id, id)).get()
+    },
+
+    async recordCloudConsent(projectId: string, modelConfigId: string): Promise<void> {
+      client.db.insert(cloudConsents).values({
+        projectId,
+        modelConfigId,
+        consentedAt: new Date().toISOString(),
+      }).onConflictDoUpdate({
+        target: [cloudConsents.projectId, cloudConsents.modelConfigId],
+        set: { consentedAt: new Date().toISOString() },
+      }).run()
+    },
+
+    async hasCloudConsent(projectId: string, modelConfigId: string): Promise<boolean> {
+      return client.db.select({ projectId: cloudConsents.projectId }).from(cloudConsents)
+        .where(and(eq(cloudConsents.projectId, projectId), eq(cloudConsents.modelConfigId, modelConfigId)))
+        .get() !== undefined
     },
   }
 }

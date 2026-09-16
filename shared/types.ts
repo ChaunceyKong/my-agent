@@ -34,7 +34,7 @@ export type ModelProviderPreset = 'openai' | 'deepseek'
 
 export interface SaveModelConfigInput {
   providerPreset: ModelProviderPreset
-  baseUrl: string
+  baseUrl?: string
   modelName: string
   apiKey: string
 }
@@ -93,7 +93,18 @@ export interface StreamEvent {
   taskRunId: string
   type: 'delta' | 'complete' | 'error'
   content?: string
-  error?: string
+}
+
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
+
+export interface StreamChatInput {
+  projectId: string
+  modelConfigId: string
+  taskRunId: string
+  messages: ChatMessage[]
 }
 
 export interface AgentTeamApi {

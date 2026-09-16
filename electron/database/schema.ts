@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
-import { sqliteTable, text } from 'drizzle-orm/sqlite-core'
-import type { MessageRole, MessageStatus, TaskRunStatus } from '../../shared/types'
+import { primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import type { MessageRole, MessageStatus, ModelProviderPreset, TaskRunStatus } from '../../shared/types'
 
 export const projects = sqliteTable('projects', {
   id: text('id').primaryKey(),
@@ -51,7 +51,23 @@ export const auditEvents = sqliteTable('audit_events', {
   createdAt: text('created_at').notNull(),
 })
 
-export const schema = { auditEvents, channels, messages, projects, taskRuns }
+export const modelConfigs = sqliteTable('model_configs', {
+  id: text('id').primaryKey(),
+  providerPreset: text('provider_preset').$type<ModelProviderPreset>().notNull(),
+  baseUrl: text('base_url').notNull(),
+  modelName: text('model_name').notNull(),
+  encryptedApiKey: text('encrypted_api_key').notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+})
+
+export const cloudConsents = sqliteTable('cloud_consents', {
+  projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  modelConfigId: text('model_config_id').notNull().references(() => modelConfigs.id, { onDelete: 'cascade' }),
+  consentedAt: text('consented_at').notNull(),
+}, (table) => [primaryKey({ columns: [table.projectId, table.modelConfigId] })])
+
+export const schema = { auditEvents, channels, cloudConsents, messages, modelConfigs, projects, taskRuns }
 
 export function migrate(sqlite: Database.Database): void {
   sqlite.pragma('foreign_keys = ON')
@@ -115,5 +131,26 @@ export function migrate(sqlite: Database.Database): void {
       CREATE INDEX IF NOT EXISTS audit_events_channel_id_created_at_idx ON audit_events(channel_id, created_at);
     `)
     sqlite.pragma('user_version = 2')
+  }
+
+  if (version < 3) {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS model_configs (
+        id TEXT PRIMARY KEY NOT NULL,
+        provider_preset TEXT NOT NULL CHECK (provider_preset IN ('openai', 'deepseek')),
+        base_url TEXT NOT NULL,
+        model_name TEXT NOT NULL,
+        encrypted_api_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS cloud_consents (
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        model_config_id TEXT NOT NULL REFERENCES model_configs(id) ON DELETE CASCADE,
+        consented_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, model_config_id)
+      );
+    `)
+    sqlite.pragma('user_version = 3')
   }
 }

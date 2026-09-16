@@ -1,5 +1,9 @@
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import type { OpenDialogOptions } from 'electron'
 import { join } from 'node:path'
+import { createDatabase } from './database/client'
+import { createRepositories } from './database/repositories'
+import { registerHandlers } from './ipc/register-handlers'
 
 function createWindow(): void {
   const window = new BrowserWindow({
@@ -20,6 +24,12 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  const database = createDatabase({ filePath: join(app.getPath('userData'), 'agent-team.sqlite') })
+  registerHandlers({
+    ipcMain,
+    dialog: { showOpenDialog: (options) => dialog.showOpenDialog(options as OpenDialogOptions) },
+    repositories: createRepositories(database),
+  })
   createWindow()
 
   app.on('activate', () => {

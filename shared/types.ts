@@ -11,6 +11,8 @@ export interface CreateProjectInput {
   name: string
   icon?: string
   workspacePath: string
+  firstChannelName?: string
+  browseForWorkspace?: boolean
 }
 
 export interface Channel {

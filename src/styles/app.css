@@ -1,0 +1,16 @@
+:root {
+  color: #172033;
+  background: #f7f8fb;
+  font-family: Inter, "Microsoft YaHei", sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+.app-shell {
+  display: grid;
+  min-height: 100vh;
+  place-content: center;
+  text-align: center;
+}

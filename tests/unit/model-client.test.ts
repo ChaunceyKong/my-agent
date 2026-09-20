@@ -68,6 +68,19 @@ function streamResponse(parts: string[]): Response {
 }
 
 describe('model configuration', () => {
+  it.each(['\r', '\n', '\r\n'])('rejects API keys containing %j before encryption or persistence', async (newline) => {
+    const encrypt = vi.spyOn(cryptoAdapter, 'encryptString')
+    try {
+      await expect(client.saveModelConfig({
+        providerPreset: 'openai', modelName: 'gpt-test', apiKey: `FAKE_SECRET_123${newline}x`,
+      })).rejects.toThrow('API 密钥不能包含换行符')
+      expect(encrypt).not.toHaveBeenCalled()
+      expect(await repositories.listModelConfigs()).toEqual([])
+    } finally {
+      encrypt.mockRestore()
+    }
+  })
+
   it('never returns the api key when saving a model config', async () => {
     const saved = await client.saveModelConfig({
       providerPreset: 'deepseek',
@@ -199,7 +212,57 @@ describe('OpenAI-compatible streaming', () => {
 
     await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [] }, emit)
 
-    expect(emit).toHaveBeenCalledWith({ taskRunId: 'run-1', type: 'error', content: 'connection lost' })
+    expect(emit).toHaveBeenCalledWith({ taskRunId: 'run-1', type: 'error', content: '模型网络请求失败，请稍后重试' })
     expect(canAcceptChunk).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    ['transport error', () => Promise.reject(new Error('Authorization: Bearer secret')), '模型网络请求失败，请稍后重试'],
+    ['non-Error rejection', () => Promise.reject('Authorization: Bearer secret'), '模型网络请求失败，请稍后重试'],
+    ['abort', () => Promise.reject(new DOMException('Authorization: Bearer secret', 'AbortError')), '模型请求已取消'],
+    ['HTTP failure', () => new Response('Authorization: Bearer secret', { status: 401 }), '模型服务请求失败，请检查配置后重试'],
+    ['missing stream', () => new Response(null), '模型响应格式异常，请稍后重试'],
+    ['malformed SSE', () => streamResponse(['data: {Authorization: Bearer secret}\n\n']), '模型响应格式异常，请稍后重试'],
+    ['provider error', () => streamResponse(['data: {"error":{"message":"Authorization: Bearer secret"}}\n\n']), '模型服务返回错误，请稍后重试'],
+    ['reader failure', () => new Response(new ReadableStream({
+      start(controller) { controller.error(new Error('Authorization: Bearer secret')) },
+    })), '模型网络请求失败，请稍后重试'],
+  ])('never exposes credentials from %s', async (_name, response, message) => {
+    const ids = await createProjectAndModel()
+    fetchImpl.mockImplementation(response)
+    const events: StreamEvent[] = []
+
+    await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [] }, (event) => events.push(event))
+
+    expect(JSON.stringify(events)).not.toContain('secret')
+    expect(events).toEqual([{ taskRunId: 'run-1', type: 'error', content: message }])
+    expect(canAcceptChunk).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['\r', '\n', '\r\n'])('rejects a legacy stored API key containing %j before requesting', async (newline) => {
+    const { project } = await repositories.createProjectWithInitialChannel({ name: '旧配置', workspacePath: testDirectory })
+    const model = await repositories.saveModelConfig({
+      providerPreset: 'openai', baseUrl: 'https://api.openai.com/v1', modelName: 'gpt-test',
+      encryptedApiKey: cryptoAdapter.encryptString(`FAKE_SECRET_123${newline}x`).toString('base64'),
+    })
+    await client.recordCloudConsent(project.id, model.id)
+    const events: StreamEvent[] = []
+
+    await client.streamChat({ projectId: project.id, modelConfigId: model.id, taskRunId: 'run-1', messages: [] }, (event) => events.push(event))
+
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(events).toEqual([{ taskRunId: 'run-1', type: 'error', content: 'API 密钥不能包含换行符' }])
+    expect(JSON.stringify(events)).not.toContain('FAKE_SECRET_123')
+  })
+
+  it('suppresses errors after run cancellation', async () => {
+    const ids = await createProjectAndModel()
+    fetchImpl.mockRejectedValue(new Error('Authorization: Bearer secret'))
+    canAcceptChunk.mockResolvedValueOnce(true).mockResolvedValue(false)
+    const emit = vi.fn()
+
+    await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [] }, emit)
+
+    expect(emit).not.toHaveBeenCalled()
   })
 })

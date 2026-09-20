@@ -13,6 +13,21 @@ const DEFAULT_BASE_URL: Record<ModelProviderPreset, string> = {
   deepseek: 'https://api.deepseek.com',
 }
 
+const MODEL_ERROR_MESSAGES = {
+  network: '模型网络请求失败，请稍后重试',
+  http: '模型服务请求失败，请检查配置后重试',
+  malformed: '模型响应格式异常，请稍后重试',
+  provider: '模型服务返回错误，请稍后重试',
+  cancelled: '模型请求已取消',
+  credential: 'API 密钥不能包含换行符',
+} as const
+
+class ModelClientError extends Error {
+  constructor(readonly category: keyof typeof MODEL_ERROR_MESSAGES) {
+    super(MODEL_ERROR_MESSAGES[category])
+  }
+}
+
 export interface CryptoAdapter {
   isEncryptionAvailable(): boolean
   encryptString(value: string): Buffer
@@ -44,6 +59,7 @@ export function createModelClient({
 }: ModelClientDependencies): ModelClient {
   return {
     async saveModelConfig(input: SaveModelConfigInput): Promise<ModelConfigSummary> {
+      validateApiKey(input.apiKey)
       if (!crypto.isEncryptionAvailable()) throw new Error('Secure credential storage is unavailable')
       const baseUrl = normalizeBaseUrl(input.baseUrl || DEFAULT_BASE_URL[input.providerPreset])
       const encryptedApiKey = crypto.encryptString(input.apiKey).toString('base64')
@@ -71,6 +87,7 @@ export function createModelClient({
 
       try {
         const apiKey = crypto.decryptString(Buffer.from(modelConfig.encryptedApiKey, 'base64'))
+        validateApiKey(apiKey)
         const response = await fetchImpl(`${normalizeBaseUrl(modelConfig.baseUrl)}/chat/completions`, {
           method: 'POST',
           headers: {
@@ -83,14 +100,16 @@ export function createModelClient({
             stream: true,
           }),
         })
-        if (!response.ok) throw new Error(`Model request failed with status ${response.status}`)
-        if (!response.body) throw new Error('Model response did not include a stream')
+        if (!response.ok) throw new ModelClientError('http')
+        if (!response.body) throw new ModelClientError('malformed')
         await consumeEventStream(response.body, input.taskRunId, taskRuns, onEvent)
       } catch (error) {
         await emitIfAccepted(taskRuns, input.taskRunId, onEvent, {
           taskRunId: input.taskRunId,
           type: 'error',
-          content: error instanceof Error ? error.message : 'Model request failed',
+          content: MODEL_ERROR_MESSAGES[error instanceof ModelClientError
+            ? error.category
+            : error instanceof Error && error.name === 'AbortError' ? 'cancelled' : 'network'],
         })
       }
     },
@@ -124,8 +143,14 @@ async function consumeEventStream(
         await reader.cancel()
         return
       }
-      const parsed = JSON.parse(data) as { choices?: Array<{ delta?: { content?: unknown } }>; error?: { message?: unknown } }
-      if (parsed.error) throw new Error(typeof parsed.error.message === 'string' ? parsed.error.message : 'Model stream failed')
+      let parsed: { choices?: Array<{ delta?: { content?: unknown } }>; error?: unknown }
+      try {
+        parsed = JSON.parse(data)
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new ModelClientError('malformed')
+      } catch {
+        throw new ModelClientError('malformed')
+      }
+      if (parsed.error) throw new ModelClientError('provider')
       const content = parsed.choices?.[0]?.delta?.content
       if (typeof content === 'string' && content.length > 0) {
         const accepted = await emitIfAccepted(taskRuns, taskRunId, onEvent, { taskRunId, type: 'delta', content })
@@ -156,6 +181,10 @@ async function emitIfAccepted(
 
 function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, '')
+}
+
+function validateApiKey(apiKey: string): void {
+  if (/[\r\n]/.test(apiKey)) throw new ModelClientError('credential')
 }
 
 function summarize(config: ModelConfigRecord): ModelConfigSummary {

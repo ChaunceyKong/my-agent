@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createTaskRunService, type TaskRunService } from '../../electron/core/task-run-service'
+import { createModelClient } from '../../electron/core/model-client'
+import { createCloudConsentService } from '../../electron/core/cloud-consent-service'
 import { createDatabase, type DatabaseClient } from '../../electron/database/client'
 import { createRepositories, type Repositories } from '../../electron/database/repositories'
 import { registerHandlers } from '../../electron/ipc/register-handlers'
@@ -84,17 +86,24 @@ describe('task run service', () => {
 
   it('persists the CEO message, running task run, and audit event from message:send', async () => {
     const channelId = await createChannel()
+    const modelClient = createModelClient({ repositories, taskRuns, consent: createCloudConsentService(repositories),
+      crypto: { isEncryptionAvailable: () => true, encryptString: (value) => Buffer.from(value), decryptString: (value) => value.toString() },
+      fetch: () => new Promise<Response>(() => {}),
+    })
+    const model = await modelClient.saveModelConfig({ providerPreset: 'deepseek', modelName: 'test-model', apiKey: 'test-key' })
+    await modelClient.recordCloudConsent((await repositories.getChannel(channelId))!.projectId, model.id)
     const handlers = new Map<string, (event: unknown, ...args: any[]) => unknown>()
     registerHandlers({
       ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
       dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
       repositories,
       taskRuns,
+      modelClient,
     })
 
-    const result = await handlers.get(IpcChannel.MessageSend)?.(undefined, {
+    const result = await handlers.get(IpcChannel.MessageSend)?.({ sender: { isDestroyed: () => false, send: () => {} } }, {
       channelId,
-      modelConfigId: 'model-1',
+      modelConfigId: model.id,
       content: '请分析',
     })
 
@@ -103,7 +112,7 @@ describe('task run service', () => {
     expect(await repositories.listMessages(channelId)).toEqual([
       expect.objectContaining({ channelId, taskRunId, role: 'ceo', authorName: 'CEO', content: '请分析' }),
     ])
-    expect(await repositories.getTaskRun(taskRunId)).toMatchObject({ channelId, modelConfigId: 'model-1', status: 'running' })
+    expect(await repositories.getTaskRun(taskRunId)).toMatchObject({ channelId, modelConfigId: model.id, status: 'running' })
     expect(await repositories.listAuditEvents(channelId)).toEqual([
       expect.objectContaining({ channelId, taskRunId, eventType: 'task_run_started' }),
     ])

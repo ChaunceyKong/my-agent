@@ -136,6 +136,17 @@ describe('model configuration', () => {
 })
 
 describe('OpenAI-compatible streaming', () => {
+  it('waits for async event persistence before delivering the next event', async () => {
+    const ids = await createProjectAndModel()
+    fetchImpl.mockResolvedValue(streamResponse(['data: {"choices":[{"delta":{"content":"你好"}}]}\n\ndata: [DONE]\n\n']))
+    const delivered: string[] = []
+    await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [] }, async (event) => {
+      if (event.type === 'delta') await new Promise((resolve) => setTimeout(resolve, 15))
+      delivered.push(event.type)
+    })
+    expect(delivered).toEqual(['delta', 'complete'])
+  })
+
   it('requires persisted consent before making a cloud request', async () => {
     const { project } = await repositories.createProjectWithInitialChannel({ name: '未同意', workspacePath: testDirectory })
     const model = await client.saveModelConfig({ providerPreset: 'openai', modelName: 'gpt-test', apiKey: 'secret' })
@@ -232,7 +243,7 @@ describe('OpenAI-compatible streaming', () => {
     fetchImpl.mockImplementation(response)
     const events: StreamEvent[] = []
 
-    await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [] }, (event) => events.push(event))
+    await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [] }, (event) => { events.push(event) })
 
     expect(JSON.stringify(events)).not.toContain('secret')
     expect(events).toEqual([{ taskRunId: 'run-1', type: 'error', content: message }])
@@ -248,7 +259,7 @@ describe('OpenAI-compatible streaming', () => {
     await client.recordCloudConsent(project.id, model.id)
     const events: StreamEvent[] = []
 
-    await client.streamChat({ projectId: project.id, modelConfigId: model.id, taskRunId: 'run-1', messages: [] }, (event) => events.push(event))
+    await client.streamChat({ projectId: project.id, modelConfigId: model.id, taskRunId: 'run-1', messages: [] }, (event) => { events.push(event) })
 
     expect(fetchImpl).not.toHaveBeenCalled()
     expect(events).toEqual([{ taskRunId: 'run-1', type: 'error', content: 'API 密钥不能包含换行符' }])

@@ -8,4 +8,8 @@ export enum IpcChannel {
   ModelSave = 'model:save',
   ModelList = 'model:list',
   MessageStream = 'message:stream',
+  MessageList = 'message:list',
+  TaskRunList = 'task-run:list',
+  CloudConsentHas = 'cloud-consent:has',
+  CloudConsentGrant = 'cloud-consent:grant',
 }

@@ -36,9 +36,11 @@ export interface Repositories {
   listProjects(): Promise<Project[]>
   createProjectWithInitialChannel(input: CreateProjectInput): Promise<{ project: Project; channel: Channel }>
   listChannels(projectId: string): Promise<Channel[]>
+  getChannel(id: string): Promise<Channel | undefined>
   createChannel(input: CreateChannelInput): Promise<Channel>
   createStartedTaskRun(input: StartTaskRunInput): Promise<TaskRun>
   getTaskRun(id: string): Promise<TaskRun | undefined>
+  listTaskRuns(channelId: string): Promise<TaskRun[]>
   transitionTaskRun(id: string, from: 'running', to: 'completed' | 'failed' | 'cancelled', metadata: Record<string, string>): Promise<TaskRun | undefined>
   recoverRunningTaskRuns(): Promise<number>
   listMessages(channelId: string): Promise<Message[]>
@@ -102,6 +104,15 @@ export function createRepositories(client: DatabaseClient): Repositories {
       }
       client.db.insert(channels).values(channel).run()
       return channel
+    },
+
+    async getChannel(id: string): Promise<Channel | undefined> {
+      return client.db.select().from(channels).where(eq(channels.id, id)).get()
+    },
+
+    async listTaskRuns(channelId: string): Promise<TaskRun[]> {
+      return client.db.select().from(taskRuns).where(eq(taskRuns.channelId, channelId))
+        .orderBy(asc(taskRuns.createdAt), asc(taskRuns.id)).all()
     },
 
     async createStartedTaskRun(input: StartTaskRunInput): Promise<TaskRun> {
@@ -173,6 +184,13 @@ export function createRepositories(client: DatabaseClient): Repositories {
           .returning()
           .get()
         if (!next) return undefined
+        if (to === 'completed') {
+          tx.insert(messages).values({
+            id: randomUUID(), channelId: next.channelId, taskRunId: next.id,
+            role: 'agent', authorName: 'AI 助手', content: metadata.result ?? '',
+            status: 'completed', createdAt: timestamp,
+          }).run()
+        }
         tx.insert(auditEvents).values({
           id: randomUUID(),
           channelId: next.channelId,

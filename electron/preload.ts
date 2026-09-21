@@ -23,8 +23,16 @@ const api: AgentTeamApi = {
     save: (input: SaveModelConfigInput) => ipcRenderer.invoke(IpcChannel.ModelSave, input),
   },
   tasks: {
+    list: (channelId: string) => ipcRenderer.invoke(IpcChannel.TaskRunList, channelId),
     send: (input: SendMessageInput) => ipcRenderer.invoke(IpcChannel.MessageSend, input),
     cancel: (taskRunId: string) => ipcRenderer.invoke(IpcChannel.TaskRunCancel, taskRunId),
+  },
+  messages: {
+    list: (channelId: string) => ipcRenderer.invoke(IpcChannel.MessageList, channelId),
+  },
+  consent: {
+    has: (projectId: string, modelConfigId: string) => ipcRenderer.invoke(IpcChannel.CloudConsentHas, projectId, modelConfigId),
+    grant: (projectId: string, modelConfigId: string) => ipcRenderer.invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId),
   },
   events: {
     onStream: (listener) => {

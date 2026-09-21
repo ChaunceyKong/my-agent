@@ -120,7 +120,15 @@ export interface AgentTeamApi {
     list(): Promise<ModelConfigSummary[]>
     save(input: SaveModelConfigInput): Promise<ModelConfigSummary>
   }
+  messages: {
+    list(channelId: string): Promise<Message[]>
+  }
+  consent: {
+    has(projectId: string, modelConfigId: string): Promise<boolean>
+    grant(projectId: string, modelConfigId: string): Promise<void>
+  }
   tasks: {
+    list(channelId: string): Promise<TaskRun[]>
     send(input: SendMessageInput): Promise<{ taskRunId: string }>
     cancel(taskRunId: string): Promise<void>
   }

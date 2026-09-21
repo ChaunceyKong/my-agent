@@ -39,7 +39,7 @@ export interface ModelClient {
   listModelConfigs(): Promise<ModelConfigSummary[]>
   recordCloudConsent(projectId: string, modelConfigId: string): Promise<void>
   requireCloudConsent(projectId: string, modelConfigId: string): Promise<void>
-  streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void): Promise<void>
+  streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void | Promise<void>): Promise<void>
 }
 
 export interface ModelClientDependencies {
@@ -79,7 +79,7 @@ export function createModelClient({
     recordCloudConsent: (projectId, modelConfigId) => consent.recordCloudConsent(projectId, modelConfigId),
     requireCloudConsent: (projectId, modelConfigId) => consent.requireCloudConsent(projectId, modelConfigId),
 
-    async streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void): Promise<void> {
+    async streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void | Promise<void>): Promise<void> {
       if (!await taskRuns.canAcceptChunk(input.taskRunId)) return
       await consent.requireCloudConsent(input.projectId, input.modelConfigId)
       const modelConfig = await repositories.getModelConfig(input.modelConfigId)
@@ -120,7 +120,7 @@ async function consumeEventStream(
   body: ReadableStream<Uint8Array>,
   taskRunId: string,
   taskRuns: { canAcceptChunk(id: string): Promise<boolean> },
-  onEvent: (event: StreamEvent) => void,
+  onEvent: (event: StreamEvent) => void | Promise<void>,
 ): Promise<void> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
@@ -171,11 +171,11 @@ async function consumeEventStream(
 async function emitIfAccepted(
   taskRuns: { canAcceptChunk(id: string): Promise<boolean> },
   taskRunId: string,
-  onEvent: (event: StreamEvent) => void,
+  onEvent: (event: StreamEvent) => void | Promise<void>,
   event: StreamEvent,
 ): Promise<boolean> {
   if (!await taskRuns.canAcceptChunk(taskRunId)) return false
-  onEvent(event)
+  await onEvent(event)
   return true
 }
 

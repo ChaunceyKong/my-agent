@@ -1,0 +1,90 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { createDatabase, type DatabaseClient } from '../../electron/database/client'
+import { createRepositories, type Repositories } from '../../electron/database/repositories'
+import { createTaskRunService } from '../../electron/core/task-run-service'
+import { createCloudConsentService } from '../../electron/core/cloud-consent-service'
+import { createModelClient } from '../../electron/core/model-client'
+import { registerHandlers } from '../../electron/ipc/register-handlers'
+import { IpcChannel } from '../../shared/ipc-channels'
+
+let directory: string
+let database: DatabaseClient
+let repositories: Repositories
+let handlers: Map<string, (event: unknown, ...args: any[]) => any>
+let fetchImpl: ReturnType<typeof vi.fn>
+let sender: { send: ReturnType<typeof vi.fn>; isDestroyed: () => boolean }
+let channelId: string
+let projectId: string
+let modelConfigId: string
+
+beforeEach(async () => {
+  directory = await mkdtemp(join(tmpdir(), 'workbench-ipc-'))
+  database = createDatabase({ filePath: join(directory, 'test.sqlite') })
+  repositories = createRepositories(database)
+  const taskRuns = createTaskRunService(repositories)
+  fetchImpl = vi.fn()
+  const modelClient = createModelClient({ repositories, taskRuns, consent: createCloudConsentService(repositories), fetch: fetchImpl,
+    crypto: { isEncryptionAvailable: () => true, encryptString: (key) => Buffer.from(key), decryptString: (key) => key.toString() } })
+  const created = await repositories.createProjectWithInitialChannel({ name: '测试', workspacePath: directory })
+  channelId = created.channel.id
+  projectId = created.project.id
+  modelConfigId = (await modelClient.saveModelConfig({ providerPreset: 'deepseek', modelName: 'test-model', apiKey: 'PRIVATE_KEY' })).id
+  handlers = new Map()
+  sender = { send: vi.fn(), isDestroyed: () => false }
+  registerHandlers({ ipcMain: { handle: (name, handler) => handlers.set(name, handler) }, dialog: { showOpenDialog: vi.fn() }, repositories, taskRuns, modelClient })
+})
+afterEach(async () => { database.close(); await rm(directory, { recursive: true, force: true }) })
+
+const invoke = (name: IpcChannel, ...args: any[]) => handlers.get(name)!({ sender }, ...args)
+const send = () => invoke(IpcChannel.MessageSend, { channelId, modelConfigId, content: '你好' })
+
+it('requires pair-specific Main consent before creating a run or requesting the model', async () => {
+  expect(await invoke(IpcChannel.CloudConsentHas, projectId, modelConfigId)).toBe(false)
+  await expect(send()).rejects.toThrow()
+  expect(fetchImpl).not.toHaveBeenCalled()
+  expect(await repositories.listMessages(channelId)).toEqual([])
+  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId)
+  expect(await invoke(IpcChannel.CloudConsentHas, projectId, modelConfigId)).toBe(true)
+})
+
+it('streams from Main, persists reply and terminal state, and returns only safe channel data', async () => {
+  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId)
+  fetchImpl.mockResolvedValue(new Response('data: {"choices":[{"delta":{"content":"你好，主理人"}}]}\n\ndata: [DONE]\n\n'))
+  const { taskRunId } = await send()
+  await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, { taskRunId, type: 'complete' }))
+  const messages = await invoke(IpcChannel.MessageList, channelId)
+  expect(messages.map((message: any) => message.content)).toEqual(['你好', '你好，主理人'])
+  expect(await invoke(IpcChannel.TaskRunList, channelId)).toEqual([expect.objectContaining({ id: taskRunId, status: 'completed' })])
+  const summaries = await invoke(IpcChannel.ModelList)
+  expect(JSON.stringify({ messages, summaries, events: sender.send.mock.calls })).not.toContain('PRIVATE_KEY')
+  expect(summaries[0]).not.toHaveProperty('encryptedApiKey')
+  const other = await repositories.createChannel({ projectId, name: '第二群' })
+  expect(await invoke(IpcChannel.MessageList, other.id)).toEqual([])
+})
+
+it('rejects duplicate channel sends and suppresses stream events after cancellation', async () => {
+  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId)
+  let resolveFetch!: (response: Response) => void
+  fetchImpl.mockImplementation(() => new Promise<Response>((resolve) => { resolveFetch = resolve }))
+  const { taskRunId } = await send()
+  await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalled())
+  await expect(send()).rejects.toThrow()
+  await invoke(IpcChannel.TaskRunCancel, taskRunId)
+  resolveFetch(new Response('data: {"choices":[{"delta":{"content":"late"}}]}\n\ndata: [DONE]\n\n'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  expect(sender.send).not.toHaveBeenCalled()
+  expect(await repositories.getTaskRun(taskRunId)).toMatchObject({ status: 'cancelled' })
+  expect(await repositories.listMessages(channelId)).toHaveLength(1)
+})
+
+it('persists model failure with sanitized errors', async () => {
+  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId)
+  fetchImpl.mockRejectedValue(new Error('PRIVATE_KEY'))
+  const { taskRunId } = await send()
+  await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, expect.objectContaining({ taskRunId, type: 'error' })))
+  expect(await repositories.getTaskRun(taskRunId)).toMatchObject({ status: 'failed' })
+  expect(JSON.stringify(sender.send.mock.calls)).not.toContain('PRIVATE_KEY')
+})

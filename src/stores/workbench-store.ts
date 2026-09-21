@@ -35,6 +35,24 @@ export function createWorkbenchStore(api: AgentTeamApi) {
   const conversation = (id: string) => state.conversations[id] ?? emptyConversation
   const updateConversation = (id: string, patch: Partial<Conversation>) => update({ conversations: { ...state.conversations, [id]: { ...conversation(id), ...patch } } })
 
+  async function reconcileCompletedReply(channelId: string, taskRunId: string) {
+    const version = lifecycle
+    try {
+      const persisted = (await api.messages.list(channelId)).find((message) => message.taskRunId === taskRunId && message.role === 'agent' && message.status === 'completed')
+      if (version !== lifecycle) return
+      if (!persisted) throw new Error('Completed reply missing')
+      const current = conversation(channelId)
+      if (!current.runs.some((run) => run.id === taskRunId && run.status === 'completed')) return
+      // Replace only this run's draft reply; a later send may already be streaming.
+      const messages = current.messages.filter((message) => !(message.taskRunId === taskRunId && message.role === 'agent'))
+      const requestIndex = messages.findIndex((message) => message.taskRunId === taskRunId && message.role === 'ceo')
+      messages.splice(requestIndex < 0 ? messages.length : requestIndex + 1, 0, persisted)
+      updateConversation(channelId, { messages })
+    } catch {
+      if (version === lifecycle) updateConversation(channelId, { loaded: false, error: '完整回复读取失败，请重新选择群聊重试' })
+    }
+  }
+
   function onStream(event: StreamEvent) {
     const entry = Object.entries(state.conversations).find(([, value]) => value.runs.some((run) => run.id === event.taskRunId))
     if (!entry) {
@@ -44,13 +62,18 @@ export function createWorkbenchStore(api: AgentTeamApi) {
     }
     const [channelId, current] = entry
     if (!current.runs.some((run) => run.id === event.taskRunId && run.status === 'running')) return
+    if (event.type === 'complete') {
+      updateConversation(channelId, { runs: current.runs.map((run) => run.id === event.taskRunId ? { ...run, status: 'completed', errorMessage: null } : run) })
+      void reconcileCompletedReply(channelId, event.taskRunId)
+      return
+    }
     const replyId = `reply-${event.taskRunId}`
     const existing = current.messages.find((message) => message.taskRunId === event.taskRunId && message.role === 'agent')
     const reply: Message = existing ?? { id: replyId, channelId, taskRunId: event.taskRunId, role: 'agent', authorName: 'AI 助手', content: '', status: 'streaming', createdAt: new Date().toISOString() }
     const messages = current.messages.filter((message) => message.id !== reply.id)
-    messages.push({ ...reply, content: reply.content + (event.type === 'delta' ? event.content ?? '' : ''), status: event.type === 'delta' ? 'streaming' : event.type === 'complete' ? 'completed' : 'failed' })
+    messages.push({ ...reply, content: reply.content + (event.type === 'delta' ? event.content ?? '' : ''), status: event.type === 'delta' ? 'streaming' : 'failed' })
     updateConversation(channelId, { messages,
-      runs: current.runs.map((run) => run.id !== event.taskRunId || event.type === 'delta' ? run : { ...run, status: event.type === 'complete' ? 'completed' : 'failed', errorMessage: event.type === 'error' ? event.content ?? '模型请求失败，请重试' : null }),
+      runs: current.runs.map((run) => run.id !== event.taskRunId || event.type === 'delta' ? run : { ...run, status: 'failed', errorMessage: event.content ?? '模型请求失败，请重试' }),
       error: event.type === 'error' ? event.content ?? '模型请求失败，请重试' : current.error,
     })
   }
@@ -65,8 +88,16 @@ export function createWorkbenchStore(api: AgentTeamApi) {
     try {
       const [messages, runs] = await Promise.all([api.messages.list(channelId), api.tasks.list(channelId)])
       if (version === lifecycle) {
-        updateConversation(channelId, { messages, runs, loaded: true, loading: false })
-        loadingEvents.get(channelId)?.filter((event) => runs.some((run) => run.id === event.taskRunId && run.status === 'running')).forEach(onStream)
+        const buffered = loadingEvents.get(channelId) ?? []
+        const completedReplies = new Set(messages.filter((message) => message.role === 'agent' && message.status === 'completed').map((message) => message.taskRunId))
+        const completedEvents = new Set(buffered.filter((event) => event.type === 'complete').map((event) => event.taskRunId))
+        const reconciledRuns = runs.map((run): TaskRun => completedReplies.has(run.id) || (run.status === 'running' && completedEvents.has(run.id)) ? { ...run, status: 'completed' } : run)
+        updateConversation(channelId, { messages, runs: reconciledRuns, loaded: true, loading: false })
+        // Completed persisted replies win over every buffered delta, even if the run snapshot is older.
+        buffered.filter((event) => reconciledRuns.some((run) => run.id === event.taskRunId && run.status === 'running')).forEach(onStream)
+        for (const run of reconciledRuns) {
+          if (run.status === 'completed' && !completedReplies.has(run.id)) void reconcileCompletedReply(channelId, run.id)
+        }
       }
     } catch {
       if (version === lifecycle) updateConversation(channelId, { loading: false, error: '群聊记录加载失败，请重新选择群聊重试' })

@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event'
 import '@testing-library/jest-dom/vitest'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import App from './App'
-import type { AgentTeamApi, Channel, Project, StreamEvent } from '../shared/types'
+import type { AgentTeamApi, Channel, Message, Project, StreamEvent, TaskRun } from '../shared/types'
 
 const project: Project = { id: 'p1', name: '内容矩阵', workspacePath: 'C:/work/content', icon: null, createdAt: '', updatedAt: '' }
 const channel: Channel = { id: 'c1', projectId: 'p1', name: '主线任务协同群', icon: null, createdAt: '', updatedAt: '' }
@@ -28,6 +28,14 @@ beforeEach(() => {
   window.agentTeam = api
 })
 afterEach(cleanup)
+
+function persistedReply(taskRunId: string, content: string): Message {
+  return { id: `persisted-${taskRunId}`, channelId: 'c1', taskRunId, role: 'agent', authorName: 'AI 助手', content, status: 'completed', createdAt: '2026-09-21T00:00:00Z' }
+}
+
+function persistedRun(status: TaskRun['status']): TaskRun {
+  return { id: 'history-run', channelId: 'c1', modelConfigId: 'm1', status, createdAt: '', startedAt: null, finishedAt: null, errorMessage: null }
+}
 
 async function send() {
   await screen.findByRole('heading', { name: channel.name })
@@ -54,7 +62,8 @@ it('appends only matching live deltas and rejects terminal or unknown events', a
     emitStream({ taskRunId: 'run-1', type: 'delta', content: '正在分析' })
   })
   expect(screen.getByText('正在分析')).toBeVisible()
-  act(() => {
+  vi.mocked(api.messages.list).mockResolvedValue([persistedReply('run-1', '正在分析')])
+  await act(async () => {
     emitStream({ taskRunId: 'run-1', type: 'complete' })
     emitStream({ taskRunId: 'run-1', type: 'delta', content: '迟到内容' })
   })
@@ -64,6 +73,7 @@ it('appends only matching live deltas and rejects terminal or unknown events', a
 
 it('buffers early events until the returned run id is known', async () => {
   vi.mocked(api.tasks.send).mockImplementation(async () => {
+    vi.mocked(api.messages.list).mockResolvedValue([persistedReply('run-1', '快速响应')])
     emitStream({ taskRunId: 'unknown', type: 'delta', content: '丢弃内容' })
     emitStream({ taskRunId: 'run-1', type: 'delta', content: '快速响应' })
     emitStream({ taskRunId: 'run-1', type: 'complete' })
@@ -195,7 +205,7 @@ it('does not replace the selected project with a stale channel-list response', a
 
 it('reconciles stream events that arrive while loading a persisted running task', async () => {
   let resolveMessages!: (value: []) => void
-  vi.mocked(api.messages.list).mockImplementation(() => new Promise((resolve) => { resolveMessages = resolve }))
+  vi.mocked(api.messages.list).mockImplementationOnce(() => new Promise((resolve) => { resolveMessages = resolve })).mockResolvedValue([persistedReply('resumed-view-run', '加载期间的回复')])
   vi.mocked(api.tasks.list).mockResolvedValue([{ id: 'resumed-view-run', channelId: 'c1', modelConfigId: 'm1', status: 'running', createdAt: '', startedAt: null, finishedAt: null, errorMessage: null }])
   render(<App />)
   await screen.findByRole('heading', { name: channel.name })
@@ -205,5 +215,50 @@ it('reconciles stream events that arrive while loading a persisted running task'
   })
   await act(async () => resolveMessages([]))
   expect(screen.getByText('加载期间的回复')).toBeVisible()
+  expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument()
+})
+
+it.each(['completed', 'running'] as const)('reads the durable reply when completion races a %s history snapshot', async (status) => {
+  let resolveRuns!: (runs: TaskRun[]) => void
+  vi.mocked(api.messages.list).mockResolvedValueOnce([]).mockResolvedValue([persistedReply('history-run', '加载竞态中的完整回复')])
+  vi.mocked(api.tasks.list).mockImplementation(() => new Promise((resolve) => { resolveRuns = resolve }))
+  render(<App />)
+  await screen.findByRole('heading', { name: channel.name })
+  act(() => {
+    emitStream({ taskRunId: 'history-run', type: 'delta', content: '末尾片段' })
+    emitStream({ taskRunId: 'history-run', type: 'complete' })
+  })
+  await act(async () => resolveRuns([persistedRun(status)]))
+  expect(await screen.findByText('加载竞态中的完整回复')).toBeVisible()
+  expect(screen.queryByText('末尾片段')).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument()
+})
+
+it('replaces the streamed tail with the durable full reply after reloading mid-generation', async () => {
+  vi.mocked(api.tasks.list).mockResolvedValue([persistedRun('running')])
+  render(<App />)
+  await screen.findByRole('button', { name: '停止生成' })
+  act(() => emitStream({ taskRunId: 'history-run', type: 'delta', content: '只收到末尾' }))
+  expect(screen.getByText('只收到末尾')).toBeVisible()
+  vi.mocked(api.messages.list).mockResolvedValue([persistedReply('history-run', '刷新前的开头，加上只收到末尾')])
+  act(() => {
+    emitStream({ taskRunId: 'history-run', type: 'complete' })
+    emitStream({ taskRunId: 'history-run', type: 'delta', content: '迟到追加' })
+  })
+  expect(await screen.findByText('刷新前的开头，加上只收到末尾')).toBeVisible()
+  expect(screen.queryByText('只收到末尾')).not.toBeInTheDocument()
+  expect(screen.queryByText(/迟到追加/)).not.toBeInTheDocument()
+})
+
+it('never appends buffered deltas onto an already persisted completed reply', async () => {
+  let resolveRuns!: (runs: TaskRun[]) => void
+  vi.mocked(api.messages.list).mockResolvedValue([persistedReply('history-run', '已持久化的完整回复')])
+  vi.mocked(api.tasks.list).mockImplementation(() => new Promise((resolve) => { resolveRuns = resolve }))
+  render(<App />)
+  await screen.findByRole('heading', { name: channel.name })
+  act(() => emitStream({ taskRunId: 'history-run', type: 'delta', content: '重复尾部' }))
+  await act(async () => resolveRuns([persistedRun('running')]))
+  expect(screen.getByText('已持久化的完整回复')).toBeVisible()
+  expect(screen.queryByText(/重复尾部/)).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument()
 })

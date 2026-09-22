@@ -43,6 +43,13 @@ async function createChannel(): Promise<string> {
 }
 
 describe('task run service', () => {
+  it('rejects chunks for failed and unknown runs', async () => {
+    const run = await taskRuns.startTaskRun(await createChannel(), 'model-1', '失败测试')
+    await repositories.transitionTaskRun(run.id, 'running', 'failed', { errorMessage: '模型请求失败' })
+    expect(await taskRuns.canAcceptChunk(run.id)).toBe(false)
+    expect(await taskRuns.canAcceptChunk('unknown-run')).toBe(false)
+  })
+
   it('changes running runs to paused during restart recovery', async () => {
     const channelId = await createChannel()
     const run = await taskRuns.startTaskRun(channelId, 'model-1', '请分析')

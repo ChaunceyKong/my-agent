@@ -7,9 +7,11 @@ export interface TaskRunService {
   finishTaskRun(id: string, result: string): Promise<TaskRun>
   recoverInterruptedTaskRuns(): Promise<number>
   canAcceptChunk(id: string): Promise<boolean>
+  onCancelled(id: string, listener: () => void): () => void
 }
 
 export function createTaskRunService(repositories: Repositories): TaskRunService {
+  const cancellationListeners = new Map<string, Set<() => void>>()
   return {
     startTaskRun: (channelId, modelConfigId, content) => repositories.createStartedTaskRun({
       channelId,
@@ -18,7 +20,20 @@ export function createTaskRunService(repositories: Repositories): TaskRunService
     }),
 
     async cancelTaskRun(id: string): Promise<TaskRun> {
-      return transition(repositories, id, 'cancelled', {})
+      const run = await transition(repositories, id, 'cancelled', {})
+      for (const listener of cancellationListeners.get(id) ?? []) listener()
+      cancellationListeners.delete(id)
+      return run
+    },
+
+    onCancelled(id, listener) {
+      const listeners = cancellationListeners.get(id) ?? new Set<() => void>()
+      listeners.add(listener)
+      cancellationListeners.set(id, listeners)
+      return () => {
+        listeners.delete(listener)
+        if (listeners.size === 0) cancellationListeners.delete(id)
+      }
     },
 
     async finishTaskRun(id: string, result: string): Promise<TaskRun> {

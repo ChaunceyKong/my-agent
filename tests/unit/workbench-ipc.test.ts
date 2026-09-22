@@ -52,7 +52,7 @@ it('requires pair-specific Main consent before creating a run or requesting the 
 
 it('streams from Main, persists reply and terminal state, and returns only safe channel data', async () => {
   await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId)
-  fetchImpl.mockResolvedValue(new Response('data: {"choices":[{"delta":{"content":"你好，主理人"}}]}\n\ndata: [DONE]\n\n'))
+  fetchImpl.mockResolvedValue(new Response('data: {"choices":[{"delta":{"content":"你好，主理人"}}]}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
   const { taskRunId } = await send()
   await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, { taskRunId, type: 'complete' }))
   const messages = await invoke(IpcChannel.MessageList, channelId)
@@ -86,5 +86,28 @@ it('persists model failure with sanitized errors', async () => {
   const { taskRunId } = await send()
   await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, expect.objectContaining({ taskRunId, type: 'error' })))
   expect(await repositories.getTaskRun(taskRunId)).toMatchObject({ status: 'failed' })
+  expect(JSON.stringify(sender.send.mock.calls)).not.toContain('PRIVATE_KEY')
+})
+
+it.each([
+  ['empty body', '', 'text/event-stream'],
+  ['HTML', '<html>PRIVATE_KEY</html>', 'text/html'],
+  ['non-SSE', 'PRIVATE_KEY', 'text/event-stream'],
+  ['malformed JSON', 'data: {PRIVATE_KEY}\n\ndata: [DONE]\n\n', 'text/event-stream'],
+  ['invalid shape', 'data: {"choices":"PRIVATE_KEY"}\n\ndata: [DONE]\n\n', 'text/event-stream'],
+  ['invalid content', 'data: {"choices":[{"delta":{"content":42}}]}\n\ndata: [DONE]\n\n', 'text/event-stream'],
+  ['bare terminal', 'data: [DONE]\n\n', 'text/event-stream'],
+  ['partial delta EOF', 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n', 'text/event-stream'],
+  ['unterminated terminal', 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\ndata: [DONE]', 'text/event-stream'],
+])('fails %s without persisting a completed assistant reply', async (_name, body, contentType) => {
+  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId)
+  fetchImpl.mockResolvedValue(new Response(body, { headers: { 'content-type': contentType } }))
+  const { taskRunId } = await send()
+  await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, {
+    taskRunId, type: 'error', content: '模型响应格式异常，请稍后重试',
+  }))
+  expect(await repositories.getTaskRun(taskRunId)).toMatchObject({ status: 'failed', errorMessage: '模型响应格式异常，请稍后重试' })
+  expect(await repositories.listMessages(channelId)).toEqual([expect.objectContaining({ role: 'ceo', content: '你好' })])
+  expect(sender.send.mock.calls.some(([, event]) => event.type === 'complete')).toBe(false)
   expect(JSON.stringify(sender.send.mock.calls)).not.toContain('PRIVATE_KEY')
 })

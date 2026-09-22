@@ -16,15 +16,18 @@ interface RequestBody { model: string; messages: Array<{ role: string; content: 
 interface Provider {
   url: string
   requests: RequestBody[]
+  disconnectedRequests: number[]
   delta(content: string): void
   complete(): void
   fail(): void
+  truncate(): void
 }
 
 export const test = base.extend<{ desktop: Desktop; provider: Provider }>({
   provider: async ({}, use) => {
     let response: ServerResponse | undefined
     const requests: RequestBody[] = []
+    const disconnectedRequests: number[] = []
     const server = createServer(async (request, outgoing) => {
       if (request.method !== 'POST' || request.url !== '/v1/chat/completions') {
         outgoing.writeHead(404).end()
@@ -33,6 +36,8 @@ export const test = base.extend<{ desktop: Desktop; provider: Provider }>({
       let body = ''
       for await (const part of request) body += part
       requests.push(JSON.parse(body) as RequestBody)
+      const requestIndex = requests.length - 1
+      outgoing.on('close', () => { disconnectedRequests.push(requestIndex) })
       response = outgoing
     })
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -45,10 +50,11 @@ export const test = base.extend<{ desktop: Desktop; provider: Provider }>({
     }
     try {
       await use({
-        url: `http://127.0.0.1:${address.port}/v1`, requests,
+        url: `http://127.0.0.1:${address.port}/v1`, requests, disconnectedRequests,
         delta(content) { write(JSON.stringify({ choices: [{ delta: { content } }] })) },
         complete() { write('[DONE]'); response!.end() },
         fail() { response!.writeHead(401).end('private provider diagnostic') },
+        truncate() { response!.end() },
       })
     } finally {
       server.closeAllConnections()

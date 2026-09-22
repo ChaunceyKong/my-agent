@@ -32,7 +32,7 @@ beforeEach(async () => {
   client = createModelClient({
     repositories,
     consent: createCloudConsentService(repositories),
-    taskRuns: { canAcceptChunk },
+    taskRuns: { canAcceptChunk, onCancelled: () => () => {} },
     crypto: cryptoAdapter,
     fetch: fetchImpl,
   })
@@ -136,6 +136,22 @@ describe('model configuration', () => {
 })
 
 describe('OpenAI-compatible streaming', () => {
+  it('accepts role, content, finish and usage chunks before a framed terminal marker', async () => {
+    const ids = await createProjectAndModel()
+    fetchImpl.mockResolvedValue(streamResponse([
+      ': keepalive\r\n\r\ndata: {"choices":[{"delta":{"role":"assistant","content":""}}]}\r\n\r\n',
+      'data: {"choices":[{"delta":{"content":"你好"}}]}\r\n\r\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\r\n\r\n',
+      'data: {"choices":[],"usage":{"total_tokens":2}}\r\n\r\ndata: [DONE]\r\n\r\n',
+    ]))
+    const events: StreamEvent[] = []
+    await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [] }, (event) => { events.push(event) })
+    expect(events).toEqual([
+      { taskRunId: 'run-1', type: 'delta', content: '你好' },
+      { taskRunId: 'run-1', type: 'complete' },
+    ])
+  })
+
   it('waits for async event persistence before delivering the next event', async () => {
     const ids = await createProjectAndModel()
     fetchImpl.mockResolvedValue(streamResponse(['data: {"choices":[{"delta":{"content":"你好"}}]}\n\ndata: [DONE]\n\n']))
@@ -237,7 +253,7 @@ describe('OpenAI-compatible streaming', () => {
     ['provider error', () => streamResponse(['data: {"error":{"message":"Authorization: Bearer secret"}}\n\n']), '模型服务返回错误，请稍后重试'],
     ['reader failure', () => new Response(new ReadableStream({
       start(controller) { controller.error(new Error('Authorization: Bearer secret')) },
-    })), '模型网络请求失败，请稍后重试'],
+    }), { headers: { 'content-type': 'text/event-stream' } }), '模型网络请求失败，请稍后重试'],
   ])('never exposes credentials from %s', async (_name, response, message) => {
     const ids = await createProjectAndModel()
     fetchImpl.mockImplementation(response)

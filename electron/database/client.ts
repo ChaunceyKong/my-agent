@@ -15,10 +15,14 @@ export interface DatabaseOptions {
 
 export function createDatabase({ filePath }: DatabaseOptions): DatabaseClient {
   const sqlite = new Database(filePath)
-  migrate(sqlite)
-
-  return {
-    db: drizzle(sqlite, { schema }),
-    close: () => sqlite.close(),
+  try {
+    migrate(sqlite)
+    return {
+      db: drizzle(sqlite, { schema }),
+      close: () => sqlite.close(),
+    }
+  } catch (error) {
+    sqlite.close()
+    throw error
   }
 }

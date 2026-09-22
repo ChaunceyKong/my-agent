@@ -3,9 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "main": "./out/main/main.js",
+  "productName": "Agent Team Desktop",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "build:win": "npm run build && electron-builder --win",
     "test": "vitest run",
     "pretest:e2e": "npm run build",
     "test:e2e": "playwright test"
@@ -27,11 +29,35 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "35.7.5",
+    "electron-builder": "^26.0.12",
     "electron-vite": "^2.3.0",
     "jsdom": "^25.0.1",
     "playwright": "^1.49.1",
     "typescript": "^5.7.2",
     "vite": "^5.4.11",
     "vitest": "^2.1.8"
+  },
+  "build": {
+    "appId": "com.agentteam.desktop",
+    "asar": true,
+    "npmRebuild": false,
+    "directories": {
+      "output": "release/win-v0.1.0"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false
+    }
   }
 }

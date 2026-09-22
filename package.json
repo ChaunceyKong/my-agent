@@ -7,6 +7,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "test": "vitest run",
+    "pretest:e2e": "npm run build",
     "test:e2e": "playwright test"
   },
   "dependencies": {
@@ -25,7 +26,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^33.2.1",
+    "electron": "35.7.5",
     "electron-vite": "^2.3.0",
     "jsdom": "^25.0.1",
     "playwright": "^1.49.1",

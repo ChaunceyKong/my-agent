@@ -8,6 +8,10 @@ import { createDatabase } from './database/client'
 import { createRepositories } from './database/repositories'
 import { registerHandlers } from './ipc/register-handlers'
 
+// Honor Chromium's profile switch before opening SQLite or encrypted credentials.
+const userDataPath = app.commandLine.getSwitchValue('user-data-dir')
+if (userDataPath) app.setPath('userData', userDataPath)
+
 function createWindow(): void {
   const window = new BrowserWindow({
     width: 1440,
@@ -28,6 +32,7 @@ function createWindow(): void {
 
 app.whenReady().then(async () => {
   const database = createDatabase({ filePath: join(app.getPath('userData'), 'agent-team.sqlite') })
+  app.once('will-quit', () => database.close())
   const repositories = createRepositories(database)
   const taskRuns = createTaskRunService(repositories)
   const consent = createCloudConsentService(repositories)

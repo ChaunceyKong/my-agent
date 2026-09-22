@@ -4,5 +4,6 @@ export default defineConfig({
   esbuild: { jsx: 'automatic' },
   test: {
     globals: true,
+    include: ['src/**/*.test.{ts,tsx}', 'tests/unit/**/*.test.ts'],
   },
 })

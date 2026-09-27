@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
-import { primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core'
-import type { MessageRole, MessageStatus, ModelProviderPreset, TaskRunStatus } from '../../shared/types'
+import { sql } from 'drizzle-orm'
+import { integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
+import type { MessageRole, MessageStatus, ModelProviderPreset, TaskRunStatus, ToolPermissions } from '../../shared/types'
 
 export const projects = sqliteTable('projects', {
   id: text('id').primaryKey(),
@@ -67,7 +68,33 @@ export const cloudConsents = sqliteTable('cloud_consents', {
   consentedAt: text('consented_at').notNull(),
 }, (table) => [primaryKey({ columns: [table.projectId, table.modelConfigId] })])
 
-export const schema = { auditEvents, channels, cloudConsents, messages, modelConfigs, projects, taskRuns }
+export const agents = sqliteTable('agents', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  avatar: text('avatar'),
+  title: text('title').notNull(),
+  systemPrompt: text('system_prompt').notNull(),
+  modelConfigId: text('model_config_id').notNull().references(() => modelConfigs.id, { onDelete: 'restrict' }),
+  defaultToolPermissions: text('default_tool_permissions', { mode: 'json' }).$type<ToolPermissions>().notNull(),
+  isBuiltin: integer('is_builtin', { mode: 'boolean' }).notNull().default(false),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+})
+
+export const channelAgents = sqliteTable('channel_agents', {
+  channelId: text('channel_id').notNull().references(() => channels.id, { onDelete: 'cascade' }),
+  agentId: text('agent_id').notNull().references(() => agents.id, { onDelete: 'restrict' }),
+  isEnabled: integer('is_enabled', { mode: 'boolean' }).notNull().default(false),
+  modelConfigOverrideId: text('model_config_override_id').references(() => modelConfigs.id, { onDelete: 'restrict' }),
+  toolPermissionsOverride: text('tool_permissions_override', { mode: 'json' }).$type<ToolPermissions>(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.channelId, table.agentId] }),
+  uniqueIndex('channel_agents_one_enabled_idx').on(table.channelId).where(sql`${table.isEnabled} = 1`),
+])
+
+export const schema = { agents, auditEvents, channelAgents, channels, cloudConsents, messages, modelConfigs, projects, taskRuns }
 
 export function migrate(sqlite: Database.Database): void {
   sqlite.pragma('foreign_keys = ON')
@@ -152,5 +179,36 @@ export function migrate(sqlite: Database.Database): void {
       );
     `)
     sqlite.pragma('user_version = 3')
+  }
+
+  if (version < 4) {
+    sqlite.transaction(() => {
+      sqlite.exec(`
+        CREATE TABLE IF NOT EXISTS agents (
+          id TEXT PRIMARY KEY NOT NULL,
+          name TEXT NOT NULL,
+          avatar TEXT,
+          title TEXT NOT NULL,
+          system_prompt TEXT NOT NULL,
+          model_config_id TEXT NOT NULL REFERENCES model_configs(id) ON DELETE RESTRICT,
+          default_tool_permissions TEXT NOT NULL,
+          is_builtin INTEGER NOT NULL DEFAULT 0 CHECK (is_builtin IN (0, 1)),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS channel_agents (
+          channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+          agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+          is_enabled INTEGER NOT NULL DEFAULT 0 CHECK (is_enabled IN (0, 1)),
+          model_config_override_id TEXT REFERENCES model_configs(id) ON DELETE RESTRICT,
+          tool_permissions_override TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (channel_id, agent_id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS channel_agents_one_enabled_idx ON channel_agents(channel_id) WHERE is_enabled = 1;
+      `)
+      sqlite.pragma('user_version = 4')
+    })()
   }
 }

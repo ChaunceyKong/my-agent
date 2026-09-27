@@ -10,6 +10,18 @@ import type {
 } from '../shared/types'
 
 const api: AgentTeamApi = {
+  agents: {
+    list: () => ipcRenderer.invoke(IpcChannel.AgentList),
+    get: (id) => ipcRenderer.invoke(IpcChannel.AgentGet, id),
+    create: (input) => ipcRenderer.invoke(IpcChannel.AgentCreate, input),
+    update: (id, input) => ipcRenderer.invoke(IpcChannel.AgentUpdate, id, input),
+    remove: (id) => ipcRenderer.invoke(IpcChannel.AgentRemove, id),
+  },
+  channelAgents: {
+    list: (channelId) => ipcRenderer.invoke(IpcChannel.ChannelAgentList, channelId),
+    save: (input) => ipcRenderer.invoke(IpcChannel.ChannelAgentSave, input),
+    remove: (channelId, agentId) => ipcRenderer.invoke(IpcChannel.ChannelAgentRemove, channelId, agentId),
+  },
   projects: {
     list: () => ipcRenderer.invoke(IpcChannel.ProjectList),
     pickWorkspace: () => ipcRenderer.invoke(IpcChannel.ProjectPickWorkspace),

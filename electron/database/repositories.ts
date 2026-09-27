@@ -1,17 +1,21 @@
 import { randomUUID } from 'node:crypto'
 import { and, asc, eq } from 'drizzle-orm'
 import type {
+  Agent,
+  AgentEditorInput,
   AuditEvent,
   Channel,
+  ChannelAgent,
   CreateChannelInput,
   CreateProjectInput,
   Message,
   ModelProviderPreset,
   Project,
+  SaveChannelAgentInput,
   TaskRun,
 } from '../../shared/types'
 import type { DatabaseClient } from './client'
-import { auditEvents, channels, cloudConsents, messages, modelConfigs, projects, taskRuns } from './schema'
+import { agents, auditEvents, channelAgents, channels, cloudConsents, messages, modelConfigs, projects, taskRuns } from './schema'
 
 export interface StartTaskRunInput {
   channelId: string
@@ -33,6 +37,14 @@ export interface ModelConfigRecord extends SaveModelConfigRecordInput {
 }
 
 export interface Repositories {
+  listAgents(): Promise<Agent[]>
+  getAgent(id: string): Promise<Agent | undefined>
+  createAgent(input: AgentEditorInput): Promise<Agent>
+  updateAgent(id: string, input: AgentEditorInput): Promise<Agent | undefined>
+  removeAgent(id: string): Promise<void>
+  listChannelAgents(channelId: string): Promise<ChannelAgent[]>
+  saveChannelAgent(input: SaveChannelAgentInput): Promise<ChannelAgent>
+  removeChannelAgent(channelId: string, agentId: string): Promise<void>
   listProjects(): Promise<Project[]>
   createProjectWithInitialChannel(input: CreateProjectInput): Promise<{ project: Project; channel: Channel }>
   listChannels(projectId: string): Promise<Channel[]>
@@ -54,6 +66,52 @@ export interface Repositories {
 
 export function createRepositories(client: DatabaseClient): Repositories {
   return {
+    async listAgents(): Promise<Agent[]> {
+      return client.db.select().from(agents).orderBy(asc(agents.createdAt), asc(agents.id)).all()
+    },
+
+    async getAgent(id: string): Promise<Agent | undefined> {
+      return client.db.select().from(agents).where(eq(agents.id, id)).get()
+    },
+
+    async createAgent(input: AgentEditorInput): Promise<Agent> {
+      const timestamp = new Date().toISOString()
+      return client.db.insert(agents).values({ ...input, id: randomUUID(), isBuiltin: false, createdAt: timestamp, updatedAt: timestamp }).returning().get()
+    },
+
+    async updateAgent(id: string, input: AgentEditorInput): Promise<Agent | undefined> {
+      return client.db.update(agents).set({ ...input, updatedAt: new Date().toISOString() }).where(eq(agents.id, id)).returning().get()
+    },
+
+    async removeAgent(id: string): Promise<void> {
+      client.db.transaction((tx) => {
+        if (tx.select().from(channelAgents).where(eq(channelAgents.agentId, id)).get()) throw new Error('Agent 仍被群聊引用')
+        tx.delete(agents).where(eq(agents.id, id)).run()
+      })
+    },
+
+    async listChannelAgents(channelId: string): Promise<ChannelAgent[]> {
+      return client.db.select().from(channelAgents).where(eq(channelAgents.channelId, channelId))
+        .orderBy(asc(channelAgents.createdAt), asc(channelAgents.agentId)).all()
+    },
+
+    async saveChannelAgent(input: SaveChannelAgentInput): Promise<ChannelAgent> {
+      const timestamp = new Date().toISOString()
+      return client.db.transaction((tx) => {
+        if (input.isEnabled) {
+          tx.update(channelAgents).set({ isEnabled: false, updatedAt: timestamp })
+            .where(and(eq(channelAgents.channelId, input.channelId), eq(channelAgents.isEnabled, true))).run()
+        }
+        return tx.insert(channelAgents).values({ ...input, createdAt: timestamp, updatedAt: timestamp })
+          .onConflictDoUpdate({ target: [channelAgents.channelId, channelAgents.agentId], set: { ...input, updatedAt: timestamp } })
+          .returning().get()
+      })
+    },
+
+    async removeChannelAgent(channelId: string, agentId: string): Promise<void> {
+      client.db.delete(channelAgents).where(and(eq(channelAgents.channelId, channelId), eq(channelAgents.agentId, agentId))).run()
+    },
+
     async listProjects(): Promise<Project[]> {
       return client.db.select().from(projects).orderBy(asc(projects.createdAt), asc(projects.id)).all()
     },

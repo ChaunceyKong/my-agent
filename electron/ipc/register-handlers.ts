@@ -1,5 +1,6 @@
 import { IpcChannel } from '../../shared/ipc-channels'
-import type { CreateChannelInput, CreateProjectInput, SaveModelConfigInput, SendMessageInput, StreamEvent } from '../../shared/types'
+import type { AgentEditorInput, CreateChannelInput, CreateProjectInput, SaveChannelAgentInput, SaveModelConfigInput, SendMessageInput, StreamEvent } from '../../shared/types'
+import { createAgentService } from '../core/agent-service'
 import type { TaskRunService } from '../core/task-run-service'
 import type { ModelClient } from '../core/model-client'
 import { validateWorkspaceRoot } from '../core/workspace-validator'
@@ -23,6 +24,15 @@ export interface IpcHandlerDependencies {
 
 export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, modelClient }: IpcHandlerDependencies): void {
   const startingChannels = new Set<string>()
+  const agents = createAgentService(repositories)
+  ipcMain.handle(IpcChannel.AgentList, () => agents.list())
+  ipcMain.handle(IpcChannel.AgentGet, (_event, id: string) => agents.get(id))
+  ipcMain.handle(IpcChannel.AgentCreate, (_event, input: AgentEditorInput) => agents.create(input))
+  ipcMain.handle(IpcChannel.AgentUpdate, (_event, id: string, input: AgentEditorInput) => agents.update(id, input))
+  ipcMain.handle(IpcChannel.AgentRemove, (_event, id: string) => agents.remove(id))
+  ipcMain.handle(IpcChannel.ChannelAgentList, (_event, channelId: string) => agents.listChannelAgents(channelId))
+  ipcMain.handle(IpcChannel.ChannelAgentSave, (_event, input: SaveChannelAgentInput) => agents.saveChannelAgent(input))
+  ipcMain.handle(IpcChannel.ChannelAgentRemove, (_event, channelId: string, agentId: string) => agents.removeChannelAgent(channelId, agentId))
   ipcMain.handle(IpcChannel.ProjectList, () => repositories.listProjects())
   ipcMain.handle(IpcChannel.ProjectPickWorkspace, () => pickWorkspacePath(dialog))
   ipcMain.handle(IpcChannel.ProjectCreate, async (_event, input: CreateProjectInput) => {

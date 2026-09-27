@@ -13,4 +13,12 @@ export enum IpcChannel {
   TaskRunList = 'task-run:list',
   CloudConsentHas = 'cloud-consent:has',
   CloudConsentGrant = 'cloud-consent:grant',
+  AgentList = 'agent:list',
+  AgentGet = 'agent:get',
+  AgentCreate = 'agent:create',
+  AgentUpdate = 'agent:update',
+  AgentRemove = 'agent:remove',
+  ChannelAgentList = 'channel-agent:list',
+  ChannelAgentSave = 'channel-agent:save',
+  ChannelAgentRemove = 'channel-agent:remove',
 }

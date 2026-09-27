@@ -29,6 +29,41 @@ export interface CreateChannelInput {
   icon?: string
 }
 
+export type ToolName = 'list_dir' | 'read_file' | 'search_files' | 'write_file' | 'replace_file_content' | 'run_process'
+// Missing permissions deny access. Channel overrides are intersected with Agent defaults.
+export type ToolPermissions = Partial<Record<ToolName, boolean>>
+
+export interface AgentEditorInput {
+  name: string
+  avatar: string | null
+  title: string
+  systemPrompt: string
+  modelConfigId: string
+  defaultToolPermissions: ToolPermissions
+}
+
+export interface Agent extends AgentEditorInput {
+  id: string
+  isBuiltin: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export type AgentSummary = Omit<Agent, 'systemPrompt'>
+
+export interface SaveChannelAgentInput {
+  channelId: string
+  agentId: string
+  isEnabled: boolean
+  modelConfigOverrideId: string | null
+  toolPermissionsOverride: ToolPermissions | null
+}
+
+export interface ChannelAgent extends SaveChannelAgentInput {
+  createdAt: string
+  updatedAt: string
+}
+
 export type ModelProviderPreset = 'openai' | 'deepseek'
 
 export interface SaveModelConfigInput {
@@ -107,6 +142,18 @@ export interface StreamChatInput {
 }
 
 export interface AgentTeamApi {
+  agents: {
+    list(): Promise<AgentSummary[]>
+    get(id: string): Promise<Agent>
+    create(input: AgentEditorInput): Promise<AgentSummary>
+    update(id: string, input: AgentEditorInput): Promise<AgentSummary>
+    remove(id: string): Promise<void>
+  }
+  channelAgents: {
+    list(channelId: string): Promise<ChannelAgent[]>
+    save(input: SaveChannelAgentInput): Promise<ChannelAgent>
+    remove(channelId: string, agentId: string): Promise<void>
+  }
   projects: {
     list(): Promise<Project[]>
     pickWorkspace(): Promise<string | undefined>

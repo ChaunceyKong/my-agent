@@ -154,6 +154,66 @@ it('enforces permission intersection and disabled membership', async () => {
   expect(fs.linkSync).not.toHaveBeenCalled()
 })
 
+it.each([
+  ['executing', 'disable-reenable'], ['waiting_approval', 'disable-reenable'],
+  ['executing', 'switch-back'], ['waiting_approval', 'switch-back'],
+  ['executing', 'remove-readd'], ['waiting_approval', 'remove-readd'],
+  ['executing', 'agent-permissions'], ['waiting_approval', 'agent-permissions'],
+  ['executing', 'channel-permissions'], ['waiting_approval', 'channel-permissions'],
+] as const)('permanently invalidates %s tools after %s even when the policy is restored', async (status, change) => {
+  const agent = (await repositories.getAgent(context.agentId))!
+  const member = { channelId, agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null }
+  const execution = await repositories.createToolExecution(context, { toolName: 'write_file', input: { path: 'drafts/article.md', content: 'private body' } })
+  if (status === 'waiting_approval') {
+    await repositories.finishToolExecution(execution.id, () => ({ status, riskLevel: 'high', resultSummary: '等待审批' }))
+  }
+  if (change === 'disable-reenable') {
+    await repositories.saveChannelAgent({ ...member, isEnabled: false })
+    await repositories.saveChannelAgent(member)
+  } else if (change === 'switch-back') {
+    const other = await repositories.createAgent({ name: 'other', avatar: null, title: '', systemPrompt: '', modelConfigId: agent.modelConfigId, defaultToolPermissions: { write_file: true } })
+    await repositories.saveChannelAgent({ ...member, agentId: other.id })
+    await repositories.saveChannelAgent(member)
+  } else if (change === 'remove-readd') {
+    await repositories.removeChannelAgent(channelId, agent.id)
+    await repositories.saveChannelAgent(member)
+  } else if (change === 'agent-permissions') {
+    await repositories.updateAgent(agent.id, { ...agent, defaultToolPermissions: { ...agent.defaultToolPermissions, write_file: false } })
+    await repositories.updateAgent(agent.id, agent)
+  } else {
+    await repositories.saveChannelAgent({ ...member, toolPermissionsOverride: { write_file: false } })
+    await repositories.saveChannelAgent(member)
+  }
+  const callback = vi.fn(() => ({ status: 'completed' as const, riskLevel: 'medium' as const, resultSummary: 'done' }))
+  expect((await repositories.finishToolExecution(execution.id, callback)).status).toBe('cancelled')
+  expect(callback).not.toHaveBeenCalled()
+  expect(await repositories.getToolExecution(execution.id)).toMatchObject({ status: 'cancelled' })
+  const cancelled = (await repositories.listAuditEvents(channelId)).filter((event) => event.eventType === 'tool_cancelled')
+  expect(cancelled).toHaveLength(1)
+  expect(JSON.stringify(cancelled)).not.toContain('private body')
+})
+
+it('rolls back a membership revocation if its tool cancellation audit cannot be saved', async () => {
+  const execution = await repositories.createToolExecution(context, { toolName: 'write_file', input: { path: 'drafts/article.md', content: 'body' } })
+  const sqlite = new Database(join(directory, 'db.sqlite'))
+  try {
+    sqlite.exec("CREATE TRIGGER reject_cancel_audit BEFORE INSERT ON audit_events WHEN NEW.event_type = 'tool_cancelled' BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END;")
+    await expect(repositories.saveChannelAgent({ channelId, agentId: context.agentId, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })).rejects.toThrow('audit unavailable')
+    expect((await repositories.listChannelAgents(channelId))[0].isEnabled).toBe(true)
+    expect(await repositories.getToolExecution(execution.id)).toMatchObject({ status: 'executing' })
+  } finally { sqlite.close() }
+})
+
+it('preserves an executing tool across a no-op membership save and an unrelated Agent edit', async () => {
+  const execution = await repositories.createToolExecution(context, { toolName: 'write_file', input: { path: 'drafts/article.md', content: 'body' } })
+  await repositories.saveChannelAgent({ channelId, agentId: context.agentId, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  const agent = (await repositories.getAgent(context.agentId))!
+  await repositories.updateAgent(agent.id, { ...agent, name: 'renamed' })
+  const callback = vi.fn(() => ({ status: 'completed' as const, riskLevel: 'medium' as const, resultSummary: 'done' }))
+  expect((await repositories.finishToolExecution(execution.id, callback)).status).toBe('completed')
+  expect(callback).toHaveBeenCalledOnce()
+})
+
 it.each(['generation', 'permissions'] as const)('rechecks %s after staging a file and before publication', async (action) => {
   const realOpen = (await vi.importActual<typeof fsp>('node:fs/promises')).open
   vi.mocked(fsp.open).mockImplementationOnce(async (...args) => {

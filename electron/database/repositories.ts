@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { and, asc, eq, inArray } from 'drizzle-orm'
+import { and, asc, eq, inArray, type SQL } from 'drizzle-orm'
 import type {
   Agent,
   AgentEditorInput,
@@ -57,6 +57,19 @@ function invalidateTools(tx: Transaction, run: TaskRun): void {
     .where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval'])))
     .returning().all()
   for (const execution of invalidated) tx.insert(auditEvents).values(toolAuditEvent(run.channelId, execution)).run()
+}
+
+function invalidateChangedToolPolicies(tx: Transaction, scope: SQL): void {
+  const pending = tx.select({ execution: toolExecutions, run: taskRuns }).from(toolExecutions)
+    .innerJoin(taskRuns, eq(taskRuns.id, toolExecutions.taskRunId))
+    .where(and(scope, inArray(toolExecutions.status, ['executing', 'waiting_approval']))).all()
+  for (const { execution, run } of pending) {
+    if (currentPolicy(tx, run, execution.agentId, execution.toolName) === execution.policySnapshotJson) continue
+    const cancelled = tx.update(toolExecutions)
+      .set({ status: 'cancelled', resultSummary: '任务操作已失效', updatedAt: new Date().toISOString() })
+      .where(eq(toolExecutions.id, execution.id)).returning().get()!
+    tx.insert(auditEvents).values(toolAuditEvent(run.channelId, cancelled)).run()
+  }
 }
 
 export interface StartTaskRunInput {
@@ -193,7 +206,11 @@ export function createRepositories(client: DatabaseClient): Repositories {
     },
 
     async updateAgent(id: string, input: AgentEditorInput): Promise<Agent | undefined> {
-      return client.db.update(agents).set({ ...input, updatedAt: new Date().toISOString() }).where(eq(agents.id, id)).returning().get()
+      return client.db.transaction((tx) => {
+        const agent = tx.update(agents).set({ ...input, updatedAt: new Date().toISOString() }).where(eq(agents.id, id)).returning().get()
+        invalidateChangedToolPolicies(tx, eq(toolExecutions.agentId, id))
+        return agent
+      })
     },
 
     async removeAgent(id: string): Promise<void> {
@@ -215,14 +232,19 @@ export function createRepositories(client: DatabaseClient): Repositories {
           tx.update(channelAgents).set({ isEnabled: false, updatedAt: timestamp })
             .where(and(eq(channelAgents.channelId, input.channelId), eq(channelAgents.isEnabled, true))).run()
         }
-        return tx.insert(channelAgents).values({ ...input, createdAt: timestamp, updatedAt: timestamp })
+        const member = tx.insert(channelAgents).values({ ...input, createdAt: timestamp, updatedAt: timestamp })
           .onConflictDoUpdate({ target: [channelAgents.channelId, channelAgents.agentId], set: { ...input, updatedAt: timestamp } })
           .returning().get()
+        invalidateChangedToolPolicies(tx, eq(taskRuns.channelId, input.channelId))
+        return member
       })
     },
 
     async removeChannelAgent(channelId: string, agentId: string): Promise<void> {
-      client.db.delete(channelAgents).where(and(eq(channelAgents.channelId, channelId), eq(channelAgents.agentId, agentId))).run()
+      client.db.transaction((tx) => {
+        tx.delete(channelAgents).where(and(eq(channelAgents.channelId, channelId), eq(channelAgents.agentId, agentId))).run()
+        invalidateChangedToolPolicies(tx, and(eq(taskRuns.channelId, channelId), eq(toolExecutions.agentId, agentId))!)
+      })
     },
 
     async listProjects(): Promise<Project[]> {

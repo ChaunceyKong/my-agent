@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { and, asc, eq } from 'drizzle-orm'
+import { and, asc, eq, inArray } from 'drizzle-orm'
 import type {
   Agent,
   AgentEditorInput,
@@ -13,9 +13,51 @@ import type {
   Project,
   SaveChannelAgentInput,
   TaskRun,
+  ToolExecution,
+  ToolName,
+  ToolPermissions,
+  ToolPolicySnapshot,
+  ToolRequest,
 } from '../../shared/types'
-import type { DatabaseClient } from './client'
-import { agents, auditEvents, channelAgents, channels, cloudConsents, messages, modelConfigs, projects, taskRuns } from './schema'
+import { hashToolRequest, toolAuditEvent } from '../core/audit-service'
+import type { AppDatabase, DatabaseClient } from './client'
+import { agents, auditEvents, channelAgents, channels, cloudConsents, messages, modelConfigs, projects, taskRuns, toolExecutions } from './schema'
+
+export interface ToolContext {
+  taskRunId: string
+  generation: number
+  agentId: string
+  messageId?: string
+}
+
+export type ToolOutcome = Pick<ToolExecution, 'status' | 'riskLevel' | 'resultSummary'>
+type Transaction = Parameters<Parameters<AppDatabase['transaction']>[0]>[0]
+
+function sortedPermissions(value: ToolPermissions): ToolPermissions {
+  return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
+}
+
+function currentPolicy(tx: Transaction, run: TaskRun, agentId: string, toolName: ToolName): string | undefined {
+  const agent = tx.select().from(agents).where(eq(agents.id, agentId)).get()
+  const member = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.agentId, agentId))).get()
+  const channel = tx.select().from(channels).where(eq(channels.id, run.channelId)).get()
+  const project = channel && tx.select().from(projects).where(eq(projects.id, channel.projectId)).get()
+  if (!agent || !member?.isEnabled || !project || agent.defaultToolPermissions[toolName] !== true
+    || (member.toolPermissionsOverride !== null && member.toolPermissionsOverride[toolName] !== true)) return undefined
+  const snapshot: ToolPolicySnapshot = {
+    version: 1, workspacePath: project.workspacePath, agentId,
+    defaultToolPermissions: sortedPermissions(agent.defaultToolPermissions),
+    toolPermissionsOverride: member.toolPermissionsOverride === null ? null : sortedPermissions(member.toolPermissionsOverride),
+  }
+  return JSON.stringify(snapshot)
+}
+
+function invalidateTools(tx: Transaction, run: TaskRun): void {
+  const invalidated = tx.update(toolExecutions).set({ status: 'cancelled', resultSummary: '任务操作已失效', updatedAt: new Date().toISOString() })
+    .where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval'])))
+    .returning().all()
+  for (const execution of invalidated) tx.insert(auditEvents).values(toolAuditEvent(run.channelId, execution)).run()
+}
 
 export interface StartTaskRunInput {
   channelId: string
@@ -37,6 +79,11 @@ export interface ModelConfigRecord extends SaveModelConfigRecordInput {
 }
 
 export interface Repositories {
+  createToolExecution(context: ToolContext, request: ToolRequest): Promise<ToolExecution>
+  getToolExecution(id: string): Promise<ToolExecution | undefined>
+  listToolExecutions(taskRunId: string): Promise<ToolExecution[]>
+  finishToolExecution(id: string, outcome: () => ToolOutcome): Promise<ToolExecution>
+  advanceTaskRunGeneration(id: string): Promise<TaskRun>
   listAgents(): Promise<Agent[]>
   getAgent(id: string): Promise<Agent | undefined>
   createAgent(input: AgentEditorInput): Promise<Agent>
@@ -66,6 +113,72 @@ export interface Repositories {
 
 export function createRepositories(client: DatabaseClient): Repositories {
   return {
+    async createToolExecution(context, request) {
+      return client.db.transaction((tx) => {
+        const run = tx.select().from(taskRuns).where(eq(taskRuns.id, context.taskRunId)).get()
+        if (!run || run.status !== 'running' || run.generation !== context.generation) throw new Error('任务操作已失效')
+        const policySnapshotJson = currentPolicy(tx, run, context.agentId, request.toolName)
+        if (!policySnapshotJson) throw new Error('工具未授权')
+        if (context.messageId) {
+          const message = tx.select().from(messages).where(eq(messages.id, context.messageId)).get()
+          if (message?.taskRunId !== run.id || message.channelId !== run.channelId) throw new Error('工具消息不属于当前任务')
+        }
+        if (tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval']))).get()) {
+          throw new Error('任务已有未完成的工具操作')
+        }
+        const timestamp = new Date().toISOString()
+        const execution: ToolExecution = {
+          id: randomUUID(), taskRunId: run.id, generation: run.generation, agentId: context.agentId,
+          messageId: context.messageId ?? null, toolName: request.toolName, inputJson: JSON.stringify(request.input),
+          policySnapshotJson,
+          requestHash: hashToolRequest({ taskRunId: run.id, generation: run.generation, agentId: context.agentId, messageId: context.messageId ?? null, request, policySnapshotJson }),
+          riskLevel: request.toolName === 'write_file' ? 'medium' : 'low', status: 'executing',
+          resultSummary: null, createdAt: timestamp, updatedAt: timestamp,
+        }
+        tx.insert(toolExecutions).values(execution).run()
+        tx.insert(auditEvents).values(toolAuditEvent(run.channelId, execution)).run()
+        return execution
+      })
+    },
+
+    async getToolExecution(id) {
+      return client.db.select().from(toolExecutions).where(eq(toolExecutions.id, id)).get()
+    },
+
+    async listToolExecutions(taskRunId) {
+      return client.db.select().from(toolExecutions).where(eq(toolExecutions.taskRunId, taskRunId))
+        .orderBy(asc(toolExecutions.createdAt), asc(toolExecutions.id)).all()
+    },
+
+    async finishToolExecution(id, outcome) {
+      // The final local side effect is synchronous: cancellation cannot interleave between
+      // the persisted generation/policy check and publication on Main's event loop.
+      return client.db.transaction((tx) => {
+        const current = tx.select().from(toolExecutions).where(eq(toolExecutions.id, id)).get()
+        if (!current) throw new Error('工具操作不存在')
+        if (current.status !== 'executing') return current
+        const run = tx.select().from(taskRuns).where(eq(taskRuns.id, current.taskRunId)).get()!
+        const valid = run.status === 'running' && run.generation === current.generation
+          && currentPolicy(tx, run, current.agentId, current.toolName) === current.policySnapshotJson
+        const result: ToolOutcome = valid ? outcome() : { status: 'cancelled', riskLevel: current.riskLevel, resultSummary: '任务操作已失效' }
+        const next = tx.update(toolExecutions).set({ ...result, updatedAt: new Date().toISOString() })
+          .where(eq(toolExecutions.id, id)).returning().get()!
+        tx.insert(auditEvents).values(toolAuditEvent(run.channelId, next)).run()
+        return next
+      })
+    },
+
+    async advanceTaskRunGeneration(id) {
+      return client.db.transaction((tx) => {
+        const current = tx.select().from(taskRuns).where(eq(taskRuns.id, id)).get()
+        if (current?.status !== 'running') throw new Error('任务操作已失效')
+        const next = tx.update(taskRuns).set({ generation: current.generation + 1 }).where(eq(taskRuns.id, id)).returning().get()!
+        invalidateTools(tx, next)
+        tx.insert(auditEvents).values({ id: randomUUID(), channelId: next.channelId, taskRunId: id,
+          eventType: 'task_run_generation_changed', metadataJson: JSON.stringify({ generation: next.generation }), createdAt: new Date().toISOString() }).run()
+        return next
+      })
+    },
     async listAgents(): Promise<Agent[]> {
       return client.db.select().from(agents).orderBy(asc(agents.createdAt), asc(agents.id)).all()
     },
@@ -180,6 +293,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         channelId: input.channelId,
         modelConfigId: input.modelConfigId,
         status: 'queued',
+        generation: 0,
         startedAt: null,
         finishedAt: null,
         errorMessage: null,
@@ -235,6 +349,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const next = tx.update(taskRuns)
           .set({
             status: to,
+            generation: current.generation + 1,
             finishedAt: to === 'completed' || to === 'failed' || to === 'cancelled' ? timestamp : current.finishedAt,
             errorMessage: to === 'failed' ? metadata.errorMessage ?? 'TaskRun failed' : current.errorMessage,
           })
@@ -242,6 +357,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
           .returning()
           .get()
         if (!next) return undefined
+        invalidateTools(tx, next)
         if (to === 'completed') {
           tx.insert(messages).values({
             id: randomUUID(), channelId: next.channelId, taskRunId: next.id,
@@ -254,7 +370,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
           channelId: next.channelId,
           taskRunId: next.id,
           eventType: `task_run_${to}`,
-          metadataJson: JSON.stringify(metadata),
+          metadataJson: JSON.stringify({ generation: next.generation }),
           createdAt: timestamp,
         }).run()
         return next
@@ -267,9 +383,10 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const runningRuns = tx.select().from(taskRuns).where(eq(taskRuns.status, 'running')).all()
         for (const run of runningRuns) {
           tx.update(taskRuns)
-            .set({ status: 'paused' })
+            .set({ status: 'paused', generation: run.generation + 1 })
             .where(and(eq(taskRuns.id, run.id), eq(taskRuns.status, 'running')))
             .run()
+          invalidateTools(tx, run)
           tx.insert(auditEvents).values({
             id: randomUUID(),
             channelId: run.channelId,

@@ -135,7 +135,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
       updateConversation(message.channelId, {
         draft: '', error: '',
         messages: [...current.messages, { id: `ceo-${taskRunId}`, channelId: message.channelId, taskRunId, role: 'ceo', authorName: '主理人', content: message.content, status: 'sent', createdAt }],
-        runs: [...current.runs, { id: taskRunId, channelId: message.channelId, modelConfigId: message.modelConfigId, status: 'running', createdAt, startedAt: createdAt, finishedAt: null, errorMessage: null }],
+        runs: [...current.runs, { id: taskRunId, channelId: message.channelId, modelConfigId: message.modelConfigId, status: 'running', generation: 0, createdAt, startedAt: createdAt, finishedAt: null, errorMessage: null }],
       })
       const earlyEvents = pendingEvents
       pendingEvents = null

@@ -148,7 +148,7 @@ it('migrates existing v3 databases idempotently and enforces the single-enabled 
   try {
     migrate(sqlite)
     sqlite.exec("INSERT INTO projects VALUES ('p', 'project', NULL, 'C:/test', 'now', 'now'); INSERT INTO channels VALUES ('c', 'p', 'channel', NULL, 'now', 'now');")
-    sqlite.exec('DROP TABLE channel_agents; DROP TABLE agents; PRAGMA user_version = 3;')
+    sqlite.exec('DROP TABLE tool_executions; ALTER TABLE task_runs DROP COLUMN generation; DROP TABLE channel_agents; DROP TABLE agents; PRAGMA user_version = 3;')
     migrate(sqlite)
     migrate(sqlite)
     expect(sqlite.prepare('SELECT name FROM projects').get()).toEqual({ name: 'project' })
@@ -157,7 +157,7 @@ it('migrates existing v3 databases idempotently and enforces the single-enabled 
     for (const id of ['a', 'b']) insert.run(id, id, 'title', 'prompt', 'm', '{}', 'now', 'now')
     sqlite.exec("INSERT INTO channel_agents VALUES ('c', 'a', 1, NULL, NULL, 'now', 'now');")
     expect(() => sqlite.exec("INSERT INTO channel_agents VALUES ('c', 'b', 1, NULL, NULL, 'now', 'now');")).toThrow(/UNIQUE/)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(4)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(5)
   } finally {
     sqlite.close()
   }

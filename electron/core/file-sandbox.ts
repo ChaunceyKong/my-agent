@@ -68,3 +68,21 @@ export async function resolveSafePath(workspaceRoot: string, candidate: string):
     throw new FileToolError('PATH_UNAVAILABLE', '文件路径不存在或不可访问')
   }
 }
+
+// Creation permits only a missing leaf; every existing ancestor uses the same sandbox.
+export async function resolveSafeWritePath(workspaceRoot: string, candidate: string): Promise<{ path: string; parent: string; exists: boolean }> {
+  const segments = validateRelativePath(candidate)
+  if (!segments.length) throw new FileToolError('INVALID_PATH', '写入目标必须是文件')
+  const parent = await resolveSafePath(workspaceRoot, segments.slice(0, -1).join('/') || '.')
+  if (!(await lstat(parent)).isDirectory()) throw new FileToolError('NOT_DIRECTORY', '文件父路径不是目录')
+  const target = join(parent, segments[segments.length - 1])
+  try {
+    await lstat(target)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { path: target, parent, exists: false }
+    throw new FileToolError('PATH_UNAVAILABLE', '文件路径不存在或不可访问')
+  }
+  const safe = await resolveSafePath(workspaceRoot, candidate)
+  if (!(await lstat(safe)).isFile()) throw new FileToolError('NOT_FILE', '目标不是普通文件')
+  return { path: safe, parent, exists: true }
+}

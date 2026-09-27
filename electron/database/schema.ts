@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
 import { sql } from 'drizzle-orm'
 import { integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
-import type { MessageRole, MessageStatus, ModelProviderPreset, TaskRunStatus, ToolPermissions } from '../../shared/types'
+import type { MessageRole, MessageStatus, ModelProviderPreset, TaskRunStatus, ToolExecutionStatus, ToolName, ToolPermissions, ToolRiskLevel } from '../../shared/types'
 
 export const projects = sqliteTable('projects', {
   id: text('id').primaryKey(),
@@ -26,6 +26,7 @@ export const taskRuns = sqliteTable('task_runs', {
   channelId: text('channel_id').notNull().references(() => channels.id, { onDelete: 'cascade' }),
   modelConfigId: text('model_config_id').notNull(),
   status: text('status').$type<TaskRunStatus>().notNull(),
+  generation: integer('generation').notNull().default(0),
   startedAt: text('started_at'),
   finishedAt: text('finished_at'),
   errorMessage: text('error_message'),
@@ -94,7 +95,24 @@ export const channelAgents = sqliteTable('channel_agents', {
   uniqueIndex('channel_agents_one_enabled_idx').on(table.channelId).where(sql`${table.isEnabled} = 1`),
 ])
 
-export const schema = { agents, auditEvents, channelAgents, channels, cloudConsents, messages, modelConfigs, projects, taskRuns }
+export const toolExecutions = sqliteTable('tool_executions', {
+  id: text('id').primaryKey(),
+  taskRunId: text('task_run_id').notNull().references(() => taskRuns.id, { onDelete: 'cascade' }),
+  generation: integer('generation').notNull(),
+  messageId: text('message_id').references(() => messages.id, { onDelete: 'set null' }),
+  agentId: text('agent_id').notNull().references(() => agents.id, { onDelete: 'restrict' }),
+  toolName: text('tool_name').$type<ToolName>().notNull(),
+  inputJson: text('input_json').notNull(),
+  riskLevel: text('risk_level').$type<ToolRiskLevel>().notNull(),
+  requestHash: text('request_hash').notNull(),
+  policySnapshotJson: text('policy_snapshot_json').notNull(),
+  status: text('status').$type<ToolExecutionStatus>().notNull(),
+  resultSummary: text('result_summary'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+})
+
+export const schema = { agents, auditEvents, channelAgents, channels, cloudConsents, messages, modelConfigs, projects, taskRuns, toolExecutions }
 
 export function migrate(sqlite: Database.Database): void {
   sqlite.pragma('foreign_keys = ON')
@@ -209,6 +227,32 @@ export function migrate(sqlite: Database.Database): void {
         CREATE UNIQUE INDEX IF NOT EXISTS channel_agents_one_enabled_idx ON channel_agents(channel_id) WHERE is_enabled = 1;
       `)
       sqlite.pragma('user_version = 4')
+    })()
+  }
+
+  if (version < 5) {
+    sqlite.transaction(() => {
+      sqlite.exec(`
+        ALTER TABLE task_runs ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE tool_executions (
+          id TEXT PRIMARY KEY NOT NULL,
+          task_run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
+          generation INTEGER NOT NULL,
+          message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+          agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+          tool_name TEXT NOT NULL,
+          input_json TEXT NOT NULL,
+          risk_level TEXT NOT NULL CHECK (risk_level IN ('low', 'medium', 'high')),
+          request_hash TEXT NOT NULL,
+          policy_snapshot_json TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('executing', 'waiting_approval', 'completed', 'failed', 'cancelled')),
+          result_summary TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX tool_executions_task_run_idx ON tool_executions(task_run_id);
+      `)
+      sqlite.pragma('user_version = 5')
     })()
   }
 }

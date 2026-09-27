@@ -6,7 +6,8 @@ export interface TaskRunService {
   cancelTaskRun(id: string): Promise<TaskRun>
   finishTaskRun(id: string, result: string): Promise<TaskRun>
   recoverInterruptedTaskRuns(): Promise<number>
-  canAcceptChunk(id: string): Promise<boolean>
+  canAcceptChunk(id: string, generation?: number): Promise<boolean>
+  advanceGeneration(id: string): Promise<TaskRun>
   onCancelled(id: string, listener: () => void): () => void
 }
 
@@ -42,8 +43,11 @@ export function createTaskRunService(repositories: Repositories): TaskRunService
 
     recoverInterruptedTaskRuns: () => repositories.recoverRunningTaskRuns(),
 
-    async canAcceptChunk(id: string): Promise<boolean> {
-      return (await repositories.getTaskRun(id))?.status === 'running'
+    advanceGeneration: (id) => repositories.advanceTaskRunGeneration(id),
+
+    async canAcceptChunk(id: string, generation?: number): Promise<boolean> {
+      const run = await repositories.getTaskRun(id)
+      return run?.status === 'running' && (generation === undefined || run.generation === generation)
     },
   }
 }

@@ -36,7 +36,7 @@ function persistedReply(taskRunId: string, content: string): Message {
 }
 
 function persistedRun(status: TaskRun['status']): TaskRun {
-  return { id: 'history-run', channelId: 'c1', modelConfigId: 'm1', status, createdAt: '', startedAt: null, finishedAt: null, errorMessage: null }
+  return { id: 'history-run', channelId: 'c1', modelConfigId: 'm1', status, generation: 0, createdAt: '', startedAt: null, finishedAt: null, errorMessage: null }
 }
 
 async function send() {
@@ -154,7 +154,7 @@ it('saves credentials through settings and renders explicit unavailable cockpit 
 })
 
 it('shows persisted paused runs and rejects their late events', async () => {
-  vi.mocked(api.tasks.list).mockResolvedValue([{ id: 'paused-run', channelId: 'c1', modelConfigId: 'm1', status: 'paused', createdAt: '', startedAt: null, finishedAt: null, errorMessage: null }])
+  vi.mocked(api.tasks.list).mockResolvedValue([{ id: 'paused-run', channelId: 'c1', modelConfigId: 'm1', status: 'paused', generation: 0, createdAt: '', startedAt: null, finishedAt: null, errorMessage: null }])
   render(<App />)
   expect(await screen.findByText('任务已暂停，应用重启后不会自动续跑')).toBeVisible()
   act(() => emitStream({ taskRunId: 'paused-run', type: 'delta', content: '不应出现' }))
@@ -210,7 +210,7 @@ it('does not replace the selected project with a stale channel-list response', a
 it('reconciles stream events that arrive while loading a persisted running task', async () => {
   let resolveMessages!: (value: []) => void
   vi.mocked(api.messages.list).mockImplementationOnce(() => new Promise((resolve) => { resolveMessages = resolve })).mockResolvedValue([persistedReply('resumed-view-run', '加载期间的回复')])
-  vi.mocked(api.tasks.list).mockResolvedValue([{ id: 'resumed-view-run', channelId: 'c1', modelConfigId: 'm1', status: 'running', createdAt: '', startedAt: null, finishedAt: null, errorMessage: null }])
+  vi.mocked(api.tasks.list).mockResolvedValue([{ id: 'resumed-view-run', channelId: 'c1', modelConfigId: 'm1', status: 'running', generation: 0, createdAt: '', startedAt: null, finishedAt: null, errorMessage: null }])
   render(<App />)
   await screen.findByRole('heading', { name: channel.name })
   act(() => {

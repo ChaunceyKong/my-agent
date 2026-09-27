@@ -33,6 +33,40 @@ export type ToolName = 'list_dir' | 'read_file' | 'search_files' | 'write_file' 
 // Missing permissions deny access. Channel overrides are intersected with Agent defaults.
 export type ToolPermissions = Partial<Record<ToolName, boolean>>
 
+export type ToolRequest =
+  | { toolName: 'list_dir'; input: { path: string } }
+  | { toolName: 'read_file'; input: { path: string } }
+  | { toolName: 'search_files'; input: { path: string; query: string } }
+  | { toolName: 'write_file'; input: { path: string; content: string } }
+
+export type ToolExecutionStatus = 'executing' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled'
+export type ToolRiskLevel = 'low' | 'medium' | 'high'
+
+export interface ToolExecution {
+  id: string
+  taskRunId: string
+  generation: number
+  messageId: string | null
+  agentId: string
+  toolName: ToolName
+  inputJson: string
+  riskLevel: ToolRiskLevel
+  requestHash: string
+  policySnapshotJson: string
+  status: ToolExecutionStatus
+  resultSummary: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ToolPolicySnapshot {
+  version: 1
+  workspacePath: string
+  agentId: string
+  defaultToolPermissions: ToolPermissions
+  toolPermissionsOverride: ToolPermissions | null
+}
+
 export type FileToolErrorCode = 'INVALID_PATH' | 'SENSITIVE_PATH' | 'LINK_NOT_ALLOWED' | 'PATH_UNAVAILABLE'
   | 'NOT_DIRECTORY' | 'NOT_FILE' | 'FILE_TOO_LARGE' | 'INVALID_TEXT' | 'INVALID_QUERY' | 'FILE_CHANGED'
 
@@ -155,6 +189,7 @@ export interface TaskRun {
   channelId: string
   modelConfigId: string
   status: TaskRunStatus
+  generation: number
   startedAt: string | null
   finishedAt: string | null
   errorMessage: string | null

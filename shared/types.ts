@@ -33,6 +33,53 @@ export type ToolName = 'list_dir' | 'read_file' | 'search_files' | 'write_file' 
 // Missing permissions deny access. Channel overrides are intersected with Agent defaults.
 export type ToolPermissions = Partial<Record<ToolName, boolean>>
 
+export type FileToolErrorCode = 'INVALID_PATH' | 'SENSITIVE_PATH' | 'LINK_NOT_ALLOWED' | 'PATH_UNAVAILABLE'
+  | 'NOT_DIRECTORY' | 'NOT_FILE' | 'FILE_TOO_LARGE' | 'INVALID_TEXT' | 'INVALID_QUERY' | 'FILE_CHANGED'
+
+export interface FileToolLimits {
+  maxPathChars: number
+  maxFileBytes: number
+  maxContentChars: number
+  maxDirectoryEntries: number
+  maxSearchMatches: number
+  maxExcerptChars: number
+  maxQueryChars: number
+  maxVisitedEntries: number
+  maxSearchBytes: number
+  maxDepth: number
+  maxResultChars: number
+}
+
+export interface FileToolResult {
+  path: string
+  summary: string
+  truncated: boolean
+  limits: Readonly<FileToolLimits>
+}
+
+export interface DirectoryEntry {
+  path: string
+  name: string
+  type: 'file' | 'directory'
+}
+
+export interface ListDirectoryResult extends FileToolResult {
+  entries: DirectoryEntry[]
+}
+
+export interface ReadTextFileResult extends FileToolResult {
+  content: string
+  bytes: number
+}
+
+export interface SearchTextFilesResult extends FileToolResult {
+  matches: { path: string; line: number; excerpt: string }[]
+  visitedEntries: number
+  // Conservative byte charge: failed decodes retain the reserved maximum file size.
+  searchedBytes: number
+  skippedFiles: number
+}
+
 export interface AgentEditorInput {
   name: string
   avatar: string | null

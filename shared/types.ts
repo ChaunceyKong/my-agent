@@ -12,7 +12,6 @@ export interface CreateProjectInput {
   icon?: string
   workspacePath: string
   firstChannelName?: string
-  browseForWorkspace?: boolean
 }
 
 export interface Channel {
@@ -110,6 +109,7 @@ export interface StreamChatInput {
 export interface AgentTeamApi {
   projects: {
     list(): Promise<Project[]>
+    pickWorkspace(): Promise<string | undefined>
     create(input: CreateProjectInput): Promise<Project>
   }
   channels: {

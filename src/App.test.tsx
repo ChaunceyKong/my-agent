@@ -17,7 +17,7 @@ let unsubscribe: ReturnType<typeof vi.fn>
 beforeEach(() => {
   unsubscribe = vi.fn()
   api = {
-    projects: { list: vi.fn().mockResolvedValue([project]), create: vi.fn().mockResolvedValue(project) },
+    projects: { list: vi.fn().mockResolvedValue([project]), pickWorkspace: vi.fn().mockResolvedValue('C:/work/content'), create: vi.fn().mockResolvedValue(project) },
     channels: { list: vi.fn().mockResolvedValue([channel]), create: vi.fn().mockResolvedValue({ ...channel, id: 'c2', name: '选题群' }) },
     models: { list: vi.fn().mockResolvedValue([model]), save: vi.fn().mockResolvedValue({ ...model, id: 'm2' }) },
     messages: { list: vi.fn().mockResolvedValue([]) },
@@ -44,14 +44,16 @@ async function send() {
   await screen.findByRole('button', { name: '停止生成' })
 }
 
-it('creates a project using the native picker and selects its initial channel', async () => {
+it('selects a workspace immediately and uses the default initial channel when left empty', async () => {
   vi.mocked(api.projects.list).mockResolvedValue([])
   render(<App />)
   await userEvent.click(await screen.findByRole('button', { name: '新建项目' }))
   await userEvent.type(screen.getByLabelText('项目名称'), '内容矩阵')
+  await userEvent.click(screen.getByLabelText('本地目录'))
+  expect(api.projects.pickWorkspace).toHaveBeenCalledTimes(1)
   await userEvent.click(screen.getByRole('button', { name: '确认创建项目' }))
   expect(await screen.findByRole('heading', { name: channel.name })).toBeVisible()
-  expect(api.projects.create).toHaveBeenCalledWith(expect.objectContaining({ name: '内容矩阵', browseForWorkspace: true, firstChannelName: channel.name }))
+  expect(api.projects.create).toHaveBeenCalledWith({ name: '内容矩阵', workspacePath: 'C:/work/content', firstChannelName: '' })
 })
 
 it('appends only matching live deltas and rejects terminal or unknown events', async () => {

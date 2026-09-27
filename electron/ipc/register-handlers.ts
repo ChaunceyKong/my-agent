@@ -24,11 +24,9 @@ export interface IpcHandlerDependencies {
 export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, modelClient }: IpcHandlerDependencies): void {
   const startingChannels = new Set<string>()
   ipcMain.handle(IpcChannel.ProjectList, () => repositories.listProjects())
+  ipcMain.handle(IpcChannel.ProjectPickWorkspace, () => pickWorkspacePath(dialog))
   ipcMain.handle(IpcChannel.ProjectCreate, async (_event, input: CreateProjectInput) => {
-    const workspacePath = input.browseForWorkspace
-      ? await pickWorkspacePath(dialog)
-      : input.workspacePath
-    const canonicalWorkspacePath = await validateWorkspaceRoot(workspacePath)
+    const canonicalWorkspacePath = await validateWorkspaceRoot(input.workspacePath)
     const { project } = await repositories.createProjectWithInitialChannel({
       ...input,
       workspacePath: canonicalWorkspacePath,
@@ -110,8 +108,8 @@ async function streamReply(
   }
 }
 
-async function pickWorkspacePath(dialog: DirectoryPicker): Promise<string> {
+async function pickWorkspacePath(dialog: DirectoryPicker): Promise<string | undefined> {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
-  if (result.canceled || result.filePaths.length === 0) throw new Error('未选择工作区路径')
+  if (result.canceled || result.filePaths.length === 0) return undefined
   return result.filePaths[0]
 }

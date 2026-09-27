@@ -102,7 +102,11 @@ export async function createProject(desktop: Desktop) {
   const { page } = desktop
   await page.getByRole('button', { name: '新建项目', exact: true }).click()
   await page.getByLabel('项目名称', { exact: true }).fill('端到端演示项目')
-  await page.getByLabel('本地目录', { exact: true }).fill(desktop.workspace)
+  await page.getByLabel('本地目录', { exact: true }).evaluate((element, value) => {
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    setValue?.call(element, value)
+    element.dispatchEvent(new Event('input', { bubbles: true }))
+  }, desktop.workspace)
   await page.getByRole('button', { name: '确认创建项目', exact: true }).click()
   await expect(page.getByRole('heading', { name: '主线任务协同群', exact: true })).toBeVisible()
   await expect(page.getByLabel('消息内容', { exact: true })).toBeEnabled()

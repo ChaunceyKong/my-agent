@@ -1,6 +1,7 @@
 export enum IpcChannel {
   ProjectCreate = 'project:create',
   ProjectList = 'project:list',
+  ProjectPickWorkspace = 'project:pick-workspace',
   ChannelCreate = 'channel:create',
   ChannelList = 'channel:list',
   MessageSend = 'message:send',

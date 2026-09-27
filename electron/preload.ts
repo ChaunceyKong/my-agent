@@ -12,6 +12,7 @@ import type {
 const api: AgentTeamApi = {
   projects: {
     list: () => ipcRenderer.invoke(IpcChannel.ProjectList),
+    pickWorkspace: () => ipcRenderer.invoke(IpcChannel.ProjectPickWorkspace),
     create: (input: CreateProjectInput) => ipcRenderer.invoke(IpcChannel.ProjectCreate, input),
   },
   channels: {

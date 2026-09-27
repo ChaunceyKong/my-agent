@@ -41,17 +41,17 @@ function Workbench() {
 function CreationDialog({ kind, store, onClose }: { kind: 'project' | 'channel'; store: WorkbenchStore; onClose(): void }) {
   const [name, setName] = useState('')
   const [path, setPath] = useState('')
-  const [firstChannel, setFirstChannel] = useState('主线任务协同群')
+  const [firstChannel, setFirstChannel] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const project = kind === 'project'
   return <Dialog title={project ? '新建本地项目' : '新建会话群聊'} busy={busy} onClose={onClose}><form onSubmit={async (event) => {
     event.preventDefault(); if (busy || !name.trim()) return; setBusy(true); setError('')
     try {
-      if (project) await store.createProject({ name: name.trim(), workspacePath: path.trim(), firstChannelName: firstChannel.trim(), browseForWorkspace: !path.trim() })
+      if (project) await store.createProject({ name: name.trim(), workspacePath: path.trim(), firstChannelName: firstChannel.trim() })
       else await store.createChannel(name.trim())
       onClose()
     } catch { setError(project ? '项目未创建，请选择有效的本地目录并确认读写权限后重试' : '群聊创建失败，请重试') }
     finally { setBusy(false) }
-  }}><label>{project ? '项目名称' : '群聊名称'}<input required autoFocus value={name} disabled={busy} onChange={(event) => setName(event.target.value)} placeholder={project ? '例如：内容矩阵' : '例如：选题讨论'} /></label>{project && <><label>本地目录<input value={path} disabled={busy} onChange={(event) => setPath(event.target.value)} placeholder="留空将在确认时打开系统目录选择器" /></label><p className="form-note">填写已有目录的绝对路径，或留空后点击确认创建项目，在系统窗口中选择目录。</p><label>首个群聊名称<input required value={firstChannel} disabled={busy} onChange={(event) => setFirstChannel(event.target.value)} /></label></>}{error && <div className="error-card" role="alert">{error}</div>}<div className="dialog-actions"><button type="button" disabled={busy} onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={busy || !name.trim() || (project && !firstChannel.trim())}>{busy ? '正在创建…' : project ? '确认创建项目' : '确认建群'}</button></div></form></Dialog>
+  }}><label>{project ? '项目名称' : '群聊名称'}<input required autoFocus value={name} disabled={busy} onChange={(event) => setName(event.target.value)} placeholder={project ? '例如：内容矩阵' : '例如：选题讨论'} /></label>{project && <><label>本地目录<input value={path} readOnly disabled={busy} onChange={(event) => setPath(event.target.value)} onClick={async () => { if (busy) return; const selected = await window.agentTeam.projects.pickWorkspace(); if (selected) { setPath(selected); setError('') } }} placeholder="点击选择本地目录" /></label><p className="form-note">点击选择要绑定的本地目录。</p><label>首个群聊名称<input value={firstChannel} disabled={busy} onChange={(event) => setFirstChannel(event.target.value)} placeholder="例如：主线任务协同群" /></label></>}{error && <div className="error-card" role="alert">{error}</div>}<div className="dialog-actions"><button type="button" disabled={busy} onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={busy || !name.trim() || (project && !path.trim())}>{busy ? '正在创建…' : project ? '确认创建项目' : '确认建群'}</button></div></form></Dialog>
 }

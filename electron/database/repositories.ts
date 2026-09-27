@@ -71,7 +71,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
       const channel: Channel = {
         id: randomUUID(),
         projectId: project.id,
-        name: input.firstChannelName ?? '主线任务协同群',
+        name: input.firstChannelName?.trim() || '主线任务协同群',
         icon: null,
         createdAt: timestamp,
         updatedAt: timestamp,

@@ -33,10 +33,11 @@ describe('project and channel repositories', () => {
       name: '测试项目',
       icon: '📁',
       workspacePath: await realpath(fixtureRoot),
-      firstChannelName: '主线任务协同群',
+      firstChannelName: ' ',
     })
 
     expect(channel.projectId).toBe(project.id)
+    expect(channel.name).toBe('主线任务协同群')
     expect(await repositories.listChannels(project.id)).toHaveLength(1)
     expect((await repositories.listProjects())[0]).toMatchObject({
       id: project.id,
@@ -60,7 +61,7 @@ describe('project and channel repositories', () => {
     expect((await repositories.listChannels(second.project.id)).map((channel) => channel.name)).toEqual(['第二个频道'])
   })
 
-  it('uses the directory picker only when project creation requests browsing', async () => {
+  it('picks a directory before project creation and does not open it again on submit', async () => {
     const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>()
     const showOpenDialog = vi.fn().mockResolvedValue({
       canceled: false,
@@ -72,23 +73,30 @@ describe('project and channel repositories', () => {
       repositories,
     })
 
-    const createProject = handlers.get(IpcChannel.ProjectCreate)
-    const createdWithoutBrowsing = await createProject?.(undefined, {
-      name: '手动路径项目',
-      workspacePath: fixtureRoot,
-      firstChannelName: '手动频道',
-    })
-    expect(showOpenDialog).not.toHaveBeenCalled()
-    expect(createdWithoutBrowsing).toMatchObject({ workspacePath: await realpath(fixtureRoot) })
+    const pickWorkspace = handlers.get(IpcChannel.ProjectPickWorkspace)
+    const selectedWorkspace = await pickWorkspace?.(undefined)
+    expect(selectedWorkspace).toBe(fixtureRoot)
+    expect(showOpenDialog).toHaveBeenCalledWith({ properties: ['openDirectory'] })
 
-    const createdWithBrowsing = await createProject?.(undefined, {
+    const createProject = handlers.get(IpcChannel.ProjectCreate)
+    const created = await createProject?.(undefined, {
       name: '目录选择项目',
-      browseForWorkspace: true,
-      workspacePath: 'Z:/does-not-exist',
+      workspacePath: selectedWorkspace,
       firstChannelName: '选择频道',
     })
     expect(showOpenDialog).toHaveBeenCalledTimes(1)
-    expect(createdWithBrowsing).toMatchObject({ workspacePath: await realpath(fixtureRoot) })
+    expect(created).toMatchObject({ workspacePath: await realpath(fixtureRoot) })
+  })
+
+  it('returns no path when the directory picker is cancelled', async () => {
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>()
+    registerHandlers({
+      ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+      dialog: { showOpenDialog: vi.fn().mockResolvedValue({ canceled: true, filePaths: [] }) },
+      repositories,
+    })
+
+    await expect(handlers.get(IpcChannel.ProjectPickWorkspace)?.(undefined)).resolves.toBeUndefined()
   })
 
   it('persists a channel created through the IPC handler', async () => {

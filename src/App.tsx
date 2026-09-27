@@ -34,7 +34,7 @@ function Workbench() {
       {state.loading ? <div className="loading-state">正在读取本地项目…</div> : !channel ? <div className="welcome-panel"><EmptyState title={project ? '选择或创建一个群聊' : '让想法在这里开始'}>{project ? '为不同主题建立独立会话，保留清晰的对话历史。' : '新建项目并绑定本地目录，然后配置模型，开始第一次对话。'}</EmptyState></div> : <MessageStream conversation={conversation} />}
       <Composer draft={conversation.draft} models={state.models} modelId={state.modelId} disabled={!channel || !conversation.loaded} sending={state.sending} running={conversation.runs.some((run) => run.status === 'running')} onDraft={store.setDraft} onModel={store.setModel} onSend={() => { void store.send() }} onCancel={() => { void store.cancel() }} onSettings={() => setDialog('settings')} />
     </main>
-    {cockpitOpen && <RightCockpit project={project} channel={channel} model={model} />}
+    {cockpitOpen && <RightCockpit project={project} channel={channel} model={model} models={state.models} run={conversation.runs.at(-1)} />}
   </div>{dialog === 'settings' && <SettingsDialog onSave={store.saveModel} onClose={() => setDialog(null)} />}{(dialog === 'project' || dialog === 'channel') && <CreationDialog kind={dialog} store={store} onClose={() => setDialog(null)} />}{state.consent && consentProject && consentModel && <CloudConsentDialog project={consentProject} model={consentModel} busy={state.sending} onConfirm={store.grantConsent} onClose={store.dismissConsent} />}</div>
 }
 

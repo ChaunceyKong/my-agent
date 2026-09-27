@@ -6,6 +6,8 @@ import { createApprovalService } from './core/approval-service'
 import { createProcessToolService } from './core/process-tool-service'
 import { createCloudConsentService } from './core/cloud-consent-service'
 import { createModelClient } from './core/model-client'
+import { createToolEngine } from './core/tool-engine'
+import { createSingleAgentRunner } from './core/single-agent-runner'
 import { openStartupDatabase } from './core/startup'
 import { createDatabase } from './database/client'
 import { createRepositories } from './database/repositories'
@@ -53,6 +55,8 @@ app.whenReady().then(async () => {
     taskRuns,
     crypto: safeStorage,
   })
+  const tools = createToolEngine(repositories, approvals)
+  const runner = createSingleAgentRunner({ repositories, modelClient, taskRuns, toolEngine: tools })
   registerHandlers({
     ipcMain,
     dialog: { showOpenDialog: (options) => dialog.showOpenDialog(options as OpenDialogOptions) },
@@ -61,6 +65,7 @@ app.whenReady().then(async () => {
     modelClient,
     approvals,
     processes,
+    runner,
   })
   createWindow()
 

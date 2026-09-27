@@ -6,7 +6,9 @@ import { hasWindowsAliasSegment, isSafeRegisteredExecutable } from '../core/proc
 import { createAgentService } from '../core/agent-service'
 import type { TaskRunService } from '../core/task-run-service'
 import type { ModelClient } from '../core/model-client'
+import type { createSingleAgentRunner } from '../core/single-agent-runner'
 import { validateWorkspaceRoot } from '../core/workspace-validator'
+import { listDirectory } from '../core/file-tools'
 import type { Repositories } from '../database/repositories'
 
 interface IpcHandlerRegistrar {
@@ -25,9 +27,10 @@ export interface IpcHandlerDependencies {
   modelClient?: ModelClient
   approvals?: ReturnType<typeof createApprovalService>
   processes?: ReturnType<typeof createProcessToolService>
+  runner?: ReturnType<typeof createSingleAgentRunner>
 }
 
-export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, modelClient, approvals, processes }: IpcHandlerDependencies): void {
+export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, modelClient, approvals, processes, runner }: IpcHandlerDependencies): void {
   const startingChannels = new Set<string>()
   const agents = createAgentService(repositories)
   ipcMain.handle(IpcChannel.AgentList, () => agents.list())
@@ -48,6 +51,20 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
     const saved = await repositories.saveRegisteredExecutable({ id: executable.id, absolutePath: executable.absolutePath, isEnabled: executable.isEnabled,
       argumentPolicyJson: JSON.stringify(executable.allowedArgs) })
     return { id: saved.id, isEnabled: saved.isEnabled }
+  })
+  ipcMain.handle(IpcChannel.ToolExecutionList, async (_event, taskRunId: unknown) => (await repositories.listToolExecutions(validId(taskRunId))).map((item) => ({
+    id: item.id, taskRunId: item.taskRunId, toolName: item.toolName, riskLevel: item.riskLevel, status: item.status, resultSummary: item.resultSummary, createdAt: item.createdAt,
+  })))
+  ipcMain.handle(IpcChannel.ApprovalList, async (_event, taskRunId: unknown) => (await repositories.listApprovalRequests(validId(taskRunId))).map((item) => ({
+    id: item.id, toolExecutionId: item.toolExecutionId, requestHash: item.requestHash, status: item.status, expiresAt: item.expiresAt,
+  })))
+  ipcMain.handle(IpcChannel.WorkspaceList, async (_event, channelId: unknown, path: unknown) => {
+    if (typeof path !== 'string') throw new Error('请求无效')
+    const channel = await repositories.getChannel(validId(channelId))
+    if (!channel) throw new Error('群聊不存在')
+    const project = (await repositories.listProjects()).find((item) => item.id === channel.projectId)
+    if (!project) throw new Error('项目不存在')
+    return listDirectory(project.workspacePath, path)
   })
   ipcMain.handle(IpcChannel.ProjectList, () => repositories.listProjects())
   ipcMain.handle(IpcChannel.ProjectPickWorkspace, () => pickWorkspacePath(dialog))
@@ -84,12 +101,15 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
     startingChannels.add(input.channelId)
     try {
       const channel = await repositories.getChannel(input.channelId)
-      if (!channel || !await repositories.getModelConfig(input.modelConfigId)) throw new Error('群聊或模型配置不存在')
+      const active = runner && channel && await runner.activeAgent(channel.id)
+      const selectedModelConfigId = active?.modelConfigId ?? input.modelConfigId
+      if (!channel || !await repositories.getModelConfig(selectedModelConfigId)) throw new Error('群聊或模型配置不存在')
       if ((await repositories.listTaskRuns(channel.id)).some((run) => run.status === 'running')) throw new Error('当前群聊已有任务正在运行')
-      await modelClient.requireCloudConsent(channel.projectId, input.modelConfigId)
-      const run = await taskRuns.startTaskRun(channel.id, input.modelConfigId, input.content.trim())
+      await modelClient.requireCloudConsent(channel.projectId, selectedModelConfigId)
+      const run = await taskRuns.startTaskRun(channel.id, selectedModelConfigId, input.content.trim())
       const sender = (event as { sender: StreamSender }).sender
-      void streamReply(run.id, channel.projectId, input.modelConfigId, channel.id, sender, repositories, taskRuns, modelClient)
+      if (active && runner) void runAgentLoop(run.id, channel.projectId, channel.id, active, sender, repositories, taskRuns, runner)
+      else void streamReply(run.id, channel.projectId, input.modelConfigId, channel.id, sender, repositories, taskRuns, modelClient)
       return { taskRunId: run.id }
     } finally {
       startingChannels.delete(input.channelId)
@@ -99,6 +119,29 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
     if (!taskRuns) throw new Error('TaskRun service is unavailable')
     await taskRuns.cancelTaskRun(taskRunId)
   })
+}
+
+async function runAgentLoop(
+  taskRunId: string, projectId: string, channelId: string, active: Awaited<ReturnType<NonNullable<IpcHandlerDependencies['runner']>['activeAgent']>>,
+  sender: StreamSender, repositories: Repositories, taskRuns: TaskRunService, runner: NonNullable<IpcHandlerDependencies['runner']>,
+): Promise<void> {
+  if (!active) return
+  const send = async (event: StreamEvent) => {
+    if (event.type === 'error') {
+      // A pending approval is a pause signal, not a model/provider failure; the
+      // run remains live solely for the immutable approval workflow.
+      if (!event.content?.includes('等待 CEO 审批')) {
+        const failed = await repositories.transitionTaskRun(taskRunId, 'running', 'failed', { errorMessage: event.content ?? '任务已停止' })
+        if (!failed) return
+      }
+    }
+    if (!sender.isDestroyed()) sender.send(IpcChannel.MessageStream, event)
+  }
+  try { await runner.run({ taskRunId, projectId, channelId, active, onEvent: send }) }
+  catch {
+    const failed = await repositories.transitionTaskRun(taskRunId, 'running', 'failed', { errorMessage: 'Agent 任务执行失败，请重试' }).catch(() => undefined)
+    if (failed && !sender.isDestroyed()) sender.send(IpcChannel.MessageStream, { taskRunId, type: 'error', content: 'Agent 任务执行失败，请重试' })
+  }
 }
 
 function requireApprovals(value: IpcHandlerDependencies['approvals']): NonNullable<IpcHandlerDependencies['approvals']> {

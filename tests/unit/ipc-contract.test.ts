@@ -9,5 +9,7 @@ it('defines exactly the named IPC channels', () => {
     'channel-agent:list', 'channel-agent:save', 'channel-agent:remove',
     'approval:approve', 'approval:reject', 'approval:expire', 'approval:run-approved',
     'executable:list', 'executable:save',
+    'tool-execution:list', 'approval:list', 'workspace:list',
   ])
+  expect(Object.values(IpcChannel).join(' ')).not.toMatch(/\b(fs|process|shell|database|credential)\b/i)
 })

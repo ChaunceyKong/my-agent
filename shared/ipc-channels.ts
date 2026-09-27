@@ -27,4 +27,7 @@ export enum IpcChannel {
   ApprovalRunApproved = 'approval:run-approved',
   ExecutableList = 'executable:list',
   ExecutableSave = 'executable:save',
+  ToolExecutionList = 'tool-execution:list',
+  ApprovalList = 'approval:list',
+  WorkspaceList = 'workspace:list',
 }

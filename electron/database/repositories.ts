@@ -108,6 +108,7 @@ export interface Repositories {
   createApprovalRequest(toolExecutionId: string, expiresAt: string): Promise<ApprovalRequest>
   getApprovalRequest(id: string): Promise<ApprovalRequest | undefined>
   getApprovalForToolExecution(toolExecutionId: string): Promise<ApprovalRequest | undefined>
+  listApprovalRequests(taskRunId: string): Promise<ApprovalRequest[]>
   decideApprovalRequest(id: string, requestHash: string, decision: 'approved' | 'rejected', now: string): Promise<ApprovalRequest>
   expireApprovalRequest(id: string, now: string): Promise<ApprovalRequest>
   claimApprovedProcess(id: string, now: string): Promise<{ execution: ToolExecution; executable: RegisteredExecutable; workspacePath: string }>
@@ -224,6 +225,13 @@ export function createRepositories(client: DatabaseClient): Repositories {
 
     async getApprovalForToolExecution(toolExecutionId) {
       return client.db.select().from(approvalRequests).where(eq(approvalRequests.toolExecutionId, toolExecutionId)).get()
+    },
+
+    async listApprovalRequests(taskRunId) {
+      return client.db.select({ approval: approvalRequests }).from(approvalRequests)
+        .innerJoin(toolExecutions, eq(toolExecutions.id, approvalRequests.toolExecutionId))
+        .where(eq(toolExecutions.taskRunId, taskRunId)).orderBy(asc(approvalRequests.createdAt), asc(approvalRequests.id)).all()
+        .map(({ approval }) => approval)
     },
 
     async decideApprovalRequest(id, requestHash, decision, now) {

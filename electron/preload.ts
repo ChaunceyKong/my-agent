@@ -27,7 +27,10 @@ const api: AgentTeamApi = {
     reject: (id, requestHash) => ipcRenderer.invoke(IpcChannel.ApprovalReject, id, requestHash),
     expire: (id) => ipcRenderer.invoke(IpcChannel.ApprovalExpire, id),
     runApproved: (id) => ipcRenderer.invoke(IpcChannel.ApprovalRunApproved, id),
+    list: (taskRunId) => ipcRenderer.invoke(IpcChannel.ApprovalList, taskRunId),
   },
+  tools: { list: (taskRunId) => ipcRenderer.invoke(IpcChannel.ToolExecutionList, taskRunId) },
+  workspace: { list: (channelId, path) => ipcRenderer.invoke(IpcChannel.WorkspaceList, channelId, path) },
   executables: {
     list: () => ipcRenderer.invoke(IpcChannel.ExecutableList),
     save: (input) => ipcRenderer.invoke(IpcChannel.ExecutableSave, input),

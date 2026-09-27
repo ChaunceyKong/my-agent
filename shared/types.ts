@@ -272,7 +272,10 @@ export interface AgentTeamApi {
     reject(id: string, requestHash: string): Promise<{ id: string; status: ApprovalRequestStatus }>
     expire(id: string): Promise<{ id: string; status: ApprovalRequestStatus }>
     runApproved(id: string): Promise<void>
+    list(taskRunId: string): Promise<Array<Pick<ApprovalRequest, 'id' | 'toolExecutionId' | 'requestHash' | 'status' | 'expiresAt'>>>
   }
+  tools: { list(taskRunId: string): Promise<Array<Pick<ToolExecution, 'id' | 'taskRunId' | 'toolName' | 'riskLevel' | 'status' | 'resultSummary' | 'createdAt'>>> }
+  workspace: { list(channelId: string, path: string): Promise<ListDirectoryResult> }
   executables: {
     list(): Promise<Array<Pick<RegisteredExecutable, 'id' | 'isEnabled'>>>
     save(input: RegisteredExecutableInput): Promise<Pick<RegisteredExecutable, 'id' | 'isEnabled'>>

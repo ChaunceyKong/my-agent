@@ -19,7 +19,9 @@ beforeEach(() => {
   api = {
     agents: { list: vi.fn().mockResolvedValue([]), get: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn() },
     channelAgents: { list: vi.fn().mockResolvedValue([]), save: vi.fn(), remove: vi.fn() },
-    approvals: { approve: vi.fn(), reject: vi.fn(), expire: vi.fn(), runApproved: vi.fn() },
+    approvals: { approve: vi.fn(), reject: vi.fn(), expire: vi.fn(), runApproved: vi.fn(), list: vi.fn().mockResolvedValue([]) },
+    tools: { list: vi.fn().mockResolvedValue([]) },
+    workspace: { list: vi.fn().mockResolvedValue({ entries: [], summary: '', truncated: false, limits: {} }) },
     executables: { list: vi.fn().mockResolvedValue([]), save: vi.fn() },
     projects: { list: vi.fn().mockResolvedValue([project]), pickWorkspace: vi.fn().mockResolvedValue('C:/work/content'), create: vi.fn().mockResolvedValue(project) },
     channels: { list: vi.fn().mockResolvedValue([channel]), create: vi.fn().mockResolvedValue({ ...channel, id: 'c2', name: '选题群' }) },
@@ -148,9 +150,9 @@ it('saves credentials through settings and renders explicit unavailable cockpit 
   await userEvent.click(screen.getByRole('button', { name: '保存配置' }))
   await waitFor(() => expect(api.models.save).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'secret-key', providerPreset: 'deepseek' })))
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-  expect(screen.getByText(/当前版本尚未启用团队成员/)).toBeVisible()
+  expect(screen.getByText(/尚未创建 Agent/)).toBeVisible()
   await userEvent.click(screen.getByRole('tab', { name: '工作区文件' }))
-  expect(screen.getByText(/当前版本尚未提供文件浏览/)).toBeVisible()
+  expect(await screen.findByLabelText('安全工作区文件')).toBeVisible()
   await userEvent.click(screen.getByRole('button', { name: '收起右侧面板' }))
   expect(screen.queryByRole('complementary', { name: '团队与工作区' })).not.toBeInTheDocument()
 })

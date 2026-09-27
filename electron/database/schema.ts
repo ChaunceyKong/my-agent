@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
 import { sql } from 'drizzle-orm'
 import { integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
-import type { MessageRole, MessageStatus, ModelProviderPreset, TaskRunStatus, ToolExecutionStatus, ToolName, ToolPermissions, ToolRiskLevel } from '../../shared/types'
+import type { ApprovalRequestStatus, MessageRole, MessageStatus, ModelProviderPreset, TaskRunStatus, ToolExecutionStatus, ToolName, ToolPermissions, ToolRiskLevel } from '../../shared/types'
 
 export const projects = sqliteTable('projects', {
   id: text('id').primaryKey(),
@@ -112,7 +112,28 @@ export const toolExecutions = sqliteTable('tool_executions', {
   updatedAt: text('updated_at').notNull(),
 })
 
-export const schema = { agents, auditEvents, channelAgents, channels, cloudConsents, messages, modelConfigs, projects, taskRuns, toolExecutions }
+export const approvalRequests = sqliteTable('approval_requests', {
+  id: text('id').primaryKey(),
+  toolExecutionId: text('tool_execution_id').notNull().references(() => toolExecutions.id, { onDelete: 'cascade' }),
+  requestHash: text('request_hash').notNull(),
+  generation: integer('generation').notNull(),
+  policySnapshotJson: text('policy_snapshot_json').notNull(),
+  status: text('status').$type<ApprovalRequestStatus>().notNull(),
+  expiresAt: text('expires_at').notNull(),
+  decidedAt: text('decided_at'),
+  createdAt: text('created_at').notNull(),
+}, (table) => [uniqueIndex('approval_requests_execution_idx').on(table.toolExecutionId)])
+
+export const registeredExecutables = sqliteTable('registered_executables', {
+  id: text('id').primaryKey(),
+  absolutePath: text('absolute_path').notNull(),
+  isEnabled: integer('is_enabled', { mode: 'boolean' }).notNull().default(false),
+  argumentPolicyJson: text('argument_policy_json').notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+})
+
+export const schema = { agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, messages, modelConfigs, projects, registeredExecutables, taskRuns, toolExecutions }
 
 export function migrate(sqlite: Database.Database): void {
   sqlite.pragma('foreign_keys = ON')
@@ -253,6 +274,33 @@ export function migrate(sqlite: Database.Database): void {
         CREATE INDEX tool_executions_task_run_idx ON tool_executions(task_run_id);
       `)
       sqlite.pragma('user_version = 5')
+    })()
+  }
+
+  if (version < 6) {
+    sqlite.transaction(() => {
+      sqlite.exec(`
+        CREATE TABLE IF NOT EXISTS approval_requests (
+          id TEXT PRIMARY KEY NOT NULL,
+          tool_execution_id TEXT NOT NULL UNIQUE REFERENCES tool_executions(id) ON DELETE CASCADE,
+          request_hash TEXT NOT NULL,
+          generation INTEGER NOT NULL,
+          policy_snapshot_json TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'executing', 'rejected', 'expired', 'cancelled')),
+          expires_at TEXT NOT NULL,
+          decided_at TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS registered_executables (
+          id TEXT PRIMARY KEY NOT NULL,
+          absolute_path TEXT NOT NULL,
+          is_enabled INTEGER NOT NULL DEFAULT 0 CHECK (is_enabled IN (0, 1)),
+          argument_policy_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `)
+      sqlite.pragma('user_version = 6')
     })()
   }
 }

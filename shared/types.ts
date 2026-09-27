@@ -38,6 +38,7 @@ export type ToolRequest =
   | { toolName: 'read_file'; input: { path: string } }
   | { toolName: 'search_files'; input: { path: string; query: string } }
   | { toolName: 'write_file'; input: { path: string; content: string } }
+  | { toolName: 'run_process'; input: { executableId: string; args: string[] } }
 
 export type ToolExecutionStatus = 'executing' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled'
 export type ToolRiskLevel = 'low' | 'medium' | 'high'
@@ -65,6 +66,36 @@ export interface ToolPolicySnapshot {
   agentId: string
   defaultToolPermissions: ToolPermissions
   toolPermissionsOverride: ToolPermissions | null
+}
+
+export type ApprovalRequestStatus = 'pending' | 'approved' | 'executing' | 'rejected' | 'expired' | 'cancelled'
+
+export interface ApprovalRequest {
+  id: string
+  toolExecutionId: string
+  requestHash: string
+  generation: number
+  policySnapshotJson: string
+  status: ApprovalRequestStatus
+  expiresAt: string
+  decidedAt: string | null
+  createdAt: string
+}
+
+export interface RegisteredExecutable {
+  id: string
+  absolutePath: string
+  isEnabled: boolean
+  argumentPolicyJson: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface RegisteredExecutableInput {
+  id: string
+  absolutePath: string
+  isEnabled: boolean
+  allowedArgs: string[]
 }
 
 export type FileToolErrorCode = 'INVALID_PATH' | 'SENSITIVE_PATH' | 'LINK_NOT_ALLOWED' | 'PATH_UNAVAILABLE'
@@ -235,6 +266,16 @@ export interface AgentTeamApi {
     list(channelId: string): Promise<ChannelAgent[]>
     save(input: SaveChannelAgentInput): Promise<ChannelAgent>
     remove(channelId: string, agentId: string): Promise<void>
+  }
+  approvals: {
+    approve(id: string, requestHash: string): Promise<{ id: string; status: ApprovalRequestStatus }>
+    reject(id: string, requestHash: string): Promise<{ id: string; status: ApprovalRequestStatus }>
+    expire(id: string): Promise<{ id: string; status: ApprovalRequestStatus }>
+    runApproved(id: string): Promise<void>
+  }
+  executables: {
+    list(): Promise<Array<Pick<RegisteredExecutable, 'id' | 'isEnabled'>>>
+    save(input: RegisteredExecutableInput): Promise<Pick<RegisteredExecutable, 'id' | 'isEnabled'>>
   }
   projects: {
     list(): Promise<Project[]>

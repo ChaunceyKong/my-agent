@@ -19,6 +19,8 @@ beforeEach(() => {
   api = {
     agents: { list: vi.fn().mockResolvedValue([]), get: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn() },
     channelAgents: { list: vi.fn().mockResolvedValue([]), save: vi.fn(), remove: vi.fn() },
+    approvals: { approve: vi.fn(), reject: vi.fn(), expire: vi.fn(), runApproved: vi.fn() },
+    executables: { list: vi.fn().mockResolvedValue([]), save: vi.fn() },
     projects: { list: vi.fn().mockResolvedValue([project]), pickWorkspace: vi.fn().mockResolvedValue('C:/work/content'), create: vi.fn().mockResolvedValue(project) },
     channels: { list: vi.fn().mockResolvedValue([channel]), create: vi.fn().mockResolvedValue({ ...channel, id: 'c2', name: '选题群' }) },
     models: { list: vi.fn().mockResolvedValue([model]), save: vi.fn().mockResolvedValue({ ...model, id: 'm2' }) },

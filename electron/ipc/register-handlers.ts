@@ -1,5 +1,8 @@
 import { IpcChannel } from '../../shared/ipc-channels'
-import type { AgentEditorInput, CreateChannelInput, CreateProjectInput, SaveChannelAgentInput, SaveModelConfigInput, SendMessageInput, StreamEvent } from '../../shared/types'
+import type { AgentEditorInput, CreateChannelInput, CreateProjectInput, RegisteredExecutableInput, SaveChannelAgentInput, SaveModelConfigInput, SendMessageInput, StreamEvent } from '../../shared/types'
+import type { createApprovalService } from '../core/approval-service'
+import type { createProcessToolService } from '../core/process-tool-service'
+import { hasWindowsAliasSegment, isSafeRegisteredExecutable } from '../core/process-tool'
 import { createAgentService } from '../core/agent-service'
 import type { TaskRunService } from '../core/task-run-service'
 import type { ModelClient } from '../core/model-client'
@@ -20,9 +23,11 @@ export interface IpcHandlerDependencies {
   repositories: Repositories
   taskRuns?: TaskRunService
   modelClient?: ModelClient
+  approvals?: ReturnType<typeof createApprovalService>
+  processes?: ReturnType<typeof createProcessToolService>
 }
 
-export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, modelClient }: IpcHandlerDependencies): void {
+export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, modelClient, approvals, processes }: IpcHandlerDependencies): void {
   const startingChannels = new Set<string>()
   const agents = createAgentService(repositories)
   ipcMain.handle(IpcChannel.AgentList, () => agents.list())
@@ -33,6 +38,17 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
   ipcMain.handle(IpcChannel.ChannelAgentList, (_event, channelId: string) => agents.listChannelAgents(channelId))
   ipcMain.handle(IpcChannel.ChannelAgentSave, (_event, input: SaveChannelAgentInput) => agents.saveChannelAgent(input))
   ipcMain.handle(IpcChannel.ChannelAgentRemove, (_event, channelId: string, agentId: string) => agents.removeChannelAgent(channelId, agentId))
+  ipcMain.handle(IpcChannel.ApprovalApprove, async (_event, id: unknown, requestHash: unknown) => safeApproval(await requireApprovals(approvals).approve(validId(id), validHash(requestHash))))
+  ipcMain.handle(IpcChannel.ApprovalReject, async (_event, id: unknown, requestHash: unknown) => safeApproval(await requireApprovals(approvals).reject(validId(id), validHash(requestHash))))
+  ipcMain.handle(IpcChannel.ApprovalExpire, async (_event, id: unknown) => safeApproval(await requireApprovals(approvals).expire(validId(id))))
+  ipcMain.handle(IpcChannel.ApprovalRunApproved, async (_event, id: unknown) => { await requireProcesses(processes).runApproved(validId(id)) })
+  ipcMain.handle(IpcChannel.ExecutableList, async () => (await repositories.listRegisteredExecutables()).map(({ id, isEnabled }) => ({ id, isEnabled })))
+  ipcMain.handle(IpcChannel.ExecutableSave, async (_event, input: unknown) => {
+    const executable = validExecutable(input)
+    const saved = await repositories.saveRegisteredExecutable({ id: executable.id, absolutePath: executable.absolutePath, isEnabled: executable.isEnabled,
+      argumentPolicyJson: JSON.stringify(executable.allowedArgs) })
+    return { id: saved.id, isEnabled: saved.isEnabled }
+  })
   ipcMain.handle(IpcChannel.ProjectList, () => repositories.listProjects())
   ipcMain.handle(IpcChannel.ProjectPickWorkspace, () => pickWorkspacePath(dialog))
   ipcMain.handle(IpcChannel.ProjectCreate, async (_event, input: CreateProjectInput) => {
@@ -83,6 +99,33 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
     if (!taskRuns) throw new Error('TaskRun service is unavailable')
     await taskRuns.cancelTaskRun(taskRunId)
   })
+}
+
+function requireApprovals(value: IpcHandlerDependencies['approvals']): NonNullable<IpcHandlerDependencies['approvals']> {
+  if (!value) throw new Error('审批服务不可用')
+  return value
+}
+function requireProcesses(value: IpcHandlerDependencies['processes']): NonNullable<IpcHandlerDependencies['processes']> {
+  if (!value) throw new Error('受控进程服务不可用')
+  return value
+}
+function validId(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new Error('请求无效')
+  return value
+}
+function validHash(value: unknown): string {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw new Error('请求无效')
+  return value
+}
+function safeApproval(value: { id: string; status: string }): { id: string; status: string } { return { id: value.id, status: value.status } }
+function validExecutable(value: unknown): RegisteredExecutableInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('登记程序无效')
+  const input = value as Record<string, unknown>
+  if (Object.keys(input).length !== 4 || !Object.hasOwn(input, 'id') || !Object.hasOwn(input, 'absolutePath') || !Object.hasOwn(input, 'isEnabled') || !Object.hasOwn(input, 'allowedArgs')
+    || typeof input.absolutePath !== 'string' || !/^[A-Za-z]:\\[^\r\n]{1,1024}$/.test(input.absolutePath) || typeof input.isEnabled !== 'boolean'
+    || !Array.isArray(input.allowedArgs) || input.allowedArgs.length > 32 || input.allowedArgs.some((arg) => typeof arg !== 'string' || !arg || arg === '*' || arg.length > 1024 || /[|&;<>`$\r\n]/.test(arg))
+    || hasWindowsAliasSegment(input.absolutePath) || !isSafeRegisteredExecutable(input.absolutePath, input.allowedArgs as string[])) throw new Error('登记程序无效')
+  return { id: validId(input.id), absolutePath: input.absolutePath, isEnabled: input.isEnabled, allowedArgs: input.allowedArgs as string[] }
 }
 
 interface StreamSender {

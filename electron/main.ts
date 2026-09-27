@@ -2,6 +2,8 @@ import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron'
 import type { OpenDialogOptions } from 'electron'
 import { join } from 'node:path'
 import { createTaskRunService } from './core/task-run-service'
+import { createApprovalService } from './core/approval-service'
+import { createProcessToolService } from './core/process-tool-service'
 import { createCloudConsentService } from './core/cloud-consent-service'
 import { createModelClient } from './core/model-client'
 import { openStartupDatabase } from './core/startup'
@@ -42,6 +44,8 @@ app.whenReady().then(async () => {
   app.once('will-quit', () => database.close())
   const repositories = createRepositories(database)
   const taskRuns = createTaskRunService(repositories)
+  const approvals = createApprovalService(repositories)
+  const processes = createProcessToolService(repositories, taskRuns)
   const consent = createCloudConsentService(repositories)
   const modelClient = createModelClient({
     repositories,
@@ -55,6 +59,8 @@ app.whenReady().then(async () => {
     repositories,
     taskRuns,
     modelClient,
+    approvals,
+    processes,
   })
   createWindow()
 

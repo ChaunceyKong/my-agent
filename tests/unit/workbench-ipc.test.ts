@@ -50,6 +50,19 @@ it('requires pair-specific Main consent before creating a run or requesting the 
   expect(await invoke(IpcChannel.CloudConsentHas, projectId, modelConfigId)).toBe(true)
 })
 
+it('rejects dangerous executable registrations before persisting them', async () => {
+  for (const input of [
+    { id: 'node', absolutePath: 'C:\\node.exe', isEnabled: true, allowedArgs: ['--eval', 'process.exit(0)'] },
+    { id: 'python', absolutePath: 'C:\\python.exe', isEnabled: true, allowedArgs: ['-c', 'print(1)'] },
+    { id: 'git', absolutePath: 'C:\\git.exe', isEnabled: true, allowedArgs: ['reset', '--hard'] },
+    { id: 'star', absolutePath: 'C:\\tool.exe', isEnabled: true, allowedArgs: ['*'] },
+    { id: 'node-dot', absolutePath: 'C:\\node.exe.', isEnabled: true, allowedArgs: ['--eval', 'process.exit(0)'] },
+    { id: 'node-space', absolutePath: 'C:\\node.exe ', isEnabled: true, allowedArgs: ['--eval', 'process.exit(0)'] },
+    { id: 'git-dot', absolutePath: 'C:\\git.exe.', isEnabled: true, allowedArgs: ['reset', '--hard'] },
+  ]) await expect(invoke(IpcChannel.ExecutableSave, input)).rejects.toThrow('登记程序无效')
+  expect(await repositories.listRegisteredExecutables()).toEqual([])
+})
+
 it('streams from Main, persists reply and terminal state, and returns only safe channel data', async () => {
   await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId)
   fetchImpl.mockResolvedValue(new Response('data: {"choices":[{"delta":{"content":"你好，主理人"}}]}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))

@@ -21,4 +21,10 @@ export enum IpcChannel {
   ChannelAgentList = 'channel-agent:list',
   ChannelAgentSave = 'channel-agent:save',
   ChannelAgentRemove = 'channel-agent:remove',
+  ApprovalApprove = 'approval:approve',
+  ApprovalReject = 'approval:reject',
+  ApprovalExpire = 'approval:expire',
+  ApprovalRunApproved = 'approval:run-approved',
+  ExecutableList = 'executable:list',
+  ExecutableSave = 'executable:save',
 }

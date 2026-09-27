@@ -22,6 +22,16 @@ const api: AgentTeamApi = {
     save: (input) => ipcRenderer.invoke(IpcChannel.ChannelAgentSave, input),
     remove: (channelId, agentId) => ipcRenderer.invoke(IpcChannel.ChannelAgentRemove, channelId, agentId),
   },
+  approvals: {
+    approve: (id, requestHash) => ipcRenderer.invoke(IpcChannel.ApprovalApprove, id, requestHash),
+    reject: (id, requestHash) => ipcRenderer.invoke(IpcChannel.ApprovalReject, id, requestHash),
+    expire: (id) => ipcRenderer.invoke(IpcChannel.ApprovalExpire, id),
+    runApproved: (id) => ipcRenderer.invoke(IpcChannel.ApprovalRunApproved, id),
+  },
+  executables: {
+    list: () => ipcRenderer.invoke(IpcChannel.ExecutableList),
+    save: (input) => ipcRenderer.invoke(IpcChannel.ExecutableSave, input),
+  },
   projects: {
     list: () => ipcRenderer.invoke(IpcChannel.ProjectList),
     pickWorkspace: () => ipcRenderer.invoke(IpcChannel.ProjectPickWorkspace),

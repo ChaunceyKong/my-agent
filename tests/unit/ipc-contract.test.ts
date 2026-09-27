@@ -7,5 +7,7 @@ it('defines exactly the named IPC channels', () => {
     'message:stream', 'message:list', 'task-run:list', 'cloud-consent:has', 'cloud-consent:grant',
     'agent:list', 'agent:get', 'agent:create', 'agent:update', 'agent:remove',
     'channel-agent:list', 'channel-agent:save', 'channel-agent:remove',
+    'approval:approve', 'approval:reject', 'approval:expire', 'approval:run-approved',
+    'executable:list', 'executable:save',
   ])
 })

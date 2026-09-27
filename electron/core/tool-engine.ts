@@ -19,8 +19,13 @@ function object(value: unknown, keys: string[]): Record<string, unknown> {
 export function validateToolRequest(value: unknown): ToolRequest {
   const request = object(value, ['toolName', 'input'])
   const name = request.toolName
-  if (!['list_dir', 'read_file', 'search_files', 'write_file'].includes(name as string)) throw new Error('工具不支持')
-  const input = object(request.input, name === 'write_file' ? ['path', 'content'] : name === 'search_files' ? ['path', 'query'] : ['path'])
+  if (!['list_dir', 'read_file', 'search_files', 'write_file', 'run_process'].includes(name as string)) throw new Error('工具不支持')
+  const input = object(request.input, name === 'write_file' ? ['path', 'content'] : name === 'search_files' ? ['path', 'query'] : name === 'run_process' ? ['executableId', 'args'] : ['path'])
+  if (name === 'run_process') {
+    if (typeof input.executableId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(input.executableId)
+      || !Array.isArray(input.args) || input.args.length > 32 || input.args.some((arg) => typeof arg !== 'string')) throw new Error('进程参数无效')
+    return { toolName: 'run_process', input: { executableId: input.executableId, args: input.args as string[] } }
+  }
   if (typeof input.path !== 'string' || !input.path.trim() || input.path.length > FILE_TOOL_LIMITS.maxPathChars) throw new Error('工具路径无效')
   if (name === 'write_file') {
     if (typeof input.content !== 'string' || Buffer.byteLength(input.content, 'utf8') > FILE_TOOL_LIMITS.maxFileBytes
@@ -44,11 +49,17 @@ function unchanged(path: string, expected: Stats): void {
     || relative(path, realpathSync(path)) !== '') throw new FileToolError('FILE_CHANGED', '文件路径已变化')
 }
 
-export function createToolEngine(repositories: Repositories) {
+export function createToolEngine(repositories: Repositories, approval?: { request(toolExecutionId: string): Promise<unknown> }) {
   return {
     async execute(context: ToolContext, value: unknown): Promise<ToolResponse> {
       const request = validateToolRequest(value)
+      const approvalService = approval
+      if (request.toolName === 'run_process' && !approvalService) throw new Error('审批服务不可用')
       const execution = await repositories.createToolExecution(context, request)
+      if (request.toolName === 'run_process') {
+        await approvalService!.request(execution.id)
+        return { execution: (await repositories.getToolExecution(execution.id))! }
+      }
       const { workspacePath: root } = JSON.parse(execution.policySnapshotJson) as ToolPolicySnapshot
       try {
         if (request.toolName === 'write_file') {

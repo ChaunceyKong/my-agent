@@ -4,6 +4,8 @@ import type {
   Agent,
   AgentEditorInput,
   AuditEvent,
+  ApprovalRequest,
+  ApprovalRequestStatus,
   Channel,
   ChannelAgent,
   CreateChannelInput,
@@ -18,10 +20,11 @@ import type {
   ToolPermissions,
   ToolPolicySnapshot,
   ToolRequest,
+  RegisteredExecutable,
 } from '../../shared/types'
 import { hashToolRequest, toolAuditEvent } from '../core/audit-service'
 import type { AppDatabase, DatabaseClient } from './client'
-import { agents, auditEvents, channelAgents, channels, cloudConsents, messages, modelConfigs, projects, taskRuns, toolExecutions } from './schema'
+import { agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, messages, modelConfigs, projects, registeredExecutables, taskRuns, toolExecutions } from './schema'
 
 export interface ToolContext {
   taskRunId: string
@@ -56,7 +59,11 @@ function invalidateTools(tx: Transaction, run: TaskRun): void {
   const invalidated = tx.update(toolExecutions).set({ status: 'cancelled', resultSummary: '任务操作已失效', updatedAt: new Date().toISOString() })
     .where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval'])))
     .returning().all()
-  for (const execution of invalidated) tx.insert(auditEvents).values(toolAuditEvent(run.channelId, execution)).run()
+  for (const execution of invalidated) {
+    tx.update(approvalRequests).set({ status: 'cancelled', decidedAt: new Date().toISOString() })
+      .where(and(eq(approvalRequests.toolExecutionId, execution.id), eq(approvalRequests.status, 'pending'))).run()
+    tx.insert(auditEvents).values(toolAuditEvent(run.channelId, execution)).run()
+  }
 }
 
 function invalidateChangedToolPolicies(tx: Transaction, scope: SQL): void {
@@ -68,6 +75,8 @@ function invalidateChangedToolPolicies(tx: Transaction, scope: SQL): void {
     const cancelled = tx.update(toolExecutions)
       .set({ status: 'cancelled', resultSummary: '任务操作已失效', updatedAt: new Date().toISOString() })
       .where(eq(toolExecutions.id, execution.id)).returning().get()!
+    tx.update(approvalRequests).set({ status: 'cancelled', decidedAt: new Date().toISOString() })
+      .where(and(eq(approvalRequests.toolExecutionId, execution.id), eq(approvalRequests.status, 'pending'))).run()
     tx.insert(auditEvents).values(toolAuditEvent(run.channelId, cancelled)).run()
   }
 }
@@ -96,6 +105,15 @@ export interface Repositories {
   getToolExecution(id: string): Promise<ToolExecution | undefined>
   listToolExecutions(taskRunId: string): Promise<ToolExecution[]>
   finishToolExecution(id: string, outcome: () => ToolOutcome): Promise<ToolExecution>
+  createApprovalRequest(toolExecutionId: string, expiresAt: string): Promise<ApprovalRequest>
+  getApprovalRequest(id: string): Promise<ApprovalRequest | undefined>
+  getApprovalForToolExecution(toolExecutionId: string): Promise<ApprovalRequest | undefined>
+  decideApprovalRequest(id: string, requestHash: string, decision: 'approved' | 'rejected', now: string): Promise<ApprovalRequest>
+  expireApprovalRequest(id: string, now: string): Promise<ApprovalRequest>
+  claimApprovedProcess(id: string, now: string): Promise<{ execution: ToolExecution; executable: RegisteredExecutable; workspacePath: string }>
+  getRegisteredExecutable(id: string): Promise<RegisteredExecutable | undefined>
+  listRegisteredExecutables(): Promise<RegisteredExecutable[]>
+  saveRegisteredExecutable(input: Omit<RegisteredExecutable, 'createdAt' | 'updatedAt'>): Promise<RegisteredExecutable>
   advanceTaskRunGeneration(id: string): Promise<TaskRun>
   listAgents(): Promise<Agent[]>
   getAgent(id: string): Promise<Agent | undefined>
@@ -179,6 +197,128 @@ export function createRepositories(client: DatabaseClient): Repositories {
         tx.insert(auditEvents).values(toolAuditEvent(run.channelId, next)).run()
         return next
       })
+    },
+
+    async createApprovalRequest(toolExecutionId, expiresAt) {
+      return client.db.transaction((tx) => {
+        const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, toolExecutionId)).get()
+        if (!execution || execution.status !== 'executing') throw new Error('审批对象不可用')
+        const run = tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
+        if (!run || run.status !== 'running' || run.generation !== execution.generation
+          || currentPolicy(tx, run, execution.agentId, execution.toolName) !== execution.policySnapshotJson) throw new Error('审批对象已失效')
+        const timestamp = new Date().toISOString()
+        const approval: ApprovalRequest = { id: randomUUID(), toolExecutionId, requestHash: execution.requestHash,
+          generation: execution.generation, policySnapshotJson: execution.policySnapshotJson, status: 'pending', expiresAt, decidedAt: null, createdAt: timestamp }
+        tx.insert(approvalRequests).values(approval).run()
+        const waiting = tx.update(toolExecutions).set({ status: 'waiting_approval', riskLevel: 'high', resultSummary: '等待 CEO 审批', updatedAt: timestamp })
+          .where(and(eq(toolExecutions.id, execution.id), eq(toolExecutions.status, 'executing'))).returning().get()
+        if (!waiting) throw new Error('审批对象已失效')
+        tx.insert(auditEvents).values(toolAuditEvent(run.channelId, waiting)).run()
+        return approval
+      })
+    },
+
+    async getApprovalRequest(id) {
+      return client.db.select().from(approvalRequests).where(eq(approvalRequests.id, id)).get()
+    },
+
+    async getApprovalForToolExecution(toolExecutionId) {
+      return client.db.select().from(approvalRequests).where(eq(approvalRequests.toolExecutionId, toolExecutionId)).get()
+    },
+
+    async decideApprovalRequest(id, requestHash, decision, now) {
+      return client.db.transaction((tx) => {
+        const approval = tx.select().from(approvalRequests).where(eq(approvalRequests.id, id)).get()
+        if (!approval || approval.status !== 'pending' || approval.requestHash !== requestHash) throw new Error('审批请求不可用')
+        const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, approval.toolExecutionId)).get()
+        const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
+        const valid = execution?.status === 'waiting_approval' && run?.status === 'running' && run.generation === approval.generation
+          && execution.generation === approval.generation && execution.requestHash === approval.requestHash
+          && execution.policySnapshotJson === approval.policySnapshotJson
+          && currentPolicy(tx, run, execution.agentId, execution.toolName) === approval.policySnapshotJson
+        const status: ApprovalRequestStatus = new Date(approval.expiresAt).getTime() <= new Date(now).getTime() ? 'expired' : valid ? decision : 'cancelled'
+        const next = tx.update(approvalRequests).set({ status, decidedAt: now }).where(and(eq(approvalRequests.id, id), eq(approvalRequests.status, 'pending'))).returning().get()
+        if (!next) throw new Error('审批请求不可用')
+        if (status === 'approved' && execution) {
+          const claimed = tx.update(toolExecutions).set({ status: 'executing', updatedAt: now })
+            .where(and(eq(toolExecutions.id, execution.id), eq(toolExecutions.status, 'waiting_approval'))).returning().get()
+          if (!claimed || !run) throw new Error('审批对象已失效')
+          tx.insert(auditEvents).values(toolAuditEvent(run.channelId, claimed)).run()
+        }
+        if (status !== 'approved' && execution && run) {
+          const cancelled = tx.update(toolExecutions).set({ status: 'cancelled', resultSummary: '审批未通过或已失效', updatedAt: now })
+            .where(and(eq(toolExecutions.id, execution.id), eq(toolExecutions.status, 'waiting_approval'))).returning().get()
+          if (cancelled) tx.insert(auditEvents).values(toolAuditEvent(run.channelId, cancelled)).run()
+        }
+        return next
+      })
+    },
+
+    async claimApprovedProcess(id, now) {
+      const claimed = client.db.transaction((tx) => {
+        const approval = tx.select().from(approvalRequests).where(eq(approvalRequests.id, id)).get()
+        const execution = approval && tx.select().from(toolExecutions).where(eq(toolExecutions.id, approval.toolExecutionId)).get()
+        const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
+        const expire = () => {
+          if (approval?.status === 'approved') tx.update(approvalRequests).set({ status: 'expired', decidedAt: now }).where(eq(approvalRequests.id, id)).run()
+          if (execution && run && execution.status === 'executing') {
+            const cancelled = tx.update(toolExecutions).set({ status: 'cancelled', resultSummary: '审批已过期', updatedAt: now })
+              .where(eq(toolExecutions.id, execution.id)).returning().get()
+            if (cancelled) tx.insert(auditEvents).values(toolAuditEvent(run.channelId, cancelled)).run()
+          }
+          return undefined
+        }
+        if (!approval || !execution || !run || approval.status !== 'approved' || execution.status !== 'executing'
+          || execution.toolName !== 'run_process' || execution.requestHash !== approval.requestHash
+          || execution.generation !== approval.generation || execution.policySnapshotJson !== approval.policySnapshotJson) throw new Error('审批请求不可用')
+        if (new Date(approval.expiresAt).getTime() <= new Date(now).getTime()) return expire()
+        if (run.status !== 'running' || run.generation !== approval.generation
+          || currentPolicy(tx, run, execution.agentId, execution.toolName) !== approval.policySnapshotJson) throw new Error('审批请求不可用')
+        let input: { executableId?: unknown; args?: unknown }
+        let snapshot: { workspacePath?: unknown }
+        try { input = JSON.parse(execution.inputJson); snapshot = JSON.parse(execution.policySnapshotJson) } catch { throw new Error('审批请求不可用') }
+        if (typeof input.executableId !== 'string' || !Array.isArray(input.args) || input.args.some((arg) => typeof arg !== 'string')
+          || typeof snapshot.workspacePath !== 'string') throw new Error('审批请求不可用')
+        const executable = tx.select().from(registeredExecutables).where(eq(registeredExecutables.id, input.executableId)).get()
+        if (!executable?.isEnabled) throw new Error('登记可执行文件不可用')
+        const claimed = tx.update(approvalRequests).set({ status: 'executing', decidedAt: now })
+          .where(and(eq(approvalRequests.id, id), eq(approvalRequests.status, 'approved'))).returning().get()
+        if (!claimed) throw new Error('审批请求不可用')
+        return { execution, executable, workspacePath: snapshot.workspacePath }
+      })
+      if (!claimed) throw new Error('审批请求已过期')
+      return claimed
+    },
+
+    async expireApprovalRequest(id, now) {
+      return client.db.transaction((tx) => {
+        const approval = tx.select().from(approvalRequests).where(eq(approvalRequests.id, id)).get()
+        if (!approval || !['pending', 'approved'].includes(approval.status)) throw new Error('审批请求不可用')
+        const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, approval.toolExecutionId)).get()
+        const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
+        const next = tx.update(approvalRequests).set({ status: 'expired', decidedAt: now })
+          .where(eq(approvalRequests.id, id)).returning().get()!
+        if (execution && run && ['executing', 'waiting_approval'].includes(execution.status)) {
+          const cancelled = tx.update(toolExecutions).set({ status: 'cancelled', resultSummary: '审批已过期', updatedAt: now })
+            .where(eq(toolExecutions.id, execution.id)).returning().get()!
+          tx.insert(auditEvents).values(toolAuditEvent(run.channelId, cancelled)).run()
+        }
+        return next
+      })
+    },
+
+    async getRegisteredExecutable(id) {
+      return client.db.select().from(registeredExecutables).where(eq(registeredExecutables.id, id)).get()
+    },
+
+    async listRegisteredExecutables() {
+      return client.db.select().from(registeredExecutables).orderBy(asc(registeredExecutables.id)).all()
+    },
+
+    async saveRegisteredExecutable(input) {
+      const timestamp = new Date().toISOString()
+      return client.db.insert(registeredExecutables).values({ ...input, createdAt: timestamp, updatedAt: timestamp })
+        .onConflictDoUpdate({ target: registeredExecutables.id, set: { ...input, updatedAt: timestamp } }).returning().get()
     },
 
     async advanceTaskRunGeneration(id) {

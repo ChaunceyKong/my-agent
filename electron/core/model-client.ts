@@ -166,7 +166,7 @@ async function consumeEventStream(
         if (!data) continue
         if (data === '[DONE]') {
           if (!hasData) throw new ModelClientError('malformed')
-          if (pendingToolCalls.size && !toolCallsTerminal) throw new ModelClientError('malformed')
+          if ((pendingToolCalls.size && !toolCallsTerminal) || (toolCallsTerminal && pendingToolCalls.size === 0)) throw new ModelClientError('malformed')
           for (const call of pendingToolCalls.values()) await emitIfAccepted(taskRuns, taskRunId, onEvent, { taskRunId, type: 'tool_call', toolCall: call })
           await emitIfAccepted(taskRuns, taskRunId, onEvent, { taskRunId, type: 'complete' })
           return

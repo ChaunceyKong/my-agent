@@ -103,6 +103,7 @@ export function createModelClient({
             body: JSON.stringify({
               model: modelConfig.modelName,
               messages: input.messages,
+              ...(input.tools?.length ? { tools: input.tools, tool_choice: 'auto' } : {}),
               stream: true,
             }),
           })
@@ -182,7 +183,8 @@ async function consumeEventStream(
         }
         for (const choice of parsed.choices) {
           if (!isRecord(choice) || !isRecord(choice.delta)
-            || (choice.delta.content != null && typeof choice.delta.content !== 'string')) {
+            || (choice.delta.content != null && typeof choice.delta.content !== 'string')
+            || (choice.delta.tool_calls != null && !Array.isArray(choice.delta.tool_calls))) {
             throw new ModelClientError('malformed')
           }
         }
@@ -191,6 +193,15 @@ async function consumeEventStream(
         if (typeof content === 'string' && content.length > 0) {
           const accepted = await emitIfAccepted(taskRuns, taskRunId, onEvent, { taskRunId, type: 'delta', content })
           if (!accepted) return
+        }
+        const calls = parsed.choices[0].delta.tool_calls
+        if (calls !== undefined) for (const call of calls) {
+          if (!isRecord(call) || typeof call.index !== 'number' || !isRecord(call.function)
+            || (call.id !== undefined && typeof call.id !== 'string') || (call.function.name !== undefined && typeof call.function.name !== 'string')
+            || (call.function.arguments !== undefined && typeof call.function.arguments !== 'string')) throw new ModelClientError('malformed')
+          await emitIfAccepted(taskRuns, taskRunId, onEvent, { taskRunId, type: 'tool_call', toolCall: {
+            index: call.index, id: call.id ?? '', name: (call.function.name ?? '') as any, arguments: call.function.arguments ?? '',
+          } })
         }
       }
 

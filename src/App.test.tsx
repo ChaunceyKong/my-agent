@@ -110,6 +110,7 @@ it('requires explicit consent for the project and model before sending', async (
   await userEvent.click(screen.getByRole('button', { name: '发送消息' }))
   expect(await screen.findByRole('dialog', { name: '云端模型授权' })).toBeVisible()
   expect(api.tasks.send).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('checkbox', { name: /我了解 Agent 工具结果/ }))
   await userEvent.click(screen.getByRole('button', { name: '同意并发送' }))
   await waitFor(() => expect(api.tasks.send).toHaveBeenCalled())
   expect(api.consent.grant).toHaveBeenCalledWith('p1', 'm1')

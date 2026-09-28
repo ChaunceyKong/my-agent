@@ -248,20 +248,25 @@ export interface AuditEvent {
 
 export interface StreamEvent {
   taskRunId: string
-  type: 'delta' | 'complete' | 'error'
+  type: 'delta' | 'tool_call' | 'complete' | 'error'
   content?: string
+  toolCall?: NativeToolCall
 }
 
-export interface ChatMessage {
+export interface NativeToolCall { id: string; index: number; name: ToolName; arguments: string }
+export type ChatMessage = {
   role: 'system' | 'user' | 'assistant'
   content: string
-}
+} | { role: 'assistant'; content: null; tool_calls: NativeToolCall[] } | { role: 'tool'; tool_call_id: string; content: string }
+
+export interface NativeToolDefinition { type: 'function'; function: { name: ToolName; description: string; parameters: Record<string, unknown> } }
 
 export interface StreamChatInput {
   projectId: string
   modelConfigId: string
   taskRunId: string
   messages: ChatMessage[]
+  tools?: NativeToolDefinition[]
 }
 
 export interface AgentTeamApi {

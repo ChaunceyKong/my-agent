@@ -171,6 +171,7 @@ async function consumeEventStream(
           await emitIfAccepted(taskRuns, taskRunId, onEvent, { taskRunId, type: 'complete' })
           return
         }
+        if (toolCallsTerminal) throw new ModelClientError('malformed')
         let parsed: Record<string, unknown>
         try {
           parsed = JSON.parse(data)

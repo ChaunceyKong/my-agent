@@ -43,7 +43,8 @@ it('uses native tool role lineage and does not execute a tool-shaped file inject
 })
 
 it('redacts credentials and applies a UTF-8 byte cap to tool observations', () => {
-  const output = sanitizeToolObservation('ok', { path: '.env/token.txt', content: 'Authorization: Bearer abc123\n{"api_key":"x","cookie":"y"}\n' + '😀'.repeat(6000), truncated: false } as any)
-  expect(output).not.toContain('abc123'); expect(output).not.toContain('"x"'); expect(output).not.toContain('token.txt')
+  const root = 'C:\\Users\\Alice\\Project'
+  const output = sanitizeToolObservation('ok', { path: '.env/token.txt', content: `normal text ${root}/.env and ${root.replaceAll('\\', '/')}/credentials/key\nAuthorization: Bearer abc123\n{"api_key":"x","cookie":"y"}\n` + '😀'.repeat(6000), truncated: false } as any, root)
+  expect(output).not.toContain('abc123'); expect(output).not.toContain('"x"'); expect(output).not.toContain('token.txt'); expect(output).not.toContain(root); expect(output).not.toContain('.env')
   expect(Buffer.byteLength(output, 'utf8')).toBeLessThanOrEqual(12_000)
 })

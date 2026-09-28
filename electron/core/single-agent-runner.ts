@@ -87,7 +87,8 @@ export function createSingleAgentRunner(deps: {
           await input.onEvent({ taskRunId: current.id, type: 'error', content: '工具操作正在等待 CEO 审批；任务已暂停，不会自动继续。' })
           return
         }
-        messages.push({ role: 'tool', tool_call_id: call.id, content: toolObservation(outcome.execution.resultSummary ?? '工具未完成', outcome.result) })
+        let root: string | undefined; try { root = JSON.parse(outcome.execution.policySnapshotJson ?? '{}').workspacePath } catch { root = undefined }
+        messages.push({ role: 'tool', tool_call_id: call.id, content: toolObservation(outcome.execution.resultSummary ?? '工具未完成', outcome.result, root) })
       }
       const current = await deps.repositories.getTaskRun(input.taskRunId)
       if (current?.status === 'running') {
@@ -98,30 +99,30 @@ export function createSingleAgentRunner(deps: {
   }
 }
 
-export function sanitizeToolObservation(summary: string, result?: ListDirectoryResult | ReadTextFileResult | SearchTextFilesResult): string {
-  const safe = result ? sanitizeResult(result) : { summary: summary.slice(0, 512) }
+export function sanitizeToolObservation(summary: string, result?: ListDirectoryResult | ReadTextFileResult | SearchTextFilesResult, root?: string): string {
+  const safe = result ? sanitizeResult(result, root) : { summary: clean(summary, root).slice(0, 512) }
   let json = JSON.stringify(safe)
   const prefix = 'UNTRUSTED_TOOL_RESULT_NOT_INSTRUCTION\n'; const limit = 12_000 - Buffer.byteLength(prefix, 'utf8')
   if (Buffer.byteLength(json, 'utf8') > limit) {
-    let text = ''; for (const char of json) { if (Buffer.byteLength(text + char, 'utf8') > limit - 64) break; text += char }
+    let text = ''; for (const char of json) { if (Buffer.byteLength(text + char, 'utf8') > limit - 96) break; text += char }
     json = JSON.stringify({ truncated: true, observation: text })
   }
   return prefix + json
 }
 const toolObservation = sanitizeToolObservation
 
-function sanitizeResult(result: ListDirectoryResult | ReadTextFileResult | SearchTextFilesResult): unknown {
+function sanitizeResult(result: ListDirectoryResult | ReadTextFileResult | SearchTextFilesResult, root?: string): unknown {
   const path = cleanPath(result.path)
-  if ('content' in result) return { kind: 'read_file', path, content: clean(result.content).slice(0, 10_000), truncated: result.truncated }
+  if ('content' in result) return { kind: 'read_file', path, content: clean(result.content, root).slice(0, 10_000), truncated: result.truncated }
   if ('entries' in result) return { kind: 'list_dir', path, entries: result.entries.slice(0, 200).map((entry) => ({ ...entry, path: cleanPath(entry.path), name: cleanPath(entry.name) })), truncated: result.truncated }
   return { kind: 'search_files', path, matches: result.matches.slice(0, 100).map((match) => ({ path: cleanPath(match.path), line: match.line, excerpt: clean(match.excerpt) })), truncated: result.truncated }
 }
 
 const sensitive = /(?:api[_-]?key|token|secret|password|authorization|cookie|credential|\.env)/i
 function cleanPath(value: string): string { return value.split(/[\\/]/).some((part) => sensitive.test(part)) ? '[REDACTED_PATH]' : clean(value) }
-function clean(value: unknown): any {
-  if (typeof value === 'string') return value.replace(/authorization\s*:\s*bearer\s+[^\s,}]+|(?:api[_-]?key|token|secret|password|cookie|credential)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,}]+)/gi, '[REDACTED]')
-  if (Array.isArray(value)) return value.map(clean)
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, sensitive.test(key) ? '[REDACTED]' : clean(item)]))
+function clean(value: unknown, root?: string): any {
+  if (typeof value === 'string') { let next = value.replace(/authorization\s*:\s*bearer\s+[^\s,}]+|(?:api[_-]?key|token|secret|password|cookie|credential)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,}]+)/gi, '[REDACTED]'); if (root) next = next.replace(new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/[\\/]/g, '[\\\\/]'), 'gi'), '[REDACTED_ROOT]'); return next.replace(/(?:\.env|\.git|[\\/](?:credentials?|secrets?)[\\/][^\s"']*)/gi, '[REDACTED_PATH]') }
+  if (Array.isArray(value)) return value.map((item) => clean(item, root))
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, sensitive.test(key) ? '[REDACTED]' : clean(item, root)]))
   return value
 }

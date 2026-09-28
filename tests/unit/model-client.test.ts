@@ -308,4 +308,11 @@ describe('OpenAI-compatible streaming', () => {
     await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [] }, (event) => { events.push(event) })
     expect(events).toEqual([expect.objectContaining({ type: 'error', content: '模型响应格式异常，请稍后重试' })])
   })
+
+  it('rejects any fragment appended after the tool_calls terminal frame', async () => {
+    const ids = await createProjectAndModel(); const events: StreamEvent[] = []
+    fetchImpl.mockResolvedValue(streamResponse(['data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}\n\n', 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"evil"}}]}}]}\n\n', 'data: [DONE]\n\n']))
+    await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [] }, (event) => { events.push(event) })
+    expect(events).toEqual([expect.objectContaining({ type: 'error', content: '模型响应格式异常，请稍后重试' })])
+  })
 })

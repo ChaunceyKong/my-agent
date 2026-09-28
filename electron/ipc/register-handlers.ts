@@ -100,10 +100,12 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
   ipcMain.handle(IpcChannel.MessageList, (_event, channelId: string) => repositories.listMessages(channelId))
   ipcMain.handle(IpcChannel.TaskRunList, (_event, channelId: string) => repositories.listTaskRuns(channelId))
   ipcMain.handle(IpcChannel.CloudConsentHas, (_event, projectId: string, modelConfigId: string) => repositories.hasCloudConsent(projectId, modelConfigId))
-  ipcMain.handle(IpcChannel.CloudConsentGrant, async (_event, projectId: string, modelConfigId: string) => {
+  ipcMain.handle(IpcChannel.CloudConsentGrant, async (_event, projectId: string, modelConfigId: string, scope: unknown) => {
     const project = (await repositories.listProjects()).find((item) => item.id === projectId)
     if (!project || !await repositories.getModelConfig(modelConfigId)) throw new Error('项目或模型配置不存在')
+    if (!scope || typeof scope !== 'object' || (scope as { allowToolResultUpload?: unknown }).allowToolResultUpload !== true) throw new Error('需要明确授权工具结果上传')
     await repositories.recordCloudConsent(projectId, modelConfigId)
+    await repositories.recordToolResultConsent(projectId, modelConfigId, 1)
   })
   ipcMain.handle(IpcChannel.MessageSend, async (event, input: SendMessageInput) => {
     if (!taskRuns || !modelClient) throw new Error('模型服务不可用')

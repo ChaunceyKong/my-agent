@@ -315,7 +315,7 @@ it('migrates v4 runs with generation zero and preserves existing data on repeate
     migrate(sqlite)
     migrate(sqlite)
     expect(sqlite.prepare('SELECT id, generation, status FROM task_runs').get()).toEqual({ id: 'r', generation: 0, status: 'running' })
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(6)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(7)
   } finally { sqlite.close() }
 })
 

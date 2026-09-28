@@ -46,8 +46,14 @@ it('requires pair-specific Main consent before creating a run or requesting the 
   await expect(send()).rejects.toThrow()
   expect(fetchImpl).not.toHaveBeenCalled()
   expect(await repositories.listMessages(channelId)).toEqual([])
-  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId)
+  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: true })
   expect(await invoke(IpcChannel.CloudConsentHas, projectId, modelConfigId)).toBe(true)
+})
+
+it('rejects forged or missing tool-result upload consent at the Main IPC boundary', async () => {
+  await expect(invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId)).rejects.toThrow('明确授权')
+  await expect(invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: false })).rejects.toThrow('明确授权')
+  expect(await repositories.hasCloudConsent(projectId, modelConfigId)).toBe(false)
 })
 
 it('never returns an absolute workspace root to renderer project or picker IPC', async () => {
@@ -71,7 +77,7 @@ it('rejects dangerous executable registrations before persisting them', async ()
 })
 
 it('streams from Main, persists reply and terminal state, and returns only safe channel data', async () => {
-  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId)
+  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: true })
   fetchImpl.mockResolvedValue(new Response('data: {"choices":[{"delta":{"content":"你好，主理人"}}]}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
   const { taskRunId } = await send()
   await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, { taskRunId, type: 'complete' }))
@@ -86,7 +92,7 @@ it('streams from Main, persists reply and terminal state, and returns only safe 
 })
 
 it('rejects duplicate channel sends and suppresses stream events after cancellation', async () => {
-  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId)
+  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: true })
   let resolveFetch!: (response: Response) => void
   fetchImpl.mockImplementation(() => new Promise<Response>((resolve) => { resolveFetch = resolve }))
   const { taskRunId } = await send()
@@ -101,7 +107,7 @@ it('rejects duplicate channel sends and suppresses stream events after cancellat
 })
 
 it('persists model failure with sanitized errors', async () => {
-  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId)
+  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: true })
   fetchImpl.mockRejectedValue(new Error('PRIVATE_KEY'))
   const { taskRunId } = await send()
   await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, expect.objectContaining({ taskRunId, type: 'error' })))
@@ -120,7 +126,7 @@ it.each([
   ['partial delta EOF', 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n', 'text/event-stream'],
   ['unterminated terminal', 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\ndata: [DONE]', 'text/event-stream'],
 ])('fails %s without persisting a completed assistant reply', async (_name, body, contentType) => {
-  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId)
+  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: true })
   fetchImpl.mockResolvedValue(new Response(body, { headers: { 'content-type': contentType } }))
   const { taskRunId } = await send()
   await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, {

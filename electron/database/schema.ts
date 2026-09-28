@@ -68,6 +68,7 @@ export const cloudConsents = sqliteTable('cloud_consents', {
   modelConfigId: text('model_config_id').notNull().references(() => modelConfigs.id, { onDelete: 'cascade' }),
   consentedAt: text('consented_at').notNull(),
 }, (table) => [primaryKey({ columns: [table.projectId, table.modelConfigId] })])
+export const toolResultConsents = sqliteTable('tool_result_consents', { projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }), modelConfigId: text('model_config_id').notNull().references(() => modelConfigs.id, { onDelete: 'cascade' }), scopeVersion: integer('scope_version').notNull(), consentedAt: text('consented_at').notNull() }, (table) => [primaryKey({ columns: [table.projectId, table.modelConfigId, table.scopeVersion] })])
 
 export const agents = sqliteTable('agents', {
   id: text('id').primaryKey(),
@@ -133,7 +134,7 @@ export const registeredExecutables = sqliteTable('registered_executables', {
   updatedAt: text('updated_at').notNull(),
 })
 
-export const schema = { agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, messages, modelConfigs, projects, registeredExecutables, taskRuns, toolExecutions }
+export const schema = { agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, messages, modelConfigs, projects, registeredExecutables, taskRuns, toolExecutions }
 
 export function migrate(sqlite: Database.Database): void {
   sqlite.pragma('foreign_keys = ON')
@@ -303,4 +304,5 @@ export function migrate(sqlite: Database.Database): void {
       sqlite.pragma('user_version = 6')
     })()
   }
+  if (version < 7) { sqlite.exec(`CREATE TABLE IF NOT EXISTS tool_result_consents (project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, model_config_id TEXT NOT NULL REFERENCES model_configs(id) ON DELETE CASCADE, scope_version INTEGER NOT NULL, consented_at TEXT NOT NULL, PRIMARY KEY (project_id, model_config_id, scope_version));`); sqlite.pragma('user_version = 7') }
 }

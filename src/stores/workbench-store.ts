@@ -189,7 +189,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
       if (!message || state.sending) return
       update({ sending: true })
       try {
-        await api.consent.grant(message.projectId, message.modelConfigId)
+        await api.consent.grant(message.projectId, message.modelConfigId, { allowToolResultUpload: true })
         update({ consent: null })
         await dispatch(message)
       } catch { update({ sending: false }); throw new Error('授权保存失败，请重试') }

@@ -313,7 +313,7 @@ export interface AgentTeamApi {
   }
   consent: {
     has(projectId: string, modelConfigId: string): Promise<boolean>
-    grant(projectId: string, modelConfigId: string): Promise<void>
+    grant(projectId: string, modelConfigId: string, scope: { allowToolResultUpload: true }): Promise<void>
   }
   tasks: {
     list(channelId: string): Promise<TaskRun[]>

@@ -24,7 +24,7 @@ import type {
 } from '../../shared/types'
 import { hashToolRequest, toolAuditEvent } from '../core/audit-service'
 import type { AppDatabase, DatabaseClient } from './client'
-import { agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, messages, modelConfigs, projects, registeredExecutables, taskRuns, toolExecutions } from './schema'
+import { agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, messages, modelConfigs, projects, registeredExecutables, taskRuns, toolExecutions } from './schema'
 
 export interface ToolContext {
   taskRunId: string
@@ -141,6 +141,8 @@ export interface Repositories {
   getModelConfig(id: string): Promise<ModelConfigRecord | undefined>
   recordCloudConsent(projectId: string, modelConfigId: string): Promise<void>
   hasCloudConsent(projectId: string, modelConfigId: string): Promise<boolean>
+  recordToolResultConsent(projectId: string, modelConfigId: string, scopeVersion: number): Promise<void>
+  hasToolResultConsent(projectId: string, modelConfigId: string, scopeVersion: number): Promise<boolean>
 }
 
 export function createRepositories(client: DatabaseClient): Repositories {
@@ -622,5 +624,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         .where(and(eq(cloudConsents.projectId, projectId), eq(cloudConsents.modelConfigId, modelConfigId)))
         .get() !== undefined
     },
+    async recordToolResultConsent(projectId, modelConfigId, scopeVersion) { client.db.insert(toolResultConsents).values({ projectId, modelConfigId, scopeVersion, consentedAt: new Date().toISOString() }).run() },
+    async hasToolResultConsent(projectId, modelConfigId, scopeVersion) { return client.db.select().from(toolResultConsents).where(and(eq(toolResultConsents.projectId, projectId), eq(toolResultConsents.modelConfigId, modelConfigId), eq(toolResultConsents.scopeVersion, scopeVersion))).get() !== undefined },
   }
 }

@@ -113,7 +113,7 @@ it('requires explicit consent for the project and model before sending', async (
   await userEvent.click(screen.getByRole('checkbox', { name: /我了解 Agent 工具结果/ }))
   await userEvent.click(screen.getByRole('button', { name: '同意并发送' }))
   await waitFor(() => expect(api.tasks.send).toHaveBeenCalled())
-  expect(api.consent.grant).toHaveBeenCalledWith('p1', 'm1')
+  expect(api.consent.grant).toHaveBeenCalledWith('p1', 'm1', { allowToolResultUpload: true })
 })
 
 it('cancels the live run and discards late output', async () => {

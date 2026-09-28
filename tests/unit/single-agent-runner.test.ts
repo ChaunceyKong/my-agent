@@ -5,7 +5,7 @@ const agent = { id: 'a', name: 'A', avatar: null, title: '', systemPrompt: '', m
 const call = (name = 'read_file', args: unknown = { path: 'a.md' }, id = 'call-1') => ({ id, name, arguments: JSON.stringify(args) })
 function setup(responses: Array<string | ReturnType<typeof call>>, execution: { status: string; resultSummary: string | null } = { status: 'completed', resultSummary: '完成' }, result?: unknown) {
   let index = 0
-  const repositories: any = { getTaskRun: vi.fn().mockResolvedValue({ id: 'r', status: 'running', generation: 0 }), listMessages: vi.fn().mockResolvedValue([]), transitionTaskRun: vi.fn().mockResolvedValue({}) }
+  const repositories: any = { getTaskRun: vi.fn().mockResolvedValue({ id: 'r', status: 'running', generation: 0 }), listMessages: vi.fn().mockResolvedValue([]), transitionTaskRun: vi.fn().mockResolvedValue({}), hasToolResultConsent: vi.fn().mockResolvedValue(true) }
   const modelClient: any = { streamChat: vi.fn(async (_input: any, emit: any) => { const response = responses[index++]; if (typeof response === 'string') await emit({ taskRunId: 'r', type: 'delta', content: response }); else await emit({ taskRunId: 'r', type: 'tool_call', toolCall: { ...response, index: 0 } }); await emit({ taskRunId: 'r', type: 'complete' }) }) }
   const taskRuns: any = { canAcceptChunk: vi.fn().mockResolvedValue(true), finishTaskRun: vi.fn().mockResolvedValue({}) }
   const toolEngine: any = { execute: vi.fn().mockResolvedValue({ execution, result }) }

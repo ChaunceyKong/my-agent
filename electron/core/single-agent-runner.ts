@@ -41,6 +41,10 @@ export function createSingleAgentRunner(deps: {
       for (let step = 0; step < MAX_TOOL_STEPS; step += 1) {
         const current = await deps.repositories.getTaskRun(input.taskRunId)
         if (!current || current.status !== 'running' || !await deps.taskRuns.canAcceptChunk(current.id, current.generation)) return
+        if (step > 0 && !await deps.repositories.hasToolResultConsent(input.projectId, input.active.modelConfigId, 1)) {
+          await deps.taskRuns.finishTaskRun(current.id, '未获得工具结果上传授权，任务已安全停止。')
+          await input.onEvent({ taskRunId: current.id, type: 'complete' }); return
+        }
         let reply = ''
         const calls = new Map<number, NativeToolCall>()
         await deps.modelClient.streamChat({ projectId: input.projectId, modelConfigId: input.active.modelConfigId, taskRunId: current.id, messages, tools: TOOLS }, async (event) => {

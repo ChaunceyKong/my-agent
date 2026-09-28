@@ -58,7 +58,7 @@ const api: AgentTeamApi = {
   },
   consent: {
     has: (projectId: string, modelConfigId: string) => ipcRenderer.invoke(IpcChannel.CloudConsentHas, projectId, modelConfigId),
-    grant: (projectId: string, modelConfigId: string) => ipcRenderer.invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId),
+    grant: (projectId: string, modelConfigId: string, scope: { allowToolResultUpload: true }) => ipcRenderer.invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, scope),
   },
   events: {
     onStream: (listener) => {

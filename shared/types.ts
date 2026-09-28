@@ -7,6 +7,16 @@ export interface Project {
   updatedAt: string
 }
 
+/** Safe renderer-facing metadata. Workspace roots stay in Main. */
+export type ProjectSummary = Omit<Project, 'workspacePath'>
+export interface WorkspaceSelection { id: string; label: string }
+export interface CreateProjectRequest {
+  name: string
+  icon?: string
+  workspaceId: string
+  firstChannelName?: string
+}
+
 export interface CreateProjectInput {
   name: string
   icon?: string
@@ -281,9 +291,9 @@ export interface AgentTeamApi {
     save(input: RegisteredExecutableInput): Promise<Pick<RegisteredExecutable, 'id' | 'isEnabled'>>
   }
   projects: {
-    list(): Promise<Project[]>
-    pickWorkspace(): Promise<string | undefined>
-    create(input: CreateProjectInput): Promise<Project>
+    list(): Promise<ProjectSummary[]>
+    pickWorkspace(): Promise<WorkspaceSelection | undefined>
+    create(input: CreateProjectRequest): Promise<ProjectSummary>
   }
   channels: {
     list(projectId: string): Promise<Channel[]>

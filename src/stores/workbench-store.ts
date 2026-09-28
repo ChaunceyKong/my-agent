@@ -1,4 +1,4 @@
-import type { AgentTeamApi, Channel, CreateProjectInput, Message, ModelConfigSummary, Project, SaveModelConfigInput, StreamEvent, TaskRun } from '../../shared/types'
+import type { AgentTeamApi, Channel, CreateProjectRequest, Message, ModelConfigSummary, ProjectSummary, SaveModelConfigInput, StreamEvent, TaskRun } from '../../shared/types'
 
 export interface Conversation {
   messages: Message[]
@@ -10,7 +10,7 @@ export interface Conversation {
 }
 interface PendingMessage { projectId: string; channelId: string; modelConfigId: string; content: string }
 interface WorkbenchState {
-  projects: Project[]
+  projects: ProjectSummary[]
   channels: Channel[]
   models: ModelConfigSummary[]
   projectId: string
@@ -155,7 +155,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
     initialize, selectProject, selectChannel,
     setModel: (modelId: string) => update({ modelId, consent: null }),
     setDraft: (draft: string) => updateConversation(state.channelId, { draft }),
-    async createProject(input: CreateProjectInput) {
+    async createProject(input: CreateProjectRequest) {
       const project = await api.projects.create(input)
       update({ projects: [...state.projects, project] })
       await selectProject(project.id)

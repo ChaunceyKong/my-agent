@@ -75,17 +75,19 @@ describe('project and channel repositories', () => {
 
     const pickWorkspace = handlers.get(IpcChannel.ProjectPickWorkspace)
     const selectedWorkspace = await pickWorkspace?.(undefined)
-    expect(selectedWorkspace).toBe(fixtureRoot)
+    expect(selectedWorkspace).toMatchObject({ label: '已选择本地目录' })
+    expect(selectedWorkspace).not.toHaveProperty('workspacePath')
     expect(showOpenDialog).toHaveBeenCalledWith({ properties: ['openDirectory'] })
 
     const createProject = handlers.get(IpcChannel.ProjectCreate)
     const created = await createProject?.(undefined, {
       name: '目录选择项目',
-      workspacePath: selectedWorkspace,
+      workspaceId: (selectedWorkspace as { id: string }).id,
       firstChannelName: '选择频道',
     })
     expect(showOpenDialog).toHaveBeenCalledTimes(1)
-    expect(created).toMatchObject({ workspacePath: await realpath(fixtureRoot) })
+    expect(created).not.toHaveProperty('workspacePath')
+    expect((await repositories.listProjects())[0]).toMatchObject({ workspacePath: await realpath(fixtureRoot) })
   })
 
   it('returns no path when the directory picker is cancelled', async () => {

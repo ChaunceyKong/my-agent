@@ -34,7 +34,7 @@ beforeEach(async () => {
   modelConfigId = (await modelClient.saveModelConfig({ providerPreset: 'deepseek', modelName: 'test-model', apiKey: 'PRIVATE_KEY' })).id
   handlers = new Map()
   sender = { send: vi.fn(), isDestroyed: () => false }
-  registerHandlers({ ipcMain: { handle: (name, handler) => handlers.set(name, handler) }, dialog: { showOpenDialog: vi.fn() }, repositories, taskRuns, modelClient })
+  registerHandlers({ ipcMain: { handle: (name, handler) => handlers.set(name, handler) }, dialog: { showOpenDialog: vi.fn().mockResolvedValue({ canceled: true, filePaths: [] }) }, repositories, taskRuns, modelClient })
 })
 afterEach(async () => { database.close(); await rm(directory, { recursive: true, force: true }) })
 
@@ -48,6 +48,13 @@ it('requires pair-specific Main consent before creating a run or requesting the 
   expect(await repositories.listMessages(channelId)).toEqual([])
   await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId)
   expect(await invoke(IpcChannel.CloudConsentHas, projectId, modelConfigId)).toBe(true)
+})
+
+it('never returns an absolute workspace root to renderer project or picker IPC', async () => {
+  const projects = await invoke(IpcChannel.ProjectList)
+  expect(projects[0]).not.toHaveProperty('workspacePath')
+  const picked = await invoke(IpcChannel.ProjectPickWorkspace)
+  expect(picked).toBeUndefined()
 })
 
 it('rejects dangerous executable registrations before persisting them', async () => {

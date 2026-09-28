@@ -10,6 +10,7 @@ import type { createSingleAgentRunner } from '../core/single-agent-runner'
 import { validateWorkspaceRoot } from '../core/workspace-validator'
 import { listDirectory } from '../core/file-tools'
 import type { Repositories } from '../database/repositories'
+import { randomUUID } from 'node:crypto'
 
 interface IpcHandlerRegistrar {
   handle(channel: string, listener: (event: unknown, ...args: any[]) => unknown): void
@@ -32,6 +33,7 @@ export interface IpcHandlerDependencies {
 
 export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, modelClient, approvals, processes, runner }: IpcHandlerDependencies): void {
   const startingChannels = new Set<string>()
+  const workspaceSelections = new Map<string, string>()
   const agents = createAgentService(repositories)
   ipcMain.handle(IpcChannel.AgentList, () => agents.list())
   ipcMain.handle(IpcChannel.AgentGet, (_event, id: string) => agents.get(id))
@@ -66,15 +68,24 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
     if (!project) throw new Error('项目不存在')
     return listDirectory(project.workspacePath, path)
   })
-  ipcMain.handle(IpcChannel.ProjectList, () => repositories.listProjects())
-  ipcMain.handle(IpcChannel.ProjectPickWorkspace, () => pickWorkspacePath(dialog))
-  ipcMain.handle(IpcChannel.ProjectCreate, async (_event, input: CreateProjectInput) => {
-    const canonicalWorkspacePath = await validateWorkspaceRoot(input.workspacePath)
+  ipcMain.handle(IpcChannel.ProjectList, async () => (await repositories.listProjects()).map(projectSummary))
+  ipcMain.handle(IpcChannel.ProjectPickWorkspace, async () => {
+    const path = await pickWorkspacePath(dialog)
+    if (!path) return undefined
+    const id = randomUUID()
+    workspaceSelections.set(id, path)
+    return { id, label: '已选择本地目录' }
+  })
+  ipcMain.handle(IpcChannel.ProjectCreate, async (_event, input: { name: string; icon?: string; workspaceId: string; firstChannelName?: string }) => {
+    const selectedPath = workspaceSelections.get(input.workspaceId)
+    if (!selectedPath) throw new Error('本地目录选择已失效，请重新选择')
+    workspaceSelections.delete(input.workspaceId)
+    const canonicalWorkspacePath = await validateWorkspaceRoot(selectedPath)
     const { project } = await repositories.createProjectWithInitialChannel({
-      ...input,
+      name: input.name, icon: input.icon, firstChannelName: input.firstChannelName,
       workspacePath: canonicalWorkspacePath,
     })
-    return project
+    return projectSummary(project)
   })
   ipcMain.handle(IpcChannel.ChannelList, (_event, projectId: string) => repositories.listChannels(projectId))
   ipcMain.handle(IpcChannel.ChannelCreate, (_event, input: CreateChannelInput) => repositories.createChannel(input))
@@ -119,6 +130,10 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
     if (!taskRuns) throw new Error('TaskRun service is unavailable')
     await taskRuns.cancelTaskRun(taskRunId)
   })
+}
+
+function projectSummary(project: { id: string; name: string; icon: string | null; createdAt: string; updatedAt: string }) {
+  return { id: project.id, name: project.name, icon: project.icon, createdAt: project.createdAt, updatedAt: project.updatedAt }
 }
 
 async function runAgentLoop(

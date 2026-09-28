@@ -1,13 +1,12 @@
-import { useState } from 'react'
 import { useEffect, useState } from 'react'
-import type { AgentTeamApi, Channel, ModelConfigSummary, Project, TaskRun } from '../../../shared/types'
+import type { AgentTeamApi, Channel, ModelConfigSummary, ProjectSummary, TaskRun } from '../../../shared/types'
 import { EmptyState } from '../common/EmptyState'
 import { AgentManager } from '../agent/AgentManager'
 import { ToolCard } from '../agent/ToolCard'
 import { ApprovalCard } from '../agent/ApprovalCard'
 import { WorkspaceTree } from '../agent/WorkspaceTree'
 
-export function RightCockpit({ project, channel, model, models, run }: { project?: Project; channel?: Channel; model?: ModelConfigSummary; models: ModelConfigSummary[]; run?: TaskRun }) {
+export function RightCockpit({ project, channel, model, models, run }: { project?: ProjectSummary; channel?: Channel; model?: ModelConfigSummary; models: ModelConfigSummary[]; run?: TaskRun }) {
   const [tab, setTab] = useState('members')
   const [tools, setTools] = useState<Awaited<ReturnType<AgentTeamApi['tools']['list']>>>([])
   const [approvals, setApprovals] = useState<Awaited<ReturnType<AgentTeamApi['approvals']['list']>>>([])
@@ -17,12 +16,12 @@ export function RightCockpit({ project, channel, model, models, run }: { project
   return <aside id="right-cockpit" className="right-cockpit" aria-label="团队与工作区"><div className="cockpit-title">团队与工作区<span>v0.2</span></div><div className="cockpit-tabs" role="tablist" aria-label="工作台视窗">{tabs.map(([id, label], index) => <button key={id} id={`tab-${id}`} role="tab" aria-controls="cockpit-content" aria-selected={tab === id} tabIndex={tab === id ? 0 : -1} onClick={() => setTab(id)} onKeyDown={(event) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
     event.preventDefault()
-    const next = tabs[(index + (event.key === 'ArrowRight' ? 1 : 2)) % 3][0]
+    const next = tabs[(index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length][0]
     setTab(next); document.getElementById(`tab-${next}`)?.focus()
   }}>{label}</button>)}</div><div id="cockpit-content" role="tabpanel" aria-labelledby={`tab-${tab}`} className="cockpit-content">
     {tab === 'members' && <AgentManager channel={channel} models={models} />}
     {tab === 'files' && <WorkspaceTree channel={channel} />}
     {tab === 'tools' && <><ToolCard items={tools} /><ApprovalCard items={approvals} onChanged={reload} /></>}
-    {tab === 'context' && <><div className="metadata-card"><h3>当前项目与会话</h3><dl><dt>项目</dt><dd>{project?.name ?? '未选择'}</dd><dt>群聊</dt><dd>{channel?.name ?? '未选择'}</dd><dt>模型</dt><dd>{model?.modelName ?? '未配置'}</dd><dt>工作目录</dt><dd className="path-text">{project?.workspacePath ?? '未绑定'}</dd></dl></div><EmptyState title="上下文说明">同一项目下的群聊各自保留对话历史。自动摘要与交付成果提取尚未提供。</EmptyState></>}
+    {tab === 'context' && <><div className="metadata-card"><h3>当前项目与会话</h3><dl><dt>项目</dt><dd>{project?.name ?? '未选择'}</dd><dt>群聊</dt><dd>{channel?.name ?? '未选择'}</dd><dt>模型</dt><dd>{model?.modelName ?? '未配置'}</dd><dt>工作目录</dt><dd>已绑定本地目录</dd></dl></div><EmptyState title="上下文说明">同一项目下的群聊各自保留对话历史。自动摘要与交付成果提取尚未提供。</EmptyState></>}
   </div></aside>
 }

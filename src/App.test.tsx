@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event'
 import '@testing-library/jest-dom/vitest'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import App from './App'
+import { ApprovalCard } from './components/agent/ApprovalCard'
 import type { AgentTeamApi, Channel, Message, Project, StreamEvent, TaskRun } from '../shared/types'
 
 const project: Project = { id: 'p1', name: '内容矩阵', workspacePath: 'C:/work/content', icon: null, createdAt: '', updatedAt: '' }
@@ -23,7 +24,7 @@ beforeEach(() => {
     tools: { list: vi.fn().mockResolvedValue([]) },
     workspace: { list: vi.fn().mockResolvedValue({ entries: [], summary: '', truncated: false, limits: {} }) },
     executables: { list: vi.fn().mockResolvedValue([]), save: vi.fn() },
-    projects: { list: vi.fn().mockResolvedValue([project]), pickWorkspace: vi.fn().mockResolvedValue('C:/work/content'), create: vi.fn().mockResolvedValue(project) },
+    projects: { list: vi.fn().mockResolvedValue([project]), pickWorkspace: vi.fn().mockResolvedValue({ id: 'workspace-1', label: '已选择本地目录' }), create: vi.fn().mockResolvedValue(project) },
     channels: { list: vi.fn().mockResolvedValue([channel]), create: vi.fn().mockResolvedValue({ ...channel, id: 'c2', name: '选题群' }) },
     models: { list: vi.fn().mockResolvedValue([model]), save: vi.fn().mockResolvedValue({ ...model, id: 'm2' }) },
     messages: { list: vi.fn().mockResolvedValue([]) },
@@ -59,7 +60,13 @@ it('selects a workspace immediately and uses the default initial channel when le
   expect(api.projects.pickWorkspace).toHaveBeenCalledTimes(1)
   await userEvent.click(screen.getByRole('button', { name: '确认创建项目' }))
   expect(await screen.findByRole('heading', { name: channel.name })).toBeVisible()
-  expect(api.projects.create).toHaveBeenCalledWith({ name: '内容矩阵', workspacePath: 'C:/work/content', firstChannelName: '' })
+  expect(api.projects.create).toHaveBeenCalledWith({ name: '内容矩阵', workspaceId: 'workspace-1', firstChannelName: '' })
+})
+
+it('does not render the workspace root received by Main', async () => {
+  render(<App />)
+  await screen.findByRole('heading', { name: channel.name })
+  expect(screen.queryByText('C:/work/content')).not.toBeInTheDocument()
 })
 
 it('appends only matching live deltas and rejects terminal or unknown events', async () => {
@@ -155,6 +162,13 @@ it('saves credentials through settings and renders explicit unavailable cockpit 
   expect(await screen.findByLabelText('安全工作区文件')).toBeVisible()
   await userEvent.click(screen.getByRole('button', { name: '收起右侧面板' }))
   expect(screen.queryByRole('complementary', { name: '团队与工作区' })).not.toBeInTheDocument()
+})
+
+it('executes an approved operation only after an explicit click', async () => {
+  render(<ApprovalCard items={[{ id: 'approval-1', toolExecutionId: 'tool-1', requestHash: 'a'.repeat(64), status: 'approved', expiresAt: '2026-10-01T00:00:00Z' }]} onChanged={() => {}} />)
+  expect(api.approvals.runApproved).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('button', { name: '执行已批准操作' }))
+  expect(api.approvals.runApproved).toHaveBeenCalledWith('approval-1')
 })
 
 it('shows persisted paused runs and rejects their late events', async () => {

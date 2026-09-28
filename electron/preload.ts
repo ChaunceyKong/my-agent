@@ -3,7 +3,7 @@ import { IpcChannel } from '../shared/ipc-channels'
 import type {
   AgentTeamApi,
   CreateChannelInput,
-  CreateProjectInput,
+  CreateProjectRequest,
   SaveModelConfigInput,
   SendMessageInput,
   StreamEvent,
@@ -38,7 +38,7 @@ const api: AgentTeamApi = {
   projects: {
     list: () => ipcRenderer.invoke(IpcChannel.ProjectList),
     pickWorkspace: () => ipcRenderer.invoke(IpcChannel.ProjectPickWorkspace),
-    create: (input: CreateProjectInput) => ipcRenderer.invoke(IpcChannel.ProjectCreate, input),
+    create: (input: CreateProjectRequest) => ipcRenderer.invoke(IpcChannel.ProjectCreate, input),
   },
   channels: {
     list: (projectId: string) => ipcRenderer.invoke(IpcChannel.ChannelList, projectId),

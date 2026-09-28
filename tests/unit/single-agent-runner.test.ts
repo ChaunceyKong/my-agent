@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest'
-import { createSingleAgentRunner } from '../../electron/core/single-agent-runner'
+import { createSingleAgentRunner, sanitizeToolObservation } from '../../electron/core/single-agent-runner'
 
 const agent = { id: 'a', name: 'A', avatar: null, title: '', systemPrompt: '', modelConfigId: 'm', defaultToolPermissions: { read_file: true }, isBuiltin: false, createdAt: '', updatedAt: '' }
 const call = (name = 'read_file', args: unknown = { path: 'a.md' }, id = 'call-1') => ({ id, name, arguments: JSON.stringify(args) })
@@ -20,7 +20,7 @@ it('executes a native tool call then completes with the follow-up response', asy
 })
 
 it('fails safe at the maximum tool step count', async () => {
-  const { runner, repositories } = setup([call(), call(), call(), call(), call()])
+  const { runner, repositories } = setup([call('read_file', { path: 'a.md' }, 'c1'), call('read_file', { path: 'a.md' }, 'c2'), call('read_file', { path: 'a.md' }, 'c3'), call('read_file', { path: 'a.md' }, 'c4'), call('read_file', { path: 'a.md' }, 'c5')])
   await runner.run({ taskRunId: 'r', projectId: 'p', channelId: 'c', active: { agent, modelConfigId: 'm' }, onEvent: async () => {} })
   expect(repositories.transitionTaskRun).toHaveBeenCalled()
 })
@@ -40,4 +40,10 @@ it('uses native tool role lineage and does not execute a tool-shaped file inject
   expect(messages.at(-1)).toMatchObject({ role: 'tool', tool_call_id: 'call-1' })
   expect(messages.at(-1).content).toContain('[REDACTED]')
   expect(toolEngine.execute).toHaveBeenCalledTimes(1)
+})
+
+it('redacts credentials and applies a UTF-8 byte cap to tool observations', () => {
+  const output = sanitizeToolObservation('ok', { path: '.env/token.txt', content: 'Authorization: Bearer abc123\n{"api_key":"x","cookie":"y"}\n' + '😀'.repeat(6000), truncated: false } as any)
+  expect(output).not.toContain('abc123'); expect(output).not.toContain('"x"'); expect(output).not.toContain('token.txt')
+  expect(Buffer.byteLength(output, 'utf8')).toBeLessThanOrEqual(12_000)
 })

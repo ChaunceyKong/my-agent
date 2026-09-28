@@ -144,6 +144,8 @@ async function consumeEventStream(
   const decoder = new TextDecoder()
   let buffer = ''
   let hasData = false
+  const pendingToolCalls = new Map<number, StreamEvent['toolCall']>()
+  let toolCallsTerminal = false
   const abort = () => { void reader.cancel().catch(() => {}) }
   signal.addEventListener('abort', abort, { once: true })
 
@@ -164,6 +166,8 @@ async function consumeEventStream(
         if (!data) continue
         if (data === '[DONE]') {
           if (!hasData) throw new ModelClientError('malformed')
+          if (pendingToolCalls.size && !toolCallsTerminal) throw new ModelClientError('malformed')
+          for (const call of pendingToolCalls.values()) await emitIfAccepted(taskRuns, taskRunId, onEvent, { taskRunId, type: 'tool_call', toolCall: call })
           await emitIfAccepted(taskRuns, taskRunId, onEvent, { taskRunId, type: 'complete' })
           return
         }
@@ -184,7 +188,8 @@ async function consumeEventStream(
         for (const choice of parsed.choices) {
           if (!isRecord(choice) || !isRecord(choice.delta)
             || (choice.delta.content != null && typeof choice.delta.content !== 'string')
-            || (choice.delta.tool_calls != null && !Array.isArray(choice.delta.tool_calls))) {
+            || (choice.delta.tool_calls != null && !Array.isArray(choice.delta.tool_calls))
+            || (choice.finish_reason != null && typeof choice.finish_reason !== 'string')) {
             throw new ModelClientError('malformed')
           }
         }
@@ -194,15 +199,19 @@ async function consumeEventStream(
           const accepted = await emitIfAccepted(taskRuns, taskRunId, onEvent, { taskRunId, type: 'delta', content })
           if (!accepted) return
         }
-        const calls = parsed.choices[0].delta.tool_calls
+        const choice = parsed.choices[0]
+        const calls = choice.delta.tool_calls
         if (calls !== undefined) for (const call of calls) {
-          if (!isRecord(call) || typeof call.index !== 'number' || !isRecord(call.function)
+          if (!isRecord(call) || !Number.isInteger(call.index) || (call.index as number) < 0 || !isRecord(call.function)
             || (call.id !== undefined && typeof call.id !== 'string') || (call.function.name !== undefined && typeof call.function.name !== 'string')
             || (call.function.arguments !== undefined && typeof call.function.arguments !== 'string')) throw new ModelClientError('malformed')
-          await emitIfAccepted(taskRuns, taskRunId, onEvent, { taskRunId, type: 'tool_call', toolCall: {
-            index: call.index, id: call.id ?? '', name: (call.function.name ?? '') as any, arguments: call.function.arguments ?? '',
-          } })
+          const index = call.index as number
+          const prior = pendingToolCalls.get(index)
+          if (prior && ((call.id && prior.id && call.id !== prior.id) || (call.function.name && prior.name && call.function.name !== prior.name))) throw new ModelClientError('malformed')
+          pendingToolCalls.set(index, { index, id: call.id ?? prior?.id ?? '', name: (call.function.name ?? prior?.name ?? '') as any, arguments: (prior?.arguments ?? '') + (call.function.arguments ?? '') })
         }
+        if (choice.finish_reason === 'tool_calls') toolCallsTerminal = true
+        else if (choice.finish_reason !== null && pendingToolCalls.size) throw new ModelClientError('malformed')
       }
 
       if (done) throw new ModelClientError('malformed')

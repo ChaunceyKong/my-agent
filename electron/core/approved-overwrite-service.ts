@@ -2,95 +2,75 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, linkSync, lstatSync, realpathSync, renameSync, unlinkSync, type Stats } from 'node:fs'
 import { lstat, open } from 'node:fs/promises'
 import { join, relative } from 'node:path'
-import type { OverwriteTargetIdentity, ToolExecution } from '../../shared/types'
+import type { OverwritePublication, OverwriteTargetIdentity, ToolExecution } from '../../shared/types'
 import type { Repositories } from '../database/repositories'
 import { FileToolError, resolveSafeWritePath } from './file-sandbox'
 
-function sameIdentity(actual: Stats, expected: OverwriteTargetIdentity): boolean {
-  return actual.isFile() && !actual.isSymbolicLink()
-    && actual.dev === expected.dev && actual.ino === expected.ino && actual.size === expected.size
-    && actual.mtimeMs === expected.mtimeMs && actual.ctimeMs === expected.ctimeMs
-}
-
-function unchanged(path: string, expected: Stats): void {
-  const current = lstatSync(path)
-  if (current.isSymbolicLink() || current.dev !== expected.dev || current.ino !== expected.ino
-    || relative(path, realpathSync(path)) !== '') throw new FileToolError('FILE_CHANGED', '文件路径已变化')
-}
-
-function parseInput(execution: ToolExecution): { path: string; content: string; identity: OverwriteTargetIdentity } {
-  try {
-    const input = JSON.parse(execution.inputJson) as Record<string, unknown>
-    const identity = JSON.parse(execution.overwriteTargetIdentityJson ?? '') as Record<string, unknown>
-    if (Object.keys(input).length !== 2 || typeof input.path !== 'string' || typeof input.content !== 'string'
-      || !['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every((key) => typeof identity[key] === 'number' && Number.isFinite(identity[key]))) throw new Error()
-    return { path: input.path, content: input.content, identity: identity as unknown as OverwriteTargetIdentity }
+const names = (value: string, suffix: '.tmp' | '.backup') => new RegExp(`^\\.agent-team-[0-9a-f-]{36}\\${suffix}$`).test(value)
+const inode = (actual: Stats, expected: OverwriteTargetIdentity) => actual.isFile() && !actual.isSymbolicLink() && actual.dev === expected.dev && actual.ino === expected.ino
+const same = (actual: Stats, expected: OverwriteTargetIdentity) => inode(actual, expected) && actual.size === expected.size && actual.mtimeMs === expected.mtimeMs && actual.ctimeMs === expected.ctimeMs
+function unchanged(path: string, expected: Stats) { const current = lstatSync(path); if (current.isSymbolicLink() || current.dev !== expected.dev || current.ino !== expected.ino || relative(path, realpathSync(path)) !== '') throw new FileToolError('FILE_CHANGED', '文件路径已变化') }
+function parse(execution: ToolExecution): { path: string; content: string; old: OverwriteTargetIdentity } {
+  try { const input = JSON.parse(execution.inputJson) as Record<string, unknown>; const old = JSON.parse(execution.overwriteTargetIdentityJson ?? '') as Record<string, unknown>
+    if (Object.keys(input).length !== 2 || typeof input.path !== 'string' || typeof input.content !== 'string' || !['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every((key) => typeof old[key] === 'number' && Number.isFinite(old[key]))) throw new Error()
+    return { path: input.path, content: input.content, old: old as unknown as OverwriteTargetIdentity }
   } catch { throw new Error('审批请求不可用') }
 }
+function temp(value: string | null) { try { const v = JSON.parse(value ?? '') as Record<string, unknown>; return ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every((k) => typeof v[k] === 'number') ? v as unknown as OverwriteTargetIdentity : undefined } catch { return undefined } }
 
-/** Executes an approved replacement only after a separate explicit renderer action. */
+/** An approved replace is the sole no-delete exception. Its DB journal is committed before every FS phase; DB and FS are deliberately not claimed atomic. */
 export function createApprovedOverwriteService(repositories: Repositories, clock: () => Date = () => new Date()) {
   return {
     async runApproved(approvalId: string): Promise<ToolExecution> {
-      const claim = await repositories.claimApprovedOverwrite(approvalId, clock().toISOString())
+      const claim = await repositories.claimApprovedOverwrite(approvalId, clock().toISOString(), `.agent-team-${randomUUID()}.tmp`, `.agent-team-${randomUUID()}.backup`)
       try {
-        const input = parseInput(claim.execution)
-        return await replace(claim.workspacePath, input.path, input.content, input.identity, claim.execution.id)
+        const input = parse(claim.execution)
+        let publication = await stage(claim.workspacePath, claim.publication, input)
+        publication = await repositories.markOverwritePublishing(claim.execution.id)
+        await publish(claim.workspacePath, publication, input)
+        publication = await repositories.markOverwritePublished(claim.execution.id)
+        const completed = await repositories.completeOverwritePublication(claim.execution.id)
+        await cleanup(claim.workspacePath, publication, input)
+        return completed
       } catch {
-        return repositories.finishToolExecution(claim.execution.id, () => ({ status: 'failed', riskLevel: 'high', resultSummary: '已批准的覆盖操作失败' }))
+        const current = (await repositories.listRecoverableOverwritePublications()).find((item) => item.publication.executionId === claim.execution.id)
+        if (current) await recoverOne(current)
+        return (await repositories.getToolExecution(claim.execution.id))!
       }
     },
+    async recoverInterruptedPublications() { for (const record of await repositories.listRecoverableOverwritePublications()) await recoverOne(record) },
   }
-
-  async function replace(root: string, path: string, content: string, expected: OverwriteTargetIdentity, executionId: string): Promise<ToolExecution> {
-    const target = await resolveSafeWritePath(root, path)
-    if (!target.exists || !sameIdentity(await lstat(target.path), expected)) throw new FileToolError('FILE_CHANGED', '目标文件已变化')
-    const parent = await lstat(target.parent)
-    const temporary = join(target.parent, `.agent-team-${randomUUID()}.tmp`)
-    const backup = join(target.parent, `.agent-team-${randomUUID()}.backup`)
-    const file = await open(temporary, 'wx', 0o600)
-    let tempIdentity: Stats | undefined
-    let published = false
-    try {
-      tempIdentity = await file.stat()
-      await resolveSafeWritePath(root, path)
-      unchanged(target.parent, parent)
-      if (!sameIdentity(await lstat(target.path), expected)) throw new FileToolError('FILE_CHANGED', '目标文件已变化')
-      await file.writeFile(content, 'utf8')
-      await file.sync()
-      await file.close()
-      await resolveSafeWritePath(root, path)
-      return await repositories.finishToolExecution(executionId, () => {
-        unchanged(target.parent, parent)
-        unchanged(temporary, tempIdentity!)
-        const current = lstatSync(target.path)
-        if (!sameIdentity(current, expected) || relative(target.path, realpathSync(target.path)) !== '') throw new FileToolError('FILE_CHANGED', '目标文件已变化')
-        // Move the approved file aside first, then atomically link the staged body. If a
-        // concurrent writer claims the name, linking fails instead of overwriting it.
-        renameSync(target.path, backup)
-        try {
-          const moved = lstatSync(backup)
-          // Moving a directory entry updates ctime, so identity after the move is inode-bound.
-          if (!moved.isFile() || moved.isSymbolicLink() || moved.dev !== expected.dev || moved.ino !== expected.ino) throw new FileToolError('FILE_CHANGED', '目标文件已变化')
-          linkSync(temporary, target.path)
-          published = true
-          unlinkSync(backup)
-        } catch (error) {
-          if (!existsSync(target.path)) {
-            try { renameSync(backup, target.path) } catch { /* Preserve uncertain state without overwriting a racer. */ }
-          }
-          throw error
-        }
-        return { status: 'completed', riskLevel: 'high', resultSummary: `已按批准覆盖文件，${Buffer.byteLength(content, 'utf8')} 字节` }
-      })
-    } finally {
-      await file.close()
-      if (tempIdentity && !published) {
-        try { unchanged(target.parent, parent); unchanged(temporary, tempIdentity); unlinkSync(temporary) } catch { /* Preserve uncertain paths. */ }
-      }
-      if (published) {
-        try { unchanged(target.parent, parent); unchanged(temporary, tempIdentity!); unlinkSync(temporary) } catch { /* Publication already succeeded; preserve uncertain temp. */ }
-      }
-    }
+  async function stage(root: string, publication: OverwritePublication, input: ReturnType<typeof parse>) {
+    const target = await resolveSafeWritePath(root, input.path); if (!target.exists || !same(await lstat(target.path), input.old)) throw new FileToolError('FILE_CHANGED', '目标文件已变化')
+    const parent = await lstat(target.parent); const path = join(target.parent, publication.temporaryRelativePath); const file = await open(path, 'wx', 0o600)
+    try { const info = await file.stat(); await file.writeFile(input.content, 'utf8'); await file.sync(); await file.close(); unchanged(target.parent, parent); unchanged(path, info); if (!same(await lstat(target.path), input.old)) throw new FileToolError('FILE_CHANGED', '目标文件已变化')
+      return repositories.markOverwriteStaged(publication.executionId, JSON.stringify({ dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs }))
+    } finally { await file.close() }
+  }
+  async function publish(root: string, publication: OverwritePublication, input: ReturnType<typeof parse>) {
+    const staged = temp(publication.temporaryIdentityJson); if (!staged) throw new Error('覆盖发布状态不可用')
+    const target = await resolveSafeWritePath(root, input.path); if (!target.exists || !same(await lstat(target.path), input.old)) throw new FileToolError('FILE_CHANGED', '目标文件已变化')
+    const parent = await lstat(target.parent); const source = join(target.parent, publication.temporaryRelativePath); const backup = join(target.parent, publication.backupRelativePath)
+    unchanged(target.parent, parent); if (!inode(lstatSync(source), staged)) throw new FileToolError('FILE_CHANGED', '临时文件已变化')
+    // No FS effect occurs in a DB transaction. Keep backup and temp until completion is durable.
+    renameSync(target.path, backup); try { if (!inode(lstatSync(backup), input.old)) throw new FileToolError('FILE_CHANGED', '目标文件已变化'); linkSync(source, target.path) } catch (error) { if (!existsSync(target.path)) { try { renameSync(backup, target.path) } catch {} } throw error }
+  }
+  async function cleanup(root: string, publication: OverwritePublication, input: ReturnType<typeof parse>) {
+    try { const target = await resolveSafeWritePath(root, input.path); const staged = temp(publication.temporaryIdentityJson); if (!target.exists || !staged) return
+      const source = join(target.parent, publication.temporaryRelativePath); const backup = join(target.parent, publication.backupRelativePath)
+      if (existsSync(backup) && inode(lstatSync(backup), input.old)) unlinkSync(backup)
+      if (existsSync(source) && inode(lstatSync(source), staged)) unlinkSync(source)
+    } catch { /* completed state remains truthful; a later startup retries cleanup only if journal is incomplete. */ }
+  }
+  async function recoverOne(record: { publication: OverwritePublication; execution: ToolExecution; workspacePath: string }) {
+    let input: ReturnType<typeof parse>; try { input = parse(record.execution) } catch { await repositories.recoverOverwritePublication(record.publication.executionId, 'needs_recovery', '覆盖发布需要人工恢复'); return }
+    if (!names(record.publication.temporaryRelativePath, '.tmp') || !names(record.publication.backupRelativePath, '.backup')) { await repositories.recoverOverwritePublication(record.publication.executionId, 'needs_recovery', '覆盖发布需要人工恢复'); return }
+    let target; try { target = await resolveSafeWritePath(record.workspacePath, input.path) } catch { await repositories.recoverOverwritePublication(record.publication.executionId, 'needs_recovery', '覆盖发布需要人工恢复'); return }
+    const staged = temp(record.publication.temporaryIdentityJson); const backup = join(target.parent, record.publication.backupRelativePath); const old = existsSync(backup) ? lstatSync(backup) : undefined; const current = target.exists ? await lstat(target.path).catch(() => undefined) : undefined
+    if (old && inode(old, input.old) && current && staged && inode(current, staged)) { try { if (record.publication.state === 'publishing') await repositories.markOverwritePublished(record.publication.executionId); await repositories.completeOverwritePublication(record.publication.executionId); await cleanup(record.workspacePath, record.publication, input) } catch {} return }
+    if (old && inode(old, input.old) && !current) { try { renameSync(backup, target.path); await repositories.recoverOverwritePublication(record.publication.executionId, 'recovered', '覆盖发布已恢复，未替换文件') } catch { await repositories.recoverOverwritePublication(record.publication.executionId, 'needs_recovery', '覆盖发布需要人工恢复') }; return }
+    if (!old && current && staged && inode(current, staged)) { try { await repositories.completeOverwritePublication(record.publication.executionId); await cleanup(record.workspacePath, record.publication, input) } catch {}; return }
+    if (!old && current && same(current, input.old)) { await repositories.recoverOverwritePublication(record.publication.executionId, 'recovered', '覆盖未发布，已安全恢复'); return }
+    await repositories.recoverOverwritePublication(record.publication.executionId, 'needs_recovery', '覆盖发布需要人工恢复')
   }
 }

@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
 import { sql } from 'drizzle-orm'
 import { integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
-import type { ApprovalRequestStatus, MessageRole, MessageStatus, ModelProviderPreset, TaskRunStatus, ToolExecutionStatus, ToolName, ToolPermissions, ToolRiskLevel } from '../../shared/types'
+import type { ApprovalRequestStatus, MessageRole, MessageStatus, ModelProviderPreset, OverwritePublicationState, TaskRunStatus, ToolExecutionStatus, ToolName, ToolPermissions, ToolRiskLevel } from '../../shared/types'
 
 export const projects = sqliteTable('projects', {
   id: text('id').primaryKey(),
@@ -126,6 +126,16 @@ export const approvalRequests = sqliteTable('approval_requests', {
   createdAt: text('created_at').notNull(),
 }, (table) => [uniqueIndex('approval_requests_execution_idx').on(table.toolExecutionId)])
 
+export const overwritePublications = sqliteTable('overwrite_publications', {
+  executionId: text('execution_id').primaryKey().references(() => toolExecutions.id, { onDelete: 'cascade' }),
+  temporaryRelativePath: text('temporary_relative_path').notNull(),
+  backupRelativePath: text('backup_relative_path').notNull(),
+  temporaryIdentityJson: text('temporary_identity_json'),
+  state: text('state').$type<OverwritePublicationState>().notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+})
+
 export const registeredExecutables = sqliteTable('registered_executables', {
   id: text('id').primaryKey(),
   absolutePath: text('absolute_path').notNull(),
@@ -135,7 +145,7 @@ export const registeredExecutables = sqliteTable('registered_executables', {
   updatedAt: text('updated_at').notNull(),
 })
 
-export const schema = { agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, messages, modelConfigs, projects, registeredExecutables, taskRuns, toolExecutions }
+export const schema = { agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, messages, modelConfigs, overwritePublications, projects, registeredExecutables, taskRuns, toolExecutions }
 
 export function migrate(sqlite: Database.Database): void {
   sqlite.pragma('foreign_keys = ON')
@@ -307,4 +317,13 @@ export function migrate(sqlite: Database.Database): void {
   }
   if (version < 7) { sqlite.exec(`CREATE TABLE IF NOT EXISTS tool_result_consents (project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, model_config_id TEXT NOT NULL REFERENCES model_configs(id) ON DELETE CASCADE, scope_version INTEGER NOT NULL, consented_at TEXT NOT NULL, PRIMARY KEY (project_id, model_config_id, scope_version));`); sqlite.pragma('user_version = 7') }
   if (version < 8) { sqlite.exec('ALTER TABLE tool_executions ADD COLUMN overwrite_target_identity_json TEXT'); sqlite.pragma('user_version = 8') }
+  if (version < 9) { sqlite.exec(`CREATE TABLE IF NOT EXISTS overwrite_publications (
+    execution_id TEXT PRIMARY KEY NOT NULL REFERENCES tool_executions(id) ON DELETE CASCADE,
+    temporary_relative_path TEXT NOT NULL,
+    backup_relative_path TEXT NOT NULL,
+    temporary_identity_json TEXT,
+    state TEXT NOT NULL CHECK (state IN ('preparing', 'staged', 'publishing', 'published', 'completed', 'needs_recovery', 'recovered')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );`); sqlite.pragma('user_version = 9') }
 }

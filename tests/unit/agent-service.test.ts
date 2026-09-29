@@ -157,7 +157,7 @@ it('migrates existing v3 databases idempotently and enforces the single-enabled 
     for (const id of ['a', 'b']) insert.run(id, id, 'title', 'prompt', 'm', '{}', 'now', 'now')
     sqlite.exec("INSERT INTO channel_agents VALUES ('c', 'a', 1, NULL, NULL, 'now', 'now');")
     expect(() => sqlite.exec("INSERT INTO channel_agents VALUES ('c', 'b', 1, NULL, NULL, 'now', 'now');")).toThrow(/UNIQUE/)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(8)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(9)
   } finally {
     sqlite.close()
   }

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { createTaskRunService } from './core/task-run-service'
 import { createApprovalService } from './core/approval-service'
 import { createProcessToolService } from './core/process-tool-service'
+import { createApprovedOverwriteService } from './core/approved-overwrite-service'
 import { createCloudConsentService } from './core/cloud-consent-service'
 import { createModelClient } from './core/model-client'
 import { createToolEngine } from './core/tool-engine'
@@ -45,6 +46,7 @@ app.whenReady().then(async () => {
   if (!database) return
   app.once('will-quit', () => database.close())
   const repositories = createRepositories(database)
+  await createApprovedOverwriteService(repositories).recoverInterruptedPublications()
   const taskRuns = createTaskRunService(repositories)
   const approvals = createApprovalService(repositories)
   const processes = createProcessToolService(repositories, taskRuns)

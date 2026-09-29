@@ -12,6 +12,8 @@ import type {
   CreateProjectInput,
   Message,
   ModelProviderPreset,
+  OverwritePublication,
+  OverwritePublicationState,
   Project,
   SaveChannelAgentInput,
   TaskRun,
@@ -24,7 +26,7 @@ import type {
 } from '../../shared/types'
 import { hashToolRequest, toolAuditEvent } from '../core/audit-service'
 import type { AppDatabase, DatabaseClient } from './client'
-import { agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, messages, modelConfigs, projects, registeredExecutables, taskRuns, toolExecutions } from './schema'
+import { agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, messages, modelConfigs, overwritePublications, projects, registeredExecutables, taskRuns, toolExecutions } from './schema'
 
 export interface ToolContext {
   taskRunId: string
@@ -113,7 +115,13 @@ export interface Repositories {
   decideApprovalRequest(id: string, requestHash: string, decision: 'approved' | 'rejected', now: string): Promise<ApprovalRequest>
   expireApprovalRequest(id: string, now: string): Promise<ApprovalRequest>
   claimApprovedProcess(id: string, now: string): Promise<{ execution: ToolExecution; executable: RegisteredExecutable; workspacePath: string }>
-  claimApprovedOverwrite(id: string, now: string): Promise<{ execution: ToolExecution; workspacePath: string }>
+  claimApprovedOverwrite(id: string, now: string, temporaryRelativePath: string, backupRelativePath: string): Promise<{ execution: ToolExecution; workspacePath: string; publication: OverwritePublication }>
+  markOverwriteStaged(executionId: string, temporaryIdentityJson: string): Promise<OverwritePublication>
+  markOverwritePublishing(executionId: string): Promise<OverwritePublication>
+  markOverwritePublished(executionId: string): Promise<OverwritePublication>
+  completeOverwritePublication(executionId: string): Promise<ToolExecution>
+  recoverOverwritePublication(executionId: string, state: 'recovered' | 'needs_recovery', summary: string): Promise<ToolExecution>
+  listRecoverableOverwritePublications(): Promise<Array<{ publication: OverwritePublication; execution: ToolExecution; workspacePath: string }>>
   getRegisteredExecutable(id: string): Promise<RegisteredExecutable | undefined>
   listRegisteredExecutables(): Promise<RegisteredExecutable[]>
   saveRegisteredExecutable(input: Omit<RegisteredExecutable, 'createdAt' | 'updatedAt'>): Promise<RegisteredExecutable>
@@ -322,7 +330,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
       return claimed
     },
 
-    async claimApprovedOverwrite(id, now) {
+    async claimApprovedOverwrite(id, now, temporaryRelativePath, backupRelativePath) {
       const claimed = client.db.transaction((tx) => {
         const approval = tx.select().from(approvalRequests).where(eq(approvalRequests.id, id)).get()
         const execution = approval && tx.select().from(toolExecutions).where(eq(toolExecutions.id, approval.toolExecutionId)).get()
@@ -345,13 +353,85 @@ export function createRepositories(client: DatabaseClient): Repositories {
         let snapshot: { workspacePath?: unknown }
         try { input = JSON.parse(execution.inputJson); snapshot = JSON.parse(execution.policySnapshotJson) } catch { throw new Error('审批请求不可用') }
         if (typeof input.path !== 'string' || typeof input.content !== 'string' || typeof snapshot.workspacePath !== 'string') throw new Error('审批请求不可用')
+        if (!/^\.agent-team-[0-9a-f-]{36}\.tmp$/.test(temporaryRelativePath)
+          || !/^\.agent-team-[0-9a-f-]{36}\.backup$/.test(backupRelativePath)) throw new Error('审批请求不可用')
         const claimed = tx.update(approvalRequests).set({ status: 'executing', decidedAt: now })
           .where(and(eq(approvalRequests.id, id), eq(approvalRequests.status, 'approved'))).returning().get()
         if (!claimed) throw new Error('审批请求不可用')
-        return { execution, workspacePath: snapshot.workspacePath }
+        const publication: OverwritePublication = { executionId: execution.id, temporaryRelativePath, backupRelativePath,
+          temporaryIdentityJson: null, state: 'preparing', createdAt: now, updatedAt: now }
+        tx.insert(overwritePublications).values(publication).run()
+        return { execution, workspacePath: snapshot.workspacePath, publication }
       })
       if (!claimed) throw new Error('审批请求已过期')
       return claimed
+    },
+
+    async markOverwriteStaged(executionId, temporaryIdentityJson) {
+      const timestamp = new Date().toISOString()
+      const next = client.db.update(overwritePublications).set({ state: 'staged', temporaryIdentityJson, updatedAt: timestamp })
+        .where(and(eq(overwritePublications.executionId, executionId), eq(overwritePublications.state, 'preparing'))).returning().get()
+      if (!next) throw new Error('覆盖发布状态不可用')
+      return next
+    },
+
+    async markOverwritePublishing(executionId) {
+      return client.db.transaction((tx) => {
+        const publication = tx.select().from(overwritePublications).where(eq(overwritePublications.executionId, executionId)).get()
+        const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, executionId)).get()
+        const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
+        if (!publication || publication.state !== 'staged' || !execution || !run || execution.status !== 'executing'
+          || run.status !== 'running' || run.generation !== execution.generation
+          || currentPolicy(tx, run, execution.agentId, execution.toolName) !== execution.policySnapshotJson) throw new Error('任务操作已失效')
+        const next = tx.update(overwritePublications).set({ state: 'publishing', updatedAt: new Date().toISOString() })
+          .where(and(eq(overwritePublications.executionId, executionId), eq(overwritePublications.state, 'staged'))).returning().get()
+        if (!next) throw new Error('覆盖发布状态不可用')
+        return next
+      })
+    },
+
+    async markOverwritePublished(executionId) {
+      const next = client.db.update(overwritePublications).set({ state: 'published', updatedAt: new Date().toISOString() })
+        .where(and(eq(overwritePublications.executionId, executionId), eq(overwritePublications.state, 'publishing'))).returning().get()
+      if (!next) throw new Error('覆盖发布状态不可用')
+      return next
+    },
+
+    async completeOverwritePublication(executionId) {
+      return client.db.transaction((tx) => {
+        const publication = tx.select().from(overwritePublications).where(eq(overwritePublications.executionId, executionId)).get()
+        const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, executionId)).get()
+        const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
+        if (!publication || !execution || !run || !['published', 'publishing'].includes(publication.state)) throw new Error('覆盖发布状态不可用')
+        const completed = tx.update(toolExecutions).set({ status: 'completed', riskLevel: 'high', resultSummary: '已按批准覆盖文件', updatedAt: new Date().toISOString() })
+          .where(eq(toolExecutions.id, executionId)).returning().get()!
+        tx.update(overwritePublications).set({ state: 'completed', updatedAt: new Date().toISOString() }).where(eq(overwritePublications.executionId, executionId)).run()
+        tx.insert(auditEvents).values(toolAuditEvent(run.channelId, completed)).run()
+        return completed
+      })
+    },
+
+    async recoverOverwritePublication(executionId, state, summary) {
+      return client.db.transaction((tx) => {
+        const publication = tx.select().from(overwritePublications).where(eq(overwritePublications.executionId, executionId)).get()
+        const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, executionId)).get()
+        const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
+        if (!publication || !execution || !run) throw new Error('覆盖发布状态不可用')
+        const next = tx.update(toolExecutions).set({ status: 'failed', riskLevel: 'high', resultSummary: summary, updatedAt: new Date().toISOString() })
+          .where(eq(toolExecutions.id, executionId)).returning().get()!
+        tx.update(overwritePublications).set({ state, updatedAt: new Date().toISOString() }).where(eq(overwritePublications.executionId, executionId)).run()
+        tx.insert(auditEvents).values(toolAuditEvent(run.channelId, next)).run()
+        return next
+      })
+    },
+
+    async listRecoverableOverwritePublications() {
+      return client.db.select({ publication: overwritePublications, execution: toolExecutions, workspacePath: projects.workspacePath }).from(overwritePublications)
+        .innerJoin(toolExecutions, eq(toolExecutions.id, overwritePublications.executionId))
+        .innerJoin(taskRuns, eq(taskRuns.id, toolExecutions.taskRunId))
+        .innerJoin(channels, eq(channels.id, taskRuns.channelId))
+        .innerJoin(projects, eq(projects.id, channels.projectId))
+        .where(inArray(overwritePublications.state, ['preparing', 'staged', 'publishing', 'published'])).all()
     },
 
     async expireApprovalRequest(id, now) {

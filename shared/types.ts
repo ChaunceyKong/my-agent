@@ -81,6 +81,19 @@ export interface OverwriteTargetIdentity {
   ctimeMs: number
 }
 
+export type OverwritePublicationState = 'preparing' | 'staged' | 'publishing' | 'published' | 'completed' | 'needs_recovery' | 'recovered'
+
+/** Main-process recovery journal for an explicitly approved file replacement. */
+export interface OverwritePublication {
+  executionId: string
+  temporaryRelativePath: string
+  backupRelativePath: string
+  temporaryIdentityJson: string | null
+  state: OverwritePublicationState
+  createdAt: string
+  updatedAt: string
+}
+
 export interface ToolPolicySnapshot {
   version: 1
   workspacePath: string

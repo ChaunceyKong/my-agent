@@ -7,7 +7,10 @@ import { createRepositories, type Repositories } from '../../electron/database/r
 import { createToolEngine } from '../../electron/core/tool-engine'
 import { createTaskRunService } from '../../electron/core/task-run-service'
 import { createProcessToolService } from '../../electron/core/process-tool-service'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createApprovedOverwriteService } from '../../electron/core/approved-overwrite-service'
+import Database from 'better-sqlite3'
+import { renameSync } from 'node:fs'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -162,7 +165,7 @@ it('does not overwrite after expiry, cancellation, policy revocation, or a stale
     return { path, execution, approval }
   }
   const expired = await makeApproved('expired')
-  await expect(repositories.claimApprovedOverwrite(expired.approval.id, new Date(now.getTime() + 5 * 60 * 1000).toISOString())).rejects.toThrow('过期')
+  await expect(repositories.claimApprovedOverwrite(expired.approval.id, new Date(now.getTime() + 5 * 60 * 1000).toISOString(), '.agent-team-00000000-0000-0000-0000-000000000000.tmp', '.agent-team-00000000-0000-0000-0000-000000000000.backup')).rejects.toThrow('过期')
   expect(await readFile(expired.path, 'utf8')).toBe('original')
 
   const cancelled = await makeApproved('cancelled')
@@ -183,4 +186,58 @@ it('does not overwrite after expiry, cancellation, policy revocation, or a stale
   await repositories.saveChannelAgent({ channelId: next.channelId, agentId: context.agentId, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
   await expect(tools.runApproved(revoked.approval.id)).rejects.toThrow('不可用')
   expect(await readFile(revoked.path, 'utf8')).toBe('original')
+})
+
+async function approvedWrite(name: string) {
+  const service = createApprovalService(repositories, () => now)
+  const engine = createToolEngine(repositories, service)
+  const path = join(directory, `${name}.md`)
+  await writeFile(path, 'original')
+  const execution = (await engine.execute(context, { toolName: 'write_file', input: { path: `${name}.md`, content: 'replacement' } })).execution
+  const approval = (await repositories.getApprovalForToolExecution(execution.id))!
+  await service.approve(approval.id, approval.requestHash)
+  return { path, execution, approval }
+}
+
+it('recovers a published replacement when final audit persistence fails', async () => {
+  const item = await approvedWrite('audit')
+  const sqlite = new Database(join(directory, 'db.sqlite'))
+  sqlite.exec("CREATE TRIGGER reject_complete BEFORE INSERT ON audit_events WHEN NEW.event_type = 'tool_completed' BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END;")
+  await createProcessToolService(repositories, createTaskRunService(repositories), () => now).runApproved(item.approval.id)
+  expect(await readFile(item.path, 'utf8')).toBe('replacement')
+  expect((await repositories.getToolExecution(item.execution.id))!.status).not.toBe('failed')
+  expect(sqlite.prepare('SELECT state FROM overwrite_publications WHERE execution_id = ?').get(item.execution.id)).toEqual({ state: 'published' })
+  sqlite.exec('DROP TRIGGER reject_complete'); sqlite.close()
+  await createApprovedOverwriteService(repositories, () => now).recoverInterruptedPublications()
+  expect((await repositories.getToolExecution(item.execution.id))!.status).toBe('completed')
+  expect(await readdir(directory)).not.toContain(expect.stringMatching(/^\.agent-team-/))
+})
+
+it.each(['missing', 'racer'] as const)('recovers interrupted publishing without losing old data: %s', async (mode) => {
+  const item = await approvedWrite(`interrupted-${mode}`)
+  const temp = '.agent-team-00000000-0000-0000-0000-000000000001.tmp'
+  const backup = '.agent-team-00000000-0000-0000-0000-000000000001.backup'
+  await repositories.claimApprovedOverwrite(item.approval.id, now.toISOString(), temp, backup)
+  const sqlite = new Database(join(directory, 'db.sqlite'))
+  sqlite.prepare("UPDATE overwrite_publications SET state = 'publishing' WHERE execution_id = ?").run(item.execution.id)
+  sqlite.close()
+  renameSync(item.path, join(directory, backup))
+  if (mode === 'racer') await writeFile(item.path, 'racer')
+  await createApprovedOverwriteService(repositories, () => now).recoverInterruptedPublications()
+  if (mode === 'missing') {
+    expect(await readFile(item.path, 'utf8')).toBe('original')
+    expect((await repositories.getToolExecution(item.execution.id))!.resultSummary).toContain('恢复')
+  } else {
+    expect(await readFile(item.path, 'utf8')).toBe('racer')
+    expect((await repositories.getToolExecution(item.execution.id))!.resultSummary).toContain('人工恢复')
+    expect(await readFile(join(directory, backup), 'utf8')).toBe('original')
+  }
+})
+
+it('cleans temporary and backup artifacts only after a successful durable replacement', async () => {
+  const item = await approvedWrite('cleanup')
+  await createProcessToolService(repositories, createTaskRunService(repositories), () => now).runApproved(item.approval.id)
+  expect(await readFile(item.path, 'utf8')).toBe('replacement')
+  expect((await repositories.getToolExecution(item.execution.id))!.status).toBe('completed')
+  expect((await readdir(directory)).filter((name) => name.startsWith('.agent-team-'))).toEqual([])
 })

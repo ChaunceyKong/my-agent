@@ -29,6 +29,9 @@ function validateRelativePath(candidate: string): string[] {
       throw new FileToolError('INVALID_PATH', '路径含有越界或平台保留名称')
     }
     const name = segment.toLowerCase()
+    if (/^\.agent-team-[0-9a-f-]{36}\.(?:tmp|backup)$/i.test(name)) {
+      throw new FileToolError('SENSITIVE_PATH', '不允许访问系统恢复文件')
+    }
     if (sensitiveNames.has(name) || name.startsWith('.env') || /^(credentials|secrets)\.(json|ya?ml|toml|ini)$/.test(name)
       || /\.(pem|key|p12|pfx)$/.test(name)) {
       throw new FileToolError('SENSITIVE_PATH', '不允许访问敏感文件或目录')

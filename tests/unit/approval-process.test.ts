@@ -241,3 +241,35 @@ it('cleans temporary and backup artifacts only after a successful durable replac
   expect((await repositories.getToolExecution(item.execution.id))!.status).toBe('completed')
   expect((await readdir(directory)).filter((name) => name.startsWith('.agent-team-'))).toEqual([])
 })
+
+it('records cleanup_pending after an injected unlink failure and retries it at startup', async () => {
+  const item = await approvedWrite('cleanup-pending')
+  const failing = createApprovedOverwriteService(repositories, () => now, { unlink: () => { throw new Error('unlink unavailable') } })
+  await failing.runApproved(item.approval.id)
+  expect((await repositories.getToolExecution(item.execution.id))!.status).toBe('completed')
+  const sqlite = new Database(join(directory, 'db.sqlite'))
+  expect(sqlite.prepare('SELECT state FROM overwrite_publications WHERE execution_id = ?').get(item.execution.id)).toEqual({ state: 'cleanup_pending' })
+  sqlite.close()
+  expect((await readdir(directory)).some((name) => name.startsWith('.agent-team-'))).toBe(true)
+  await createApprovedOverwriteService(repositories, () => now).recoverInterruptedPublications()
+  expect((await readdir(directory)).filter((name) => name.startsWith('.agent-team-'))).toEqual([])
+})
+
+it('serializes cancellation around the final effect claim without replacing before the claim', async () => {
+  const before = await approvedWrite('cancel-before-claim')
+  await createTaskRunService(repositories).cancelTaskRun(context.taskRunId)
+  await expect(repositories.claimApprovedOverwrite(before.approval.id, now.toISOString(), '.agent-team-00000000-0000-0000-0000-000000000002.tmp', '.agent-team-00000000-0000-0000-0000-000000000002.backup')).rejects.toThrow('不可用')
+  expect(await readFile(before.path, 'utf8')).toBe('original')
+
+  const oldRun = await repositories.getTaskRun(context.taskRunId)
+  const next = await repositories.createStartedTaskRun({ channelId: oldRun!.channelId, modelConfigId: oldRun!.modelConfigId, content: 'next' })
+  context = { ...context, taskRunId: next.id, generation: next.generation }
+  const after = await approvedWrite('cancel-after-claim')
+  await repositories.claimApprovedOverwrite(after.approval.id, now.toISOString(), '.agent-team-00000000-0000-0000-0000-000000000003.tmp', '.agent-team-00000000-0000-0000-0000-000000000003.backup')
+  const sqlite = new Database(join(directory, 'db.sqlite'))
+  sqlite.prepare("UPDATE overwrite_publications SET state = 'publishing' WHERE execution_id = ?").run(after.execution.id); sqlite.close()
+  await repositories.claimOverwriteEffect(after.execution.id)
+  await createTaskRunService(repositories).cancelTaskRun(next.id)
+  expect((await repositories.getToolExecution(after.execution.id))!.status).toBe('executing')
+  expect(await readFile(after.path, 'utf8')).toBe('original')
+})

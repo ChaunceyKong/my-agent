@@ -322,8 +322,11 @@ export function migrate(sqlite: Database.Database): void {
     temporary_relative_path TEXT NOT NULL,
     backup_relative_path TEXT NOT NULL,
     temporary_identity_json TEXT,
-    state TEXT NOT NULL CHECK (state IN ('preparing', 'staged', 'publishing', 'published', 'completed', 'needs_recovery', 'recovered')),
+    state TEXT NOT NULL CHECK (state IN ('preparing', 'staged', 'publishing', 'effect_claimed', 'published', 'cleanup_pending', 'completed', 'needs_recovery', 'recovered')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );`); sqlite.pragma('user_version = 9') }
+  if (version < 10) { sqlite.exec(`ALTER TABLE overwrite_publications RENAME TO overwrite_publications_old;
+    CREATE TABLE overwrite_publications (execution_id TEXT PRIMARY KEY NOT NULL REFERENCES tool_executions(id) ON DELETE CASCADE, temporary_relative_path TEXT NOT NULL, backup_relative_path TEXT NOT NULL, temporary_identity_json TEXT, state TEXT NOT NULL CHECK (state IN ('preparing','staged','publishing','effect_claimed','published','cleanup_pending','completed','needs_recovery','recovered')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    INSERT INTO overwrite_publications SELECT * FROM overwrite_publications_old; DROP TABLE overwrite_publications_old;`); sqlite.pragma('user_version = 10') }
 }

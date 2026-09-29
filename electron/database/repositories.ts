@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { and, asc, eq, inArray, type SQL } from 'drizzle-orm'
+import { and, asc, eq, inArray, sql, type SQL } from 'drizzle-orm'
 import type {
   Agent,
   AgentEditorInput,
@@ -59,7 +59,7 @@ function currentPolicy(tx: Transaction, run: TaskRun, agentId: string, toolName:
 
 function invalidateTools(tx: Transaction, run: TaskRun): void {
   const invalidated = tx.update(toolExecutions).set({ status: 'cancelled', resultSummary: '任务操作已失效', updatedAt: new Date().toISOString() })
-    .where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval'])))
+    .where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval']), sql`${toolExecutions.id} NOT IN (SELECT execution_id FROM overwrite_publications WHERE state = 'effect_claimed')`))
     .returning().all()
   for (const execution of invalidated) {
     tx.update(approvalRequests).set({ status: 'cancelled', decidedAt: new Date().toISOString() })
@@ -71,7 +71,7 @@ function invalidateTools(tx: Transaction, run: TaskRun): void {
 function invalidateChangedToolPolicies(tx: Transaction, scope: SQL): void {
   const pending = tx.select({ execution: toolExecutions, run: taskRuns }).from(toolExecutions)
     .innerJoin(taskRuns, eq(taskRuns.id, toolExecutions.taskRunId))
-    .where(and(scope, inArray(toolExecutions.status, ['executing', 'waiting_approval']))).all()
+    .where(and(scope, inArray(toolExecutions.status, ['executing', 'waiting_approval']), sql`${toolExecutions.id} NOT IN (SELECT execution_id FROM overwrite_publications WHERE state = 'effect_claimed')`)).all()
   for (const { execution, run } of pending) {
     if (currentPolicy(tx, run, execution.agentId, execution.toolName) === execution.policySnapshotJson) continue
     const cancelled = tx.update(toolExecutions)
@@ -118,8 +118,11 @@ export interface Repositories {
   claimApprovedOverwrite(id: string, now: string, temporaryRelativePath: string, backupRelativePath: string): Promise<{ execution: ToolExecution; workspacePath: string; publication: OverwritePublication }>
   markOverwriteStaged(executionId: string, temporaryIdentityJson: string): Promise<OverwritePublication>
   markOverwritePublishing(executionId: string): Promise<OverwritePublication>
+  claimOverwriteEffect(executionId: string): Promise<OverwritePublication>
   markOverwritePublished(executionId: string): Promise<OverwritePublication>
   completeOverwritePublication(executionId: string): Promise<ToolExecution>
+  markOverwriteCleanupPending(executionId: string): Promise<void>
+  markOverwriteCleanupComplete(executionId: string): Promise<void>
   recoverOverwritePublication(executionId: string, state: 'recovered' | 'needs_recovery', summary: string): Promise<ToolExecution>
   listRecoverableOverwritePublications(): Promise<Array<{ publication: OverwritePublication; execution: ToolExecution; workspacePath: string }>>
   getRegisteredExecutable(id: string): Promise<RegisteredExecutable | undefined>
@@ -390,9 +393,21 @@ export function createRepositories(client: DatabaseClient): Repositories {
       })
     },
 
+    async claimOverwriteEffect(executionId) {
+      return client.db.transaction((tx) => {
+        const publication = tx.select().from(overwritePublications).where(eq(overwritePublications.executionId, executionId)).get()
+        const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, executionId)).get()
+        const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
+        if (!publication || publication.state !== 'publishing' || !execution || !run || execution.status !== 'executing' || run.status !== 'running' || run.generation !== execution.generation || currentPolicy(tx, run, execution.agentId, execution.toolName) !== execution.policySnapshotJson) throw new Error('任务操作已失效')
+        const next = tx.update(overwritePublications).set({ state: 'effect_claimed', updatedAt: new Date().toISOString() }).where(and(eq(overwritePublications.executionId, executionId), eq(overwritePublications.state, 'publishing'))).returning().get()
+        if (!next) throw new Error('覆盖发布状态不可用')
+        return next
+      })
+    },
+
     async markOverwritePublished(executionId) {
       const next = client.db.update(overwritePublications).set({ state: 'published', updatedAt: new Date().toISOString() })
-        .where(and(eq(overwritePublications.executionId, executionId), eq(overwritePublications.state, 'publishing'))).returning().get()
+        .where(and(eq(overwritePublications.executionId, executionId), eq(overwritePublications.state, 'effect_claimed'))).returning().get()
       if (!next) throw new Error('覆盖发布状态不可用')
       return next
     },
@@ -402,13 +417,27 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const publication = tx.select().from(overwritePublications).where(eq(overwritePublications.executionId, executionId)).get()
         const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, executionId)).get()
         const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
-        if (!publication || !execution || !run || !['published', 'publishing'].includes(publication.state)) throw new Error('覆盖发布状态不可用')
+        if (!publication || !execution || !run || !['published', 'effect_claimed'].includes(publication.state) || execution.status !== 'executing') throw new Error('覆盖发布状态不可用')
         const completed = tx.update(toolExecutions).set({ status: 'completed', riskLevel: 'high', resultSummary: '已按批准覆盖文件', updatedAt: new Date().toISOString() })
           .where(eq(toolExecutions.id, executionId)).returning().get()!
         tx.update(overwritePublications).set({ state: 'completed', updatedAt: new Date().toISOString() }).where(eq(overwritePublications.executionId, executionId)).run()
         tx.insert(auditEvents).values(toolAuditEvent(run.channelId, completed)).run()
         return completed
       })
+    },
+
+    async markOverwriteCleanupPending(executionId) {
+      client.db.transaction((tx) => {
+        const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, executionId)).get()
+        const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
+        if (!execution || !run) throw new Error('覆盖发布状态不可用')
+        tx.update(overwritePublications).set({ state: 'cleanup_pending', updatedAt: new Date().toISOString() }).where(eq(overwritePublications.executionId, executionId)).run()
+        tx.insert(auditEvents).values({ id: randomUUID(), channelId: run.channelId, taskRunId: run.id, eventType: 'overwrite_cleanup_pending', metadataJson: JSON.stringify({ toolExecutionId: executionId }), createdAt: new Date().toISOString() }).run()
+      })
+    },
+
+    async markOverwriteCleanupComplete(executionId) {
+      client.db.update(overwritePublications).set({ state: 'completed', updatedAt: new Date().toISOString() }).where(and(eq(overwritePublications.executionId, executionId), eq(overwritePublications.state, 'cleanup_pending'))).run()
     },
 
     async recoverOverwritePublication(executionId, state, summary) {
@@ -431,7 +460,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         .innerJoin(taskRuns, eq(taskRuns.id, toolExecutions.taskRunId))
         .innerJoin(channels, eq(channels.id, taskRuns.channelId))
         .innerJoin(projects, eq(projects.id, channels.projectId))
-        .where(inArray(overwritePublications.state, ['preparing', 'staged', 'publishing', 'published'])).all()
+        .where(inArray(overwritePublications.state, ['preparing', 'staged', 'publishing', 'effect_claimed', 'published', 'cleanup_pending'])).all()
     },
 
     async expireApprovalRequest(id, now) {

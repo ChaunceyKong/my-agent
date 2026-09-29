@@ -19,7 +19,7 @@ function parse(execution: ToolExecution): { path: string; content: string; old: 
 function temp(value: string | null) { try { const v = JSON.parse(value ?? '') as Record<string, unknown>; return ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every((k) => typeof v[k] === 'number') ? v as unknown as OverwriteTargetIdentity : undefined } catch { return undefined } }
 
 /** An approved replace is the sole no-delete exception. Its DB journal is committed before every FS phase; DB and FS are deliberately not claimed atomic. */
-export function createApprovedOverwriteService(repositories: Repositories, clock: () => Date = () => new Date()) {
+export function createApprovedOverwriteService(repositories: Repositories, clock: () => Date = () => new Date(), fileOps: { unlink(path: string): void } = { unlink: unlinkSync }) {
   return {
     async runApproved(approvalId: string): Promise<ToolExecution> {
       const claim = await repositories.claimApprovedOverwrite(approvalId, clock().toISOString(), `.agent-team-${randomUUID()}.tmp`, `.agent-team-${randomUUID()}.backup`)
@@ -27,10 +27,11 @@ export function createApprovedOverwriteService(repositories: Repositories, clock
         const input = parse(claim.execution)
         let publication = await stage(claim.workspacePath, claim.publication, input)
         publication = await repositories.markOverwritePublishing(claim.execution.id)
+        publication = await repositories.claimOverwriteEffect(claim.execution.id)
         await publish(claim.workspacePath, publication, input)
         publication = await repositories.markOverwritePublished(claim.execution.id)
         const completed = await repositories.completeOverwritePublication(claim.execution.id)
-        await cleanup(claim.workspacePath, publication, input)
+        if (!await cleanup(claim.workspacePath, publication, input)) await repositories.markOverwriteCleanupPending(claim.execution.id)
         return completed
       } catch {
         const current = (await repositories.listRecoverableOverwritePublications()).find((item) => item.publication.executionId === claim.execution.id)
@@ -55,18 +56,20 @@ export function createApprovedOverwriteService(repositories: Repositories, clock
     // No FS effect occurs in a DB transaction. Keep backup and temp until completion is durable.
     renameSync(target.path, backup); try { if (!inode(lstatSync(backup), input.old)) throw new FileToolError('FILE_CHANGED', '目标文件已变化'); linkSync(source, target.path) } catch (error) { if (!existsSync(target.path)) { try { renameSync(backup, target.path) } catch {} } throw error }
   }
-  async function cleanup(root: string, publication: OverwritePublication, input: ReturnType<typeof parse>) {
-    try { const target = await resolveSafeWritePath(root, input.path); const staged = temp(publication.temporaryIdentityJson); if (!target.exists || !staged) return
+  async function cleanup(root: string, publication: OverwritePublication, input: ReturnType<typeof parse>): Promise<boolean> {
+    try { const target = await resolveSafeWritePath(root, input.path); const staged = temp(publication.temporaryIdentityJson); if (!target.exists || !staged) return false
       const source = join(target.parent, publication.temporaryRelativePath); const backup = join(target.parent, publication.backupRelativePath)
-      if (existsSync(backup) && inode(lstatSync(backup), input.old)) unlinkSync(backup)
-      if (existsSync(source) && inode(lstatSync(source), staged)) unlinkSync(source)
-    } catch { /* completed state remains truthful; a later startup retries cleanup only if journal is incomplete. */ }
+      if (existsSync(backup) && inode(lstatSync(backup), input.old)) fileOps.unlink(backup)
+      if (existsSync(source) && inode(lstatSync(source), staged)) fileOps.unlink(source)
+      return true
+    } catch { return false }
   }
   async function recoverOne(record: { publication: OverwritePublication; execution: ToolExecution; workspacePath: string }) {
     let input: ReturnType<typeof parse>; try { input = parse(record.execution) } catch { await repositories.recoverOverwritePublication(record.publication.executionId, 'needs_recovery', '覆盖发布需要人工恢复'); return }
     if (!names(record.publication.temporaryRelativePath, '.tmp') || !names(record.publication.backupRelativePath, '.backup')) { await repositories.recoverOverwritePublication(record.publication.executionId, 'needs_recovery', '覆盖发布需要人工恢复'); return }
     let target; try { target = await resolveSafeWritePath(record.workspacePath, input.path) } catch { await repositories.recoverOverwritePublication(record.publication.executionId, 'needs_recovery', '覆盖发布需要人工恢复'); return }
     const staged = temp(record.publication.temporaryIdentityJson); const backup = join(target.parent, record.publication.backupRelativePath); const old = existsSync(backup) ? lstatSync(backup) : undefined; const current = target.exists ? await lstat(target.path).catch(() => undefined) : undefined
+    if (record.publication.state === 'cleanup_pending' && current && staged && inode(current, staged)) { if (await cleanup(record.workspacePath, record.publication, input)) await repositories.markOverwriteCleanupComplete(record.publication.executionId); return }
     if (old && inode(old, input.old) && current && staged && inode(current, staged)) { try { if (record.publication.state === 'publishing') await repositories.markOverwritePublished(record.publication.executionId); await repositories.completeOverwritePublication(record.publication.executionId); await cleanup(record.workspacePath, record.publication, input) } catch {} return }
     if (old && inode(old, input.old) && !current) { try { renameSync(backup, target.path); await repositories.recoverOverwritePublication(record.publication.executionId, 'recovered', '覆盖发布已恢复，未替换文件') } catch { await repositories.recoverOverwritePublication(record.publication.executionId, 'needs_recovery', '覆盖发布需要人工恢复') }; return }
     if (!old && current && staged && inode(current, staged)) { try { await repositories.completeOverwritePublication(record.publication.executionId); await cleanup(record.workspacePath, record.publication, input) } catch {}; return }

@@ -81,7 +81,7 @@ export interface OverwriteTargetIdentity {
   ctimeMs: number
 }
 
-export type OverwritePublicationState = 'preparing' | 'staged' | 'publishing' | 'published' | 'completed' | 'needs_recovery' | 'recovered'
+export type OverwritePublicationState = 'preparing' | 'staged' | 'publishing' | 'effect_claimed' | 'published' | 'cleanup_pending' | 'completed' | 'needs_recovery' | 'recovered'
 
 /** Main-process recovery journal for an explicitly approved file replacement. */
 export interface OverwritePublication {

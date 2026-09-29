@@ -427,13 +427,13 @@ export function createRepositories(client: DatabaseClient): Repositories {
     },
 
     async markOverwriteCleanupPending(executionId) {
-      client.db.transaction((tx) => {
-        const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, executionId)).get()
-        const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
-        if (!execution || !run) throw new Error('覆盖发布状态不可用')
-        tx.update(overwritePublications).set({ state: 'cleanup_pending', updatedAt: new Date().toISOString() }).where(eq(overwritePublications.executionId, executionId)).run()
-        tx.insert(auditEvents).values({ id: randomUUID(), channelId: run.channelId, taskRunId: run.id, eventType: 'overwrite_cleanup_pending', metadataJson: JSON.stringify({ toolExecutionId: executionId }), createdAt: new Date().toISOString() }).run()
-      })
+      const execution = await client.db.select().from(toolExecutions).where(eq(toolExecutions.id, executionId)).get()
+      const run = execution && await client.db.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
+      if (!execution || !run) throw new Error('覆盖发布状态不可用')
+      // Persist recovery discoverability before best-effort audit. An audit failure must
+      // never strand hidden artifacts behind an apparently completed journal.
+      await client.db.update(overwritePublications).set({ state: 'cleanup_pending', updatedAt: new Date().toISOString() }).where(eq(overwritePublications.executionId, executionId)).run()
+      try { await client.db.insert(auditEvents).values({ id: randomUUID(), channelId: run.channelId, taskRunId: run.id, eventType: 'overwrite_cleanup_pending', metadataJson: JSON.stringify({ toolExecutionId: executionId }), createdAt: new Date().toISOString() }).run() } catch { /* Recovery state is authoritative. */ }
     },
 
     async markOverwriteCleanupComplete(executionId) {

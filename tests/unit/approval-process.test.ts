@@ -10,7 +10,7 @@ import { createProcessToolService } from '../../electron/core/process-tool-servi
 import { createApprovedOverwriteService } from '../../electron/core/approved-overwrite-service'
 import Database from 'better-sqlite3'
 import { renameSync } from 'node:fs'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -244,13 +244,19 @@ it('cleans temporary and backup artifacts only after a successful durable replac
 
 it('records cleanup_pending after an injected unlink failure and retries it at startup', async () => {
   const item = await approvedWrite('cleanup-pending')
+  const sqlite = new Database(join(directory, 'db.sqlite'))
+  sqlite.exec("CREATE TRIGGER reject_cleanup_audit BEFORE INSERT ON audit_events WHEN NEW.event_type = 'overwrite_cleanup_pending' BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END;")
   const failing = createApprovedOverwriteService(repositories, () => now, { unlink: () => { throw new Error('unlink unavailable') } })
   await failing.runApproved(item.approval.id)
   expect((await repositories.getToolExecution(item.execution.id))!.status).toBe('completed')
-  const sqlite = new Database(join(directory, 'db.sqlite'))
   expect(sqlite.prepare('SELECT state FROM overwrite_publications WHERE execution_id = ?').get(item.execution.id)).toEqual({ state: 'cleanup_pending' })
-  sqlite.close()
+  sqlite.exec('DROP TRIGGER reject_cleanup_audit'); sqlite.close()
   expect((await readdir(directory)).some((name) => name.startsWith('.agent-team-'))).toBe(true)
+  const retryFails = createApprovedOverwriteService(repositories, () => now, { unlink: () => { throw new Error('still unavailable') } })
+  await retryFails.recoverInterruptedPublications()
+  const afterFailedRetry = new Database(join(directory, 'db.sqlite'))
+  expect(afterFailedRetry.prepare('SELECT state FROM overwrite_publications WHERE execution_id = ?').get(item.execution.id)).toEqual({ state: 'cleanup_pending' })
+  afterFailedRetry.close()
   await createApprovedOverwriteService(repositories, () => now).recoverInterruptedPublications()
   expect((await readdir(directory)).filter((name) => name.startsWith('.agent-team-'))).toEqual([])
 })
@@ -272,4 +278,20 @@ it('serializes cancellation around the final effect claim without replacing befo
   await createTaskRunService(repositories).cancelTaskRun(next.id)
   expect((await repositories.getToolExecution(after.execution.id))!.status).toBe('executing')
   expect(await readFile(after.path, 'utf8')).toBe('original')
+})
+
+it('removes a verified staged temporary file during startup recovery and never exposes it to tools', async () => {
+  const item = await approvedWrite('staged-recovery')
+  const temp = '.agent-team-00000000-0000-0000-0000-000000000004.tmp'
+  const backup = '.agent-team-00000000-0000-0000-0000-000000000004.backup'
+  await repositories.claimApprovedOverwrite(item.approval.id, now.toISOString(), temp, backup)
+  const tempPath = join(directory, temp); await writeFile(tempPath, 'staged')
+  const info = await lstat(tempPath)
+  const sqlite = new Database(join(directory, 'db.sqlite'))
+  sqlite.prepare("UPDATE overwrite_publications SET state = 'staged', temporary_identity_json = ? WHERE execution_id = ?").run(JSON.stringify({ dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs }), item.execution.id); sqlite.close()
+  await createApprovedOverwriteService(repositories, () => now).recoverInterruptedPublications()
+  expect((await readdir(directory)).includes(temp)).toBe(false)
+  expect((await repositories.getToolExecution(item.execution.id))!.resultSummary).toContain('清理临时')
+  const engine = createToolEngine(repositories, createApprovalService(repositories, () => now))
+  await expect(engine.execute(context, { toolName: 'read_file', input: { path: temp } })).rejects.toThrow()
 })

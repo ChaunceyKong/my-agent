@@ -39,14 +39,19 @@ function createWindow(): void {
 app.whenReady().then(async () => {
   const database = await openStartupDatabase({
     open: () => createDatabase({ filePath: join(app.getPath('userData'), 'agent-team.sqlite') }),
-    prepare: (database) => createTaskRunService(createRepositories(database)).recoverInterruptedTaskRuns(),
+    prepare: async (database) => {
+      const repositories = createRepositories(database)
+      // Finish or surface a durable published replacement before interrupted runs are
+      // cancelled; no new effect is started during recovery.
+      await createApprovedOverwriteService(repositories).recoverInterruptedPublications()
+      await createTaskRunService(repositories).recoverInterruptedTaskRuns()
+    },
     showError: (options) => dialog.showMessageBox(options),
     quit: () => app.quit(),
   })
   if (!database) return
   app.once('will-quit', () => database.close())
   const repositories = createRepositories(database)
-  await createApprovedOverwriteService(repositories).recoverInterruptedPublications()
   const taskRuns = createTaskRunService(repositories)
   const approvals = createApprovalService(repositories)
   const processes = createProcessToolService(repositories, taskRuns)

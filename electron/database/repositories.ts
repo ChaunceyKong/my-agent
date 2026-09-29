@@ -106,12 +106,14 @@ export interface Repositories {
   listToolExecutions(taskRunId: string): Promise<ToolExecution[]>
   finishToolExecution(id: string, outcome: () => ToolOutcome): Promise<ToolExecution>
   createApprovalRequest(toolExecutionId: string, expiresAt: string): Promise<ApprovalRequest>
+  createOverwriteApproval(toolExecutionId: string, expiresAt: string, targetIdentityJson: string): Promise<ApprovalRequest>
   getApprovalRequest(id: string): Promise<ApprovalRequest | undefined>
   getApprovalForToolExecution(toolExecutionId: string): Promise<ApprovalRequest | undefined>
   listApprovalRequests(taskRunId: string): Promise<ApprovalRequest[]>
   decideApprovalRequest(id: string, requestHash: string, decision: 'approved' | 'rejected', now: string): Promise<ApprovalRequest>
   expireApprovalRequest(id: string, now: string): Promise<ApprovalRequest>
   claimApprovedProcess(id: string, now: string): Promise<{ execution: ToolExecution; executable: RegisteredExecutable; workspacePath: string }>
+  claimApprovedOverwrite(id: string, now: string): Promise<{ execution: ToolExecution; workspacePath: string }>
   getRegisteredExecutable(id: string): Promise<RegisteredExecutable | undefined>
   listRegisteredExecutables(): Promise<RegisteredExecutable[]>
   saveRegisteredExecutable(input: Omit<RegisteredExecutable, 'createdAt' | 'updatedAt'>): Promise<RegisteredExecutable>
@@ -166,6 +168,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
           messageId: context.messageId ?? null, toolName: request.toolName, inputJson: JSON.stringify(request.input),
           policySnapshotJson,
           requestHash: hashToolRequest({ taskRunId: run.id, generation: run.generation, agentId: context.agentId, messageId: context.messageId ?? null, request, policySnapshotJson }),
+          overwriteTargetIdentityJson: null,
           riskLevel: request.toolName === 'write_file' ? 'medium' : 'low', status: 'executing',
           resultSummary: null, createdAt: timestamp, updatedAt: timestamp,
         }
@@ -214,6 +217,25 @@ export function createRepositories(client: DatabaseClient): Repositories {
           generation: execution.generation, policySnapshotJson: execution.policySnapshotJson, status: 'pending', expiresAt, decidedAt: null, createdAt: timestamp }
         tx.insert(approvalRequests).values(approval).run()
         const waiting = tx.update(toolExecutions).set({ status: 'waiting_approval', riskLevel: 'high', resultSummary: '等待 CEO 审批', updatedAt: timestamp })
+          .where(and(eq(toolExecutions.id, execution.id), eq(toolExecutions.status, 'executing'))).returning().get()
+        if (!waiting) throw new Error('审批对象已失效')
+        tx.insert(auditEvents).values(toolAuditEvent(run.channelId, waiting)).run()
+        return approval
+      })
+    },
+
+    async createOverwriteApproval(toolExecutionId, expiresAt, targetIdentityJson) {
+      return client.db.transaction((tx) => {
+        const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, toolExecutionId)).get()
+        if (!execution || execution.status !== 'executing' || execution.toolName !== 'write_file') throw new Error('审批对象不可用')
+        const run = tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
+        if (!run || run.status !== 'running' || run.generation !== execution.generation
+          || currentPolicy(tx, run, execution.agentId, execution.toolName) !== execution.policySnapshotJson) throw new Error('审批对象已失效')
+        const timestamp = new Date().toISOString()
+        const approval: ApprovalRequest = { id: randomUUID(), toolExecutionId, requestHash: execution.requestHash,
+          generation: execution.generation, policySnapshotJson: execution.policySnapshotJson, status: 'pending', expiresAt, decidedAt: null, createdAt: timestamp }
+        tx.insert(approvalRequests).values(approval).run()
+        const waiting = tx.update(toolExecutions).set({ overwriteTargetIdentityJson: targetIdentityJson, status: 'waiting_approval', riskLevel: 'high', resultSummary: '目标已存在，覆盖需要 CEO 审批', updatedAt: timestamp })
           .where(and(eq(toolExecutions.id, execution.id), eq(toolExecutions.status, 'executing'))).returning().get()
         if (!waiting) throw new Error('审批对象已失效')
         tx.insert(auditEvents).values(toolAuditEvent(run.channelId, waiting)).run()
@@ -295,6 +317,38 @@ export function createRepositories(client: DatabaseClient): Repositories {
           .where(and(eq(approvalRequests.id, id), eq(approvalRequests.status, 'approved'))).returning().get()
         if (!claimed) throw new Error('审批请求不可用')
         return { execution, executable, workspacePath: snapshot.workspacePath }
+      })
+      if (!claimed) throw new Error('审批请求已过期')
+      return claimed
+    },
+
+    async claimApprovedOverwrite(id, now) {
+      const claimed = client.db.transaction((tx) => {
+        const approval = tx.select().from(approvalRequests).where(eq(approvalRequests.id, id)).get()
+        const execution = approval && tx.select().from(toolExecutions).where(eq(toolExecutions.id, approval.toolExecutionId)).get()
+        const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
+        const expire = () => {
+          if (approval?.status === 'approved') tx.update(approvalRequests).set({ status: 'expired', decidedAt: now }).where(eq(approvalRequests.id, id)).run()
+          if (execution && run && execution.status === 'executing') {
+            const cancelled = tx.update(toolExecutions).set({ status: 'cancelled', resultSummary: '审批已过期', updatedAt: now }).where(eq(toolExecutions.id, execution.id)).returning().get()
+            if (cancelled) tx.insert(auditEvents).values(toolAuditEvent(run.channelId, cancelled)).run()
+          }
+          return undefined
+        }
+        if (!approval || !execution || !run || approval.status !== 'approved' || execution.status !== 'executing'
+          || execution.toolName !== 'write_file' || !execution.overwriteTargetIdentityJson || execution.requestHash !== approval.requestHash
+          || execution.generation !== approval.generation || execution.policySnapshotJson !== approval.policySnapshotJson) throw new Error('审批请求不可用')
+        if (new Date(approval.expiresAt).getTime() <= new Date(now).getTime()) return expire()
+        if (run.status !== 'running' || run.generation !== approval.generation
+          || currentPolicy(tx, run, execution.agentId, execution.toolName) !== approval.policySnapshotJson) throw new Error('审批请求不可用')
+        let input: { path?: unknown; content?: unknown }
+        let snapshot: { workspacePath?: unknown }
+        try { input = JSON.parse(execution.inputJson); snapshot = JSON.parse(execution.policySnapshotJson) } catch { throw new Error('审批请求不可用') }
+        if (typeof input.path !== 'string' || typeof input.content !== 'string' || typeof snapshot.workspacePath !== 'string') throw new Error('审批请求不可用')
+        const claimed = tx.update(approvalRequests).set({ status: 'executing', decidedAt: now })
+          .where(and(eq(approvalRequests.id, id), eq(approvalRequests.status, 'approved'))).returning().get()
+        if (!claimed) throw new Error('审批请求不可用')
+        return { execution, workspacePath: snapshot.workspacePath }
       })
       if (!claimed) throw new Error('审批请求已过期')
       return claimed

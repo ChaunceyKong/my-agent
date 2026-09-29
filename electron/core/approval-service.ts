@@ -8,6 +8,9 @@ export function createApprovalService(repositories: Repositories, clock: () => D
     request(toolExecutionId: string): Promise<ApprovalRequest> {
       return repositories.createApprovalRequest(toolExecutionId, new Date(clock().getTime() + FIVE_MINUTES).toISOString())
     },
+    requestOverwrite(toolExecutionId: string, targetIdentityJson: string): Promise<ApprovalRequest> {
+      return repositories.createOverwriteApproval(toolExecutionId, new Date(clock().getTime() + FIVE_MINUTES).toISOString(), targetIdentityJson)
+    },
     approve(id: string, requestHash: string): Promise<ApprovalRequest> {
       return repositories.decideApprovalRequest(id, requestHash, 'approved', clock().toISOString())
     },

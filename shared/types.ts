@@ -64,10 +64,21 @@ export interface ToolExecution {
   riskLevel: ToolRiskLevel
   requestHash: string
   policySnapshotJson: string
+  /** Bound when an existing file is submitted for explicit replacement approval. */
+  overwriteTargetIdentityJson: string | null
   status: ToolExecutionStatus
   resultSummary: string | null
   createdAt: string
   updatedAt: string
+}
+
+/** Stable file attributes captured before an overwrite approval is created. */
+export interface OverwriteTargetIdentity {
+  dev: number
+  ino: number
+  size: number
+  mtimeMs: number
+  ctimeMs: number
 }
 
 export interface ToolPolicySnapshot {

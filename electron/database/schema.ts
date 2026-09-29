@@ -107,6 +107,7 @@ export const toolExecutions = sqliteTable('tool_executions', {
   riskLevel: text('risk_level').$type<ToolRiskLevel>().notNull(),
   requestHash: text('request_hash').notNull(),
   policySnapshotJson: text('policy_snapshot_json').notNull(),
+  overwriteTargetIdentityJson: text('overwrite_target_identity_json'),
   status: text('status').$type<ToolExecutionStatus>().notNull(),
   resultSummary: text('result_summary'),
   createdAt: text('created_at').notNull(),
@@ -305,4 +306,5 @@ export function migrate(sqlite: Database.Database): void {
     })()
   }
   if (version < 7) { sqlite.exec(`CREATE TABLE IF NOT EXISTS tool_result_consents (project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, model_config_id TEXT NOT NULL REFERENCES model_configs(id) ON DELETE CASCADE, scope_version INTEGER NOT NULL, consented_at TEXT NOT NULL, PRIMARY KEY (project_id, model_config_id, scope_version));`); sqlite.pragma('user_version = 7') }
+  if (version < 8) { sqlite.exec('ALTER TABLE tool_executions ADD COLUMN overwrite_target_identity_json TEXT'); sqlite.pragma('user_version = 8') }
 }

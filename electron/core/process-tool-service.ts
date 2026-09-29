@@ -1,14 +1,19 @@
 import type { Repositories } from '../database/repositories'
 import type { TaskRunService } from './task-run-service'
 import { executeRegisteredProcess } from './process-tool'
+import { createApprovedOverwriteService } from './approved-overwrite-service'
 
-export function createProcessToolService(repositories: Repositories, taskRuns: TaskRunService) {
+export function createProcessToolService(repositories: Repositories, taskRuns: TaskRunService, clock: () => Date = () => new Date()) {
+  const overwrites = createApprovedOverwriteService(repositories, clock)
   return {
     async runApproved(approvalId: string) {
       const approval = await repositories.getApprovalRequest(approvalId)
       if (!approval || approval.status !== 'approved') throw new Error('审批请求不可用')
+      const execution = await repositories.getToolExecution(approval.toolExecutionId)
+      if (execution?.toolName === 'write_file') return overwrites.runApproved(approvalId)
+      if (execution?.toolName !== 'run_process') throw new Error('审批请求不可用')
       const controller = new AbortController()
-      const unsubscribe = taskRuns.onCancelled((await repositories.getToolExecution(approval.toolExecutionId))?.taskRunId ?? '', () => controller.abort())
+      const unsubscribe = taskRuns.onCancelled(execution.taskRunId, () => controller.abort())
       let claimed: Awaited<ReturnType<typeof repositories.claimApprovedProcess>> | undefined
       try {
         claimed = await repositories.claimApprovedProcess(approvalId, new Date().toISOString())

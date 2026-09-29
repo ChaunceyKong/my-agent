@@ -6,7 +6,8 @@ import { createDatabase, type DatabaseClient } from '../../electron/database/cli
 import { createRepositories, type Repositories } from '../../electron/database/repositories'
 import { createToolEngine } from '../../electron/core/tool-engine'
 import { createTaskRunService } from '../../electron/core/task-run-service'
-import { mkdtemp } from 'node:fs/promises'
+import { createProcessToolService } from '../../electron/core/process-tool-service'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -14,21 +15,22 @@ let db: DatabaseClient
 let repositories: Repositories
 let context: { taskRunId: string; generation: number; agentId: string }
 let now: Date
+let directory: string
 
 beforeEach(async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'agent-team-approval-'))
+  directory = await mkdtemp(join(tmpdir(), 'agent-team-approval-'))
   db = createDatabase({ filePath: join(directory, 'db.sqlite') })
   repositories = createRepositories(db)
   const { channel } = await repositories.createProjectWithInitialChannel({ name: 'p', workspacePath: directory })
   const model = await repositories.saveModelConfig({ providerPreset: 'openai', baseUrl: 'https://example.com', modelName: 'm', encryptedApiKey: 'x' })
-  const agent = await repositories.createAgent({ name: 'a', avatar: null, title: '', systemPrompt: '', modelConfigId: model.id, defaultToolPermissions: { run_process: true } })
+  const agent = await repositories.createAgent({ name: 'a', avatar: null, title: '', systemPrompt: '', modelConfigId: model.id, defaultToolPermissions: { run_process: true, write_file: true } })
   await repositories.saveChannelAgent({ channelId: channel.id, agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
   const run = await repositories.createStartedTaskRun({ channelId: channel.id, modelConfigId: model.id, content: 'run' })
   context = { taskRunId: run.id, generation: run.generation, agentId: agent.id }
   now = new Date('2026-09-27T00:00:00.000Z')
 })
 
-afterEach(() => db.close())
+afterEach(async () => { db.close(); await rm(directory, { recursive: true, force: true }) })
 
 it('creates an approval without executing a process, and approves only once', async () => {
   const service = createApprovalService(repositories, () => now)
@@ -124,4 +126,61 @@ it('allows exactly one concurrent process claim and leaves the loser without a f
   expect((await repositories.getApprovalRequest(approval.id))!.status).toBe('executing')
   expect((await repositories.getToolExecution(execution.id))!.status).toBe('executing')
   expect((await repositories.listAuditEvents((await repositories.getTaskRun(context.taskRunId))!.channelId)).filter((event) => event.eventType === 'tool_failed')).toEqual([])
+})
+
+it('binds an existing write to one immutable approval and writes only after explicit execution', async () => {
+  const service = createApprovalService(repositories, () => now)
+  const engine = createToolEngine(repositories, service)
+  const path = join(directory, 'draft.md')
+  await writeFile(path, 'original')
+  const execution = (await engine.execute(context, { toolName: 'write_file', input: { path: 'draft.md', content: 'replacement' } })).execution
+  const approval = (await repositories.getApprovalForToolExecution(execution.id))!
+  expect(execution).toMatchObject({ status: 'waiting_approval', riskLevel: 'high' })
+  expect(approval).toMatchObject({ status: 'pending', requestHash: execution.requestHash, generation: execution.generation, policySnapshotJson: execution.policySnapshotJson })
+  expect(await readFile(path, 'utf8')).toBe('original')
+  expect(JSON.stringify(await repositories.listAuditEvents((await repositories.getTaskRun(context.taskRunId))!.channelId))).not.toMatch(/replacement|agent-team-approval-/)
+  await service.approve(approval.id, approval.requestHash)
+  expect(await readFile(path, 'utf8')).toBe('original')
+  const tools = createProcessToolService(repositories, createTaskRunService(repositories), () => now)
+  await tools.runApproved(approval.id)
+  expect(await repositories.getToolExecution(execution.id)).toMatchObject({ status: 'completed' })
+  expect(await readFile(path, 'utf8')).toBe('replacement')
+  expect((await repositories.getToolExecution(execution.id))!.status).toBe('completed')
+  await expect(tools.runApproved(approval.id)).rejects.toThrow('不可用')
+})
+
+it('does not overwrite after expiry, cancellation, policy revocation, or a stale target', async () => {
+  const tools = createProcessToolService(repositories, createTaskRunService(repositories), () => now)
+  const makeApproved = async (name: string) => {
+    const service = createApprovalService(repositories, () => now)
+    const engine = createToolEngine(repositories, service)
+    const path = join(directory, `${name}.md`)
+    await writeFile(path, 'original')
+    const execution = (await engine.execute(context, { toolName: 'write_file', input: { path: `${name}.md`, content: 'replacement' } })).execution
+    const approval = (await repositories.getApprovalForToolExecution(execution.id))!
+    await service.approve(approval.id, approval.requestHash)
+    return { path, execution, approval }
+  }
+  const expired = await makeApproved('expired')
+  await expect(repositories.claimApprovedOverwrite(expired.approval.id, new Date(now.getTime() + 5 * 60 * 1000).toISOString())).rejects.toThrow('过期')
+  expect(await readFile(expired.path, 'utf8')).toBe('original')
+
+  const cancelled = await makeApproved('cancelled')
+  await createTaskRunService(repositories).cancelTaskRun(context.taskRunId)
+  await expect(tools.runApproved(cancelled.approval.id)).rejects.toThrow('不可用')
+  expect(await readFile(cancelled.path, 'utf8')).toBe('original')
+
+  const run = await repositories.getTaskRun(context.taskRunId)
+  const next = await repositories.createStartedTaskRun({ channelId: run!.channelId, modelConfigId: run!.modelConfigId, content: 'next' })
+  context = { ...context, taskRunId: next.id, generation: next.generation }
+  const stale = await makeApproved('stale')
+  await writeFile(stale.path, 'racer')
+  await tools.runApproved(stale.approval.id)
+  expect(await readFile(stale.path, 'utf8')).toBe('racer')
+  expect((await repositories.getToolExecution(stale.execution.id))!.status).toBe('failed')
+
+  const revoked = await makeApproved('revoked')
+  await repositories.saveChannelAgent({ channelId: next.channelId, agentId: context.agentId, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  await expect(tools.runApproved(revoked.approval.id)).rejects.toThrow('不可用')
+  expect(await readFile(revoked.path, 'utf8')).toBe('original')
 })

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { linkSync, lstatSync, realpathSync, unlinkSync, type Stats } from 'node:fs'
 import { lstat, open } from 'node:fs/promises'
 import { join, relative } from 'node:path'
-import type { ListDirectoryResult, ReadTextFileResult, SearchTextFilesResult, ToolExecution, ToolPolicySnapshot, ToolRequest } from '../../shared/types'
+import type { ListDirectoryResult, OverwriteTargetIdentity, ReadTextFileResult, SearchTextFilesResult, ToolExecution, ToolPolicySnapshot, ToolRequest } from '../../shared/types'
 import type { Repositories, ToolContext, ToolOutcome } from '../database/repositories'
 import { FileToolError, resolveSafeWritePath } from './file-sandbox'
 import { FILE_TOOL_LIMITS, listDirectory, readTextFile, searchTextFiles } from './file-tools'
@@ -41,15 +41,20 @@ export function validateToolRequest(value: unknown): ToolRequest {
   return { toolName: name as 'read_file' | 'list_dir', input: { path: input.path } }
 }
 
-const pending: ToolOutcome = { status: 'waiting_approval', riskLevel: 'high', resultSummary: '目标已存在，覆盖需要审批' }
-
 function unchanged(path: string, expected: Stats): void {
   const current = lstatSync(path)
   if (current.isSymbolicLink() || current.dev !== expected.dev || current.ino !== expected.ino
     || relative(path, realpathSync(path)) !== '') throw new FileToolError('FILE_CHANGED', '文件路径已变化')
 }
 
-export function createToolEngine(repositories: Repositories, approval?: { request(toolExecutionId: string): Promise<unknown> }) {
+function targetIdentity(info: Stats): OverwriteTargetIdentity {
+  return { dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs }
+}
+
+export function createToolEngine(repositories: Repositories, approval?: {
+  request(toolExecutionId: string): Promise<unknown>
+  requestOverwrite(toolExecutionId: string, targetIdentityJson: string): Promise<unknown>
+}) {
   return {
     async execute(context: ToolContext, value: unknown): Promise<ToolResponse> {
       const request = validateToolRequest(value)
@@ -63,7 +68,13 @@ export function createToolEngine(repositories: Repositories, approval?: { reques
       const { workspacePath: root } = JSON.parse(execution.policySnapshotJson) as ToolPolicySnapshot
       try {
         if (request.toolName === 'write_file') {
-          return { execution: await writeDraft(root, request.input.path, request.input.content, execution.id) }
+          const target = await resolveSafeWritePath(root, request.input.path)
+          if (target.exists) {
+            if (!approvalService) throw new Error('审批服务不可用')
+            await approvalService.requestOverwrite(execution.id, JSON.stringify(targetIdentity(await lstat(target.path))))
+            return { execution: (await repositories.getToolExecution(execution.id))! }
+          }
+          return { execution: await writeDraft(root, request.input.path, request.input.content, execution.id, approvalService) }
         }
         let result: ReadResult
         if (request.toolName === 'read_file') result = await readTextFile(root, request.input.path)
@@ -80,9 +91,13 @@ export function createToolEngine(repositories: Repositories, approval?: { reques
     },
   }
 
-  async function writeDraft(root: string, path: string, content: string, executionId: string): Promise<ToolExecution> {
+  async function writeDraft(root: string, path: string, content: string, executionId: string, approvalService?: { requestOverwrite(toolExecutionId: string, targetIdentityJson: string): Promise<unknown> }): Promise<ToolExecution> {
     const target = await resolveSafeWritePath(root, path)
-    if (target.exists) return repositories.finishToolExecution(executionId, () => pending)
+    if (target.exists) {
+      if (!approvalService) throw new Error('审批服务不可用')
+      await approvalService.requestOverwrite(executionId, JSON.stringify(targetIdentity(await lstat(target.path))))
+      return (await repositories.getToolExecution(executionId))!
+    }
     const parent = await lstat(target.parent)
     const temporary = join(target.parent, `.agent-team-${randomUUID()}.tmp`)
     const file = await open(temporary, 'wx', 0o600)
@@ -96,7 +111,8 @@ export function createToolEngine(repositories: Repositories, approval?: { reques
       await file.sync()
       await file.close()
       await resolveSafeWritePath(root, path)
-      return await repositories.finishToolExecution(executionId, () => {
+      let collision: OverwriteTargetIdentity | undefined
+      const completed = await repositories.finishToolExecution(executionId, () => {
         unchanged(target.parent, parent)
         unchanged(temporary, identity!)
         try {
@@ -108,10 +124,15 @@ export function createToolEngine(repositories: Repositories, approval?: { reques
           const conflict = lstatSync(target.path)
           if (conflict.isSymbolicLink() || relative(target.path, realpathSync(target.path)) !== '') throw new FileToolError('LINK_NOT_ALLOWED', '不允许访问链接')
           if (!conflict.isFile()) throw new FileToolError('NOT_FILE', '目标不是普通文件')
-          return pending
+          collision = targetIdentity(conflict)
+          return { status: 'executing', riskLevel: 'high', resultSummary: '正在创建覆盖审批' }
         }
         return { status: 'completed', riskLevel: 'medium', resultSummary: `已新建文件，${Buffer.byteLength(content, 'utf8')} 字节` }
       })
+      if (!collision || completed.status !== 'executing') return completed
+      if (!approvalService) throw new Error('审批服务不可用')
+      await approvalService.requestOverwrite(executionId, JSON.stringify(collision))
+      return (await repositories.getToolExecution(executionId))!
     } finally {
       await file.close()
       // Never remove a substituted path if another local writer changed the parent/temp.

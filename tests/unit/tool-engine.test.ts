@@ -8,6 +8,7 @@ import { createDatabase, type DatabaseClient } from '../../electron/database/cli
 import { createRepositories, type Repositories } from '../../electron/database/repositories'
 import { createTaskRunService } from '../../electron/core/task-run-service'
 import { createToolEngine } from '../../electron/core/tool-engine'
+import { createApprovalService } from '../../electron/core/approval-service'
 import { migrate } from '../../electron/database/schema'
 
 vi.mock('node:fs', async (original) => {
@@ -42,7 +43,7 @@ beforeEach(async () => {
   await repositories.saveChannelAgent({ channelId, agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
   const run = await repositories.createStartedTaskRun({ channelId, modelConfigId: model.id, content: 'write' })
   context = { taskRunId: run.id, agentId: agent.id, generation: run.generation }
-  engine = createToolEngine(repositories)
+  engine = createToolEngine(repositories, createApprovalService(repositories))
 })
 
 afterEach(async () => {
@@ -315,7 +316,7 @@ it('migrates v4 runs with generation zero and preserves existing data on repeate
     migrate(sqlite)
     migrate(sqlite)
     expect(sqlite.prepare('SELECT id, generation, status FROM task_runs').get()).toEqual({ id: 'r', generation: 0, status: 'running' })
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(7)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(8)
   } finally { sqlite.close() }
 })
 

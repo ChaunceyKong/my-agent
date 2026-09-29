@@ -48,15 +48,36 @@ export function createSingleAgentRunner(deps: {
         }
         let reply = ''
         const calls = new Map<number, NativeToolCall>()
-        await deps.modelClient.streamChat({ projectId: input.projectId, modelConfigId: input.active.modelConfigId, taskRunId: current.id, messages, tools: TOOLS }, async (event) => {
-          if (event.type === 'delta') reply += event.content ?? ''
-          if (event.type === 'tool_call' && event.toolCall) {
-            const old = calls.get(event.toolCall.index)
-            calls.set(event.toolCall.index, { ...event.toolCall, id: old?.id || event.toolCall.id, name: (old?.name || event.toolCall.name), arguments: (old?.arguments ?? '') + event.toolCall.arguments })
-          }
-          if (event.type === 'error') await input.onEvent(event)
-        })
+        let streamFailed = false
+        let streamCompleted = false
+        let streamErrorEmitted = false
+        let streamError = '模型流响应无效，任务已安全停止。'
+        try {
+          await deps.modelClient.streamChat({ projectId: input.projectId, modelConfigId: input.active.modelConfigId, taskRunId: current.id, messages, tools: TOOLS }, async (event) => {
+            if (event.type === 'delta') reply += event.content ?? ''
+            if (event.type === 'tool_call' && event.toolCall) {
+              const old = calls.get(event.toolCall.index)
+              calls.set(event.toolCall.index, { ...event.toolCall, id: old?.id || event.toolCall.id, name: (old?.name || event.toolCall.name), arguments: (old?.arguments ?? '') + event.toolCall.arguments })
+            }
+            if (event.type === 'complete') streamCompleted = true
+            if (event.type === 'error') {
+              streamFailed = true
+              streamError = event.content ?? streamError
+              streamErrorEmitted = true
+              await input.onEvent(event)
+            }
+          })
+        } catch {
+          streamFailed = true
+          streamErrorEmitted = true
+          await input.onEvent({ taskRunId: current.id, type: 'error', content: streamError })
+        }
         if (!await deps.taskRuns.canAcceptChunk(current.id, current.generation)) return
+        if (streamFailed || !streamCompleted) {
+          if (!streamErrorEmitted) await input.onEvent({ taskRunId: current.id, type: 'error', content: streamError })
+          await deps.repositories.transitionTaskRun(current.id, 'running', 'failed', { errorMessage: streamError })
+          return
+        }
         if (!calls.size) {
           await deps.taskRuns.finishTaskRun(current.id, reply)
           await input.onEvent({ taskRunId: current.id, type: 'complete' })

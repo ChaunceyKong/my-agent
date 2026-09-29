@@ -19,6 +19,37 @@ it('executes a native tool call then completes with the follow-up response', asy
   expect(taskRuns.finishTaskRun).toHaveBeenCalledWith('r', '完成')
 })
 
+it('fails closed when an empty tool_calls terminal becomes a model stream error', async () => {
+  const { runner, modelClient, repositories, taskRuns, toolEngine } = setup([])
+  modelClient.streamChat.mockImplementationOnce(async (_input: any, emit: any) => emit({ taskRunId: 'r', type: 'error', content: '模型响应格式无效，请重试。' }))
+  const events: any[] = []
+  await runner.run({ taskRunId: 'r', projectId: 'p', channelId: 'c', active: { agent, modelConfigId: 'm' }, onEvent: async (event) => { events.push(event) } })
+  expect(events).toContainEqual(expect.objectContaining({ type: 'error' }))
+  expect(repositories.transitionTaskRun).toHaveBeenCalledWith('r', 'running', 'failed', expect.objectContaining({ errorMessage: '模型响应格式无效，请重试。' }))
+  expect(taskRuns.finishTaskRun).not.toHaveBeenCalled()
+  expect(toolEngine.execute).not.toHaveBeenCalled()
+})
+
+it('fails closed when the model reports a generic stream error', async () => {
+  const { runner, modelClient, repositories, taskRuns, toolEngine } = setup([])
+  modelClient.streamChat.mockImplementationOnce(async (_input: any, emit: any) => emit({ taskRunId: 'r', type: 'error', content: '模型连接失败，请稍后重试。' }))
+  await runner.run({ taskRunId: 'r', projectId: 'p', channelId: 'c', active: { agent, modelConfigId: 'm' }, onEvent: async () => {} })
+  expect(repositories.transitionTaskRun).toHaveBeenCalledWith('r', 'running', 'failed', expect.objectContaining({ errorMessage: '模型连接失败，请稍后重试。' }))
+  expect(taskRuns.finishTaskRun).not.toHaveBeenCalled()
+  expect(toolEngine.execute).not.toHaveBeenCalled()
+})
+
+it('fails closed when a model stream ends partially without complete', async () => {
+  const { runner, modelClient, repositories, taskRuns, toolEngine } = setup([])
+  modelClient.streamChat.mockImplementationOnce(async (_input: any, emit: any) => emit({ taskRunId: 'r', type: 'delta', content: 'partial' }))
+  const events: any[] = []
+  await runner.run({ taskRunId: 'r', projectId: 'p', channelId: 'c', active: { agent, modelConfigId: 'm' }, onEvent: async (event) => { events.push(event) } })
+  expect(events).toContainEqual(expect.objectContaining({ type: 'error', content: '模型流响应无效，任务已安全停止。' }))
+  expect(repositories.transitionTaskRun).toHaveBeenCalledWith('r', 'running', 'failed', expect.objectContaining({ errorMessage: '模型流响应无效，任务已安全停止。' }))
+  expect(taskRuns.finishTaskRun).not.toHaveBeenCalled()
+  expect(toolEngine.execute).not.toHaveBeenCalled()
+})
+
 it('fails safe at the maximum tool step count', async () => {
   const { runner, repositories } = setup([call('read_file', { path: 'a.md' }, 'c1'), call('read_file', { path: 'a.md' }, 'c2'), call('read_file', { path: 'a.md' }, 'c3'), call('read_file', { path: 'a.md' }, 'c4'), call('read_file', { path: 'a.md' }, 'c5')])
   await runner.run({ taskRunId: 'r', projectId: 'p', channelId: 'c', active: { agent, modelConfigId: 'm' }, onEvent: async () => {} })

@@ -35,7 +35,7 @@ function Workbench() {
       <Composer draft={conversation.draft} models={state.models} modelId={state.modelId} disabled={!channel || !conversation.loaded} sending={state.sending} running={conversation.runs.some((run) => run.status === 'running')} onDraft={store.setDraft} onModel={store.setModel} onSend={() => { void store.send() }} onCancel={() => { void store.cancel() }} onSettings={() => setDialog('settings')} />
     </main>
     {cockpitOpen && <RightCockpit project={project} channel={channel} model={model} models={state.models} run={conversation.runs.at(-1)} />}
-  </div>{dialog === 'settings' && <SettingsDialog onSave={store.saveModel} onClose={() => setDialog(null)} />}{(dialog === 'project' || dialog === 'channel') && <CreationDialog kind={dialog} store={store} onClose={() => setDialog(null)} />}{state.consent && consentProject && consentModel && <CloudConsentDialog project={consentProject} model={consentModel} busy={state.sending} onConfirm={store.grantConsent} onClose={store.dismissConsent} />}</div>
+  </div>{dialog === 'settings' && <SettingsDialog onSave={store.saveModel} onClose={() => { setDialog(null); void store.refreshModels() }} />}{(dialog === 'project' || dialog === 'channel') && <CreationDialog kind={dialog} store={store} onClose={() => setDialog(null)} />}{state.consent && consentProject && consentModel && <CloudConsentDialog project={consentProject} model={consentModel} busy={state.sending} onConfirm={store.grantConsent} onClose={store.dismissConsent} />}</div>
 }
 
 function CreationDialog({ kind, store, onClose }: { kind: 'project' | 'channel'; store: WorkbenchStore; onClose(): void }) {

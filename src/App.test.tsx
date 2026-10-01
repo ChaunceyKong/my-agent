@@ -26,7 +26,7 @@ beforeEach(() => {
     executables: { list: vi.fn().mockResolvedValue([]), save: vi.fn() },
     projects: { list: vi.fn().mockResolvedValue([project]), pickWorkspace: vi.fn().mockResolvedValue({ id: 'workspace-1', label: '已选择本地目录' }), create: vi.fn().mockResolvedValue(project) },
     channels: { list: vi.fn().mockResolvedValue([channel]), create: vi.fn().mockResolvedValue({ ...channel, id: 'c2', name: '选题群' }), setScheduler: vi.fn() },
-    models: { list: vi.fn().mockResolvedValue([model]), save: vi.fn().mockResolvedValue({ ...model, id: 'm2' }) },
+    models: { list: vi.fn().mockResolvedValue([model]), save: vi.fn().mockResolvedValue({ ...model, id: 'm2' }), remove: vi.fn(), test: vi.fn(), discover: vi.fn(), getDefaultScheduler: vi.fn().mockResolvedValue(null), setDefaultScheduler: vi.fn() },
     messages: { list: vi.fn().mockResolvedValue([]) },
     consent: { has: vi.fn().mockResolvedValue(true), grant: vi.fn().mockResolvedValue(undefined) },
     tasks: { list: vi.fn().mockResolvedValue([]), send: vi.fn().mockResolvedValue({ taskRunId: 'run-1' }), cancel: vi.fn().mockResolvedValue(undefined), continue: vi.fn(), assign: vi.fn(), terminate: vi.fn(), interrupt: vi.fn(), acknowledgeProcessRecovery: vi.fn() },
@@ -157,6 +157,7 @@ it('saves credentials through settings and renders explicit unavailable cockpit 
   await userEvent.type(screen.getByLabelText('API Key'), 'secret-key')
   await userEvent.click(screen.getByRole('button', { name: '保存配置' }))
   await waitFor(() => expect(api.models.save).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'secret-key', providerPreset: 'deepseek' })))
+  await userEvent.click(screen.getByRole('button', { name: '关闭' }))
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   expect(screen.getByText(/尚未创建 Agent/)).toBeVisible()
   await userEvent.click(screen.getByRole('tab', { name: '工作区文件' }))

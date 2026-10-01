@@ -34,7 +34,7 @@ import { hashToolRequest, toolAuditEvent } from '../core/audit-service'
 import { makeTaskRunEvent, type EventMetadata } from '../core/orchestrator-events'
 import { parseAgentMentions } from '../core/mention-parser'
 import type { AppDatabase, DatabaseClient } from './client'
-import { agentTurns, agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, mentionQueue, messages, modelConfigs, overwritePublications, projects, registeredExecutables, sessionSummaries, taskRunEvents, taskRuns, toolExecutions } from './schema'
+import { agentTurns, agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, mentionQueue, messages, modelConfigs, modelSettings, overwritePublications, projects, registeredExecutables, sessionSummaries, taskRunEvents, taskRuns, toolExecutions } from './schema'
 import { validateModelBudget } from '../core/context-manager'
 
 export interface ToolContext {
@@ -47,6 +47,9 @@ export interface ToolContext {
 
 export type ToolOutcome = Pick<ToolExecution, 'status' | 'riskLevel' | 'resultSummary'>
 type Transaction = Parameters<Parameters<AppDatabase['transaction']>[0]>[0]
+function schedulerId(tx: Transaction, override: string | null): string | null {
+  return override ?? tx.select().from(modelSettings).where(eq(modelSettings.id, 1)).get()?.schedulerModelConfigId ?? null
+}
 
 function appendEvent(tx: Transaction, run: TaskRun, eventType: TaskRunEventType, refs: { agentId?: string; messageId?: string; toolExecutionId?: string; metadata?: EventMetadata; displayReason?: string } = {}): TaskRunEvent {
   const last = tx.select({ seq: taskRunEvents.seq }).from(taskRunEvents)
@@ -270,6 +273,11 @@ export interface Repositories {
   listMessages(channelId: string): Promise<Message[]>
   listAuditEvents(channelId: string): Promise<AuditEvent[]>
   saveModelConfig(input: SaveModelConfigRecordInput): Promise<ModelConfigRecord>
+  updateModelConfig(id: string, input: SaveModelConfigRecordInput): Promise<ModelConfigRecord>
+  removeModelConfig(id: string): Promise<void>
+  getDefaultScheduler(): Promise<string | null>
+  setDefaultScheduler(id: string | null): Promise<void>
+  getEffectiveScheduler(channelId: string): Promise<string | null>
   listModelConfigs(): Promise<ModelConfigRecord[]>
   getModelConfig(id: string): Promise<ModelConfigRecord | undefined>
   recordCloudConsent(projectId: string, modelConfigId: string): Promise<void>
@@ -301,9 +309,9 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const config = tx.select().from(modelConfigs).where(eq(modelConfigs.id, input.modelConfigId)).get()
         const members = run && tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.isEnabled, true))).all()
         const identities = members?.map((member) => ({ member, agent: tx.select().from(agents).where(eq(agents.id, member.agentId)).get() })).sort((a, b) => a.member.agentId.localeCompare(b.member.agentId))
-        if (!run || run.status !== 'running' || run.generation !== input.generation || run.currentTurnId || channel?.schedulerModelConfigId !== input.modelConfigId
+        if (!run || run.status !== 'running' || run.generation !== input.generation || run.currentTurnId || !channel || schedulerId(tx, channel.schedulerModelConfigId) !== input.modelConfigId
           || JSON.stringify(config) !== input.modelSnapshot || JSON.stringify(identities) !== input.memberSnapshot
-          || !tx.select().from(cloudConsents).where(and(eq(cloudConsents.projectId, channel.projectId), eq(cloudConsents.modelConfigId, input.modelConfigId))).get()) throw new Error('摘要状态已失效')
+          || (config?.providerPreset !== 'ollama' && !tx.select().from(cloudConsents).where(and(eq(cloudConsents.projectId, channel.projectId), eq(cloudConsents.modelConfigId, input.modelConfigId))).get())) throw new Error('摘要状态已失效')
         const cutoff = tx.select().from(taskRunEvents).where(and(eq(taskRunEvents.taskRunId, run.id), eq(taskRunEvents.seq, input.coveredThroughSeq), eq(taskRunEvents.eventType, 'turn_completed'))).get()
         if (!cutoff || !Number.isSafeInteger(input.coveredThroughSeq) || !input.content.trim() || Buffer.byteLength(input.content, 'utf8') > 8000) throw new Error('摘要内容无效')
         const prior = tx.select().from(sessionSummaries).where(eq(sessionSummaries.taskRunId, run.id)).orderBy(sql`${sessionSummaries.coveredThroughSeq} DESC`).limit(1).get()
@@ -1088,7 +1096,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const run = tx.select().from(taskRuns).where(eq(taskRuns.id, input.taskRunId)).get()
         const channel = run && tx.select().from(channels).where(eq(channels.id, run.channelId)).get()
         if (!run || run.status !== 'running' || run.generation !== input.generation || run.currentTurnId || channel?.speakerMode !== 'automatic'
-          || channel.schedulerModelConfigId !== input.modelConfigId) throw new Error('调度决策已失效')
+          || schedulerId(tx, channel.schedulerModelConfigId) !== input.modelConfigId) throw new Error('调度决策已失效')
         const members = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.isEnabled, true))).all()
         if (members.length !== Object.keys(input.memberRevisions).length || members.some((member) => input.memberRevisions[member.agentId] !== member.revision)) throw new Error('群聊成员已变化')
         if (tx.select().from(mentionQueue).where(and(eq(mentionQueue.taskRunId, run.id), eq(mentionQueue.status, 'pending'))).get()
@@ -1201,6 +1209,26 @@ export function createRepositories(client: DatabaseClient): Repositories {
         .all()
     },
 
+    async getDefaultScheduler() { return client.db.select().from(modelSettings).where(eq(modelSettings.id, 1)).get()?.schedulerModelConfigId ?? null },
+    async getEffectiveScheduler(channelId) { const channel = client.db.select().from(channels).where(eq(channels.id, channelId)).get(); return channel?.schedulerModelConfigId ?? await this.getDefaultScheduler() },
+    async setDefaultScheduler(id) {
+      if (id !== null && !await this.getModelConfig(id)) throw new Error('模型配置不存在')
+      client.db.insert(modelSettings).values({ id: 1, schedulerModelConfigId: id }).onConflictDoUpdate({ target: modelSettings.id, set: { schedulerModelConfigId: id } }).run()
+    },
+    async updateModelConfig(id, input) {
+      validateModelBudget(input)
+      return client.db.transaction((tx) => {
+        if (!tx.select().from(modelConfigs).where(eq(modelConfigs.id, id)).get()) throw new Error('模型配置不存在')
+        tx.delete(cloudConsents).where(eq(cloudConsents.modelConfigId, id)).run()
+        tx.delete(toolResultConsents).where(eq(toolResultConsents.modelConfigId, id)).run()
+        return tx.update(modelConfigs).set({ ...input, updatedAt: new Date().toISOString() }).where(eq(modelConfigs.id, id)).returning().get()!
+      })
+    },
+    async removeModelConfig(id) {
+      if (client.db.select({ id: taskRuns.id }).from(taskRuns).where(eq(taskRuns.modelConfigId, id)).get()) throw new Error('模型配置仍被任务引用')
+      try { if (!client.db.delete(modelConfigs).where(eq(modelConfigs.id, id)).returning().get()) throw new Error('模型配置不存在') }
+      catch { throw new Error('模型配置不存在或仍被 Agent、群聊、任务、摘要或默认调度引用') }
+    },
     async saveModelConfig(input: SaveModelConfigRecordInput): Promise<ModelConfigRecord> {
       validateModelBudget(input)
       const timestamp = new Date().toISOString()
@@ -1238,11 +1266,12 @@ export function createRepositories(client: DatabaseClient): Repositories {
     },
 
     async hasCloudConsent(projectId: string, modelConfigId: string): Promise<boolean> {
+      if ((await this.getModelConfig(modelConfigId))?.providerPreset === 'ollama') return true
       return client.db.select({ projectId: cloudConsents.projectId }).from(cloudConsents)
         .where(and(eq(cloudConsents.projectId, projectId), eq(cloudConsents.modelConfigId, modelConfigId)))
         .get() !== undefined
     },
     async recordToolResultConsent(projectId, modelConfigId, scopeVersion) { client.db.insert(toolResultConsents).values({ projectId, modelConfigId, scopeVersion, consentedAt: new Date().toISOString() }).run() },
-    async hasToolResultConsent(projectId, modelConfigId, scopeVersion) { return client.db.select().from(toolResultConsents).where(and(eq(toolResultConsents.projectId, projectId), eq(toolResultConsents.modelConfigId, modelConfigId), eq(toolResultConsents.scopeVersion, scopeVersion))).get() !== undefined },
+    async hasToolResultConsent(projectId, modelConfigId, scopeVersion) { return (await this.getModelConfig(modelConfigId))?.providerPreset === 'ollama' || client.db.select().from(toolResultConsents).where(and(eq(toolResultConsents.projectId, projectId), eq(toolResultConsents.modelConfigId, modelConfigId), eq(toolResultConsents.scopeVersion, scopeVersion))).get() !== undefined },
   }
 }

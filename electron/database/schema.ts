@@ -107,6 +107,10 @@ export const modelConfigs = sqliteTable('model_configs', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 })
+export const modelSettings = sqliteTable('model_settings', {
+  id: integer('id').primaryKey(),
+  schedulerModelConfigId: text('scheduler_model_config_id').references(() => modelConfigs.id, { onDelete: 'restrict' }),
+})
 
 export const cloudConsents = sqliteTable('cloud_consents', {
   projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
@@ -191,7 +195,7 @@ export const registeredExecutables = sqliteTable('registered_executables', {
   updatedAt: text('updated_at').notNull(),
 })
 
-export const schema = { agentTurns, agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, mentionQueue, messages, modelConfigs, overwritePublications, projects, registeredExecutables, sessionSummaries, taskRunEvents, taskRuns, toolExecutions }
+export const schema = { agentTurns, agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, mentionQueue, messages, modelConfigs, modelSettings, overwritePublications, projects, registeredExecutables, sessionSummaries, taskRunEvents, taskRuns, toolExecutions }
 
 export function migrate(sqlite: Database.Database): void {
   sqlite.pragma('foreign_keys = ON')
@@ -472,5 +476,16 @@ export function migrate(sqlite: Database.Database): void {
       sqlite.exec('ALTER TABLE tool_executions ADD COLUMN process_recovery_required INTEGER NOT NULL DEFAULT 0')
       sqlite.pragma('user_version = 15')
     })()
+  }
+  if (Number(sqlite.pragma('user_version', { simple: true })) < 16) {
+    sqlite.pragma('foreign_keys = OFF')
+    try { sqlite.transaction(() => {
+      sqlite.exec(`CREATE TABLE model_configs_v16 (id TEXT PRIMARY KEY NOT NULL, provider_preset TEXT NOT NULL CHECK(provider_preset IN ('openai','deepseek','ollama')), base_url TEXT NOT NULL, model_name TEXT NOT NULL, encrypted_api_key TEXT NOT NULL, context_window INTEGER, max_output_tokens INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        INSERT INTO model_configs_v16 SELECT id,provider_preset,base_url,model_name,encrypted_api_key,context_window,max_output_tokens,created_at,updated_at FROM model_configs;
+        DROP TABLE model_configs; ALTER TABLE model_configs_v16 RENAME TO model_configs;`)
+      sqlite.exec('CREATE TABLE model_settings (id INTEGER PRIMARY KEY CHECK(id=1), scheduler_model_config_id TEXT REFERENCES model_configs(id) ON DELETE RESTRICT)')
+      if ((sqlite.pragma('foreign_key_check') as unknown[]).length) throw new Error('模型配置迁移引用校验失败')
+      sqlite.pragma('user_version = 16')
+    })() } finally { sqlite.pragma('foreign_keys = ON') }
   }
 }

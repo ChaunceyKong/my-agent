@@ -13,14 +13,14 @@ it('upgrades v12 events without altering authorization metadata and is idempoten
     sqlite.exec(`
       PRAGMA user_version = 12;
       CREATE TABLE task_run_events (id TEXT PRIMARY KEY, metadata_json TEXT NOT NULL);
-      CREATE TABLE model_configs (id TEXT PRIMARY KEY);
+      CREATE TABLE model_configs (id TEXT PRIMARY KEY, provider_preset TEXT, base_url TEXT, model_name TEXT, encrypted_api_key TEXT, created_at TEXT, updated_at TEXT);
       CREATE TABLE session_summaries (task_run_id TEXT, covered_through_seq INTEGER);
       CREATE TABLE tool_executions (id TEXT PRIMARY KEY);
       INSERT INTO task_run_events VALUES ('decision', '{"reason":"automatic_selection"}');
     `)
     migrate(sqlite)
     migrate(sqlite)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(15)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(16)
     expect(sqlite.prepare('SELECT id,metadata_json,display_reason FROM task_run_events').get()).toEqual({
       id: 'decision', metadata_json: '{"reason":"automatic_selection"}', display_reason: null,
     })
@@ -37,7 +37,7 @@ it('migrates real v10 shaped rows, pauses duplicate running runs and keeps legac
       CREATE TABLE task_runs (id TEXT PRIMARY KEY, channel_id TEXT REFERENCES channels(id), model_config_id TEXT, status TEXT CHECK (status IN ('queued','running','cancelled','failed','completed','paused')), generation INTEGER, started_at TEXT, finished_at TEXT, error_message TEXT, created_at TEXT);
       CREATE TABLE messages (id TEXT PRIMARY KEY, channel_id TEXT REFERENCES channels(id), task_run_id TEXT REFERENCES task_runs(id), role TEXT, author_name TEXT, content TEXT, status TEXT, created_at TEXT);
       CREATE TABLE audit_events (id TEXT PRIMARY KEY, channel_id TEXT REFERENCES channels(id), task_run_id TEXT REFERENCES task_runs(id), event_type TEXT, metadata_json TEXT, created_at TEXT);
-      CREATE TABLE model_configs (id TEXT PRIMARY KEY);
+      CREATE TABLE model_configs (id TEXT PRIMARY KEY, provider_preset TEXT, base_url TEXT, model_name TEXT, encrypted_api_key TEXT, created_at TEXT, updated_at TEXT);
       CREATE TABLE agents (id TEXT PRIMARY KEY);
       CREATE TABLE tool_executions (id TEXT PRIMARY KEY);
       CREATE TABLE channel_agents (channel_id TEXT, agent_id TEXT, is_enabled INTEGER, PRIMARY KEY(channel_id,agent_id));
@@ -49,7 +49,7 @@ it('migrates real v10 shaped rows, pauses duplicate running runs and keeps legac
       INSERT INTO messages VALUES ('old','c','r1','agent','AI','private reply','completed','now');
     `)
     migrate(sqlite)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(15)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(16)
     expect(sqlite.prepare('SELECT id,status,generation,pause_reason FROM task_runs ORDER BY id').all()).toEqual([
       { id: 'r1', status: 'paused', generation: 1, pause_reason: 'migration_duplicate_running' },
       { id: 'r2', status: 'paused', generation: 1, pause_reason: 'migration_duplicate_running' },
@@ -90,7 +90,7 @@ it.each([3, 4])('upgrades original v%i schema with existing run and message thro
     sqlite.pragma(`user_version = ${version}`)
     migrate(sqlite)
     migrate(sqlite)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(15)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(16)
     expect(sqlite.prepare('SELECT id,generation,status FROM task_runs').get()).toEqual({ id: 'r', generation: 0, status: 'running' })
     expect(sqlite.prepare('SELECT id,agent_id,origin,content FROM messages').get()).toEqual({ id: 'msg', agent_id: null, origin: 'legacy', content: 'historical reply' })
     expect(sqlite.prepare('SELECT count(*) AS n FROM audit_events').get()).toEqual({ n: 0 })

@@ -171,6 +171,10 @@ export function createWorkbenchStore(api: AgentTeamApi) {
       const model = await api.models.save(input)
       update({ models: [...state.models.filter((item) => item.id !== model.id), model], modelId: model.id })
     },
+    async refreshModels() {
+      const models = await api.models.list()
+      update({ models, modelId: models.some((model) => model.id === state.modelId) ? state.modelId : models[0]?.id ?? '' })
+    },
     async send() {
       const current = conversation(state.channelId)
       if (state.sending || !current.loaded || !current.draft.trim() || !state.modelId || current.runs.some((run) => run.status === 'running')) return

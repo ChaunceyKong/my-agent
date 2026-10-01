@@ -222,9 +222,10 @@ export interface ChannelAgent extends SaveChannelAgentInput {
   updatedAt: string
 }
 
-export type ModelProviderPreset = 'openai' | 'deepseek'
+export type ModelProviderPreset = 'openai' | 'deepseek' | 'ollama'
 
 export interface SaveModelConfigInput {
+  id?: string
   providerPreset: ModelProviderPreset
   baseUrl?: string
   modelName: string
@@ -377,6 +378,11 @@ export interface AgentTeamApi {
   models: {
     list(): Promise<ModelConfigSummary[]>
     save(input: SaveModelConfigInput): Promise<ModelConfigSummary>
+    remove(id: string): Promise<void>
+    test(id: string): Promise<{ ok: boolean; message: string }>
+    discover(baseUrl: string): Promise<string[]>
+    getDefaultScheduler(): Promise<string | null>
+    setDefaultScheduler(id: string | null): Promise<void>
   }
   messages: {
     list(channelId: string): Promise<Message[]>

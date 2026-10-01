@@ -46,7 +46,8 @@ export function createSerialOrchestrator(deps: {
           if (!turn && run.turnCount === 0) turn = await deps.repositories.startSingleMemberTurn(run.id, run.generation)
           if (!turn) {
             const members = (await deps.repositories.listChannelAgents(run.channelId)).filter((item) => item.isEnabled)
-            if (members.length > 1 && channel.speakerMode === 'automatic' && channel.schedulerModelConfigId) {
+            const scheduler = await deps.repositories.getEffectiveScheduler(run.channelId)
+            if (members.length > 1 && channel.speakerMode === 'automatic' && scheduler) {
               const agents = await deps.repositories.listAgents()
               const memberRevisions = Object.fromEntries(members.map((member) => [member.agentId, member.revision]))
               const current = async () => {
@@ -54,16 +55,16 @@ export function createSerialOrchestrator(deps: {
                 const currentChannel = await deps.repositories.getChannel(run.channelId)
                 const currentMembers = (await deps.repositories.listChannelAgents(run.channelId)).filter((member) => member.isEnabled)
                 return latest?.status === 'running' && latest.generation === run.generation && !latest.currentTurnId
-                  && currentChannel?.schedulerModelConfigId === channel.schedulerModelConfigId && currentChannel.speakerMode === 'automatic'
+                  && await deps.repositories.getEffectiveScheduler(run.channelId) === scheduler && currentChannel?.speakerMode === 'automatic'
                   && currentMembers.length === members.length && currentMembers.every((member) => memberRevisions[member.agentId] === member.revision)
               }
               try {
                 const messages = (await deps.repositories.listMessages(run.channelId)).filter((message) => message.taskRunId === run.id && message.status === 'completed')
-                const raw = await deps.modelClient.selectSpeaker({ projectId: input.projectId, modelConfigId: channel.schedulerModelConfigId,
+                const raw = await deps.modelClient.selectSpeaker({ projectId: input.projectId, modelConfigId: scheduler,
                   taskRunId: run.id, prompt: speakerSelectionPrompt(members, agents, messages.at(-1)?.content ?? '') }, current)
                 const decision = parseSpeakerDecision(raw, members, agents)
                 turn = await deps.repositories.commitSpeakerDecision({ taskRunId: run.id, generation: run.generation,
-                  modelConfigId: channel.schedulerModelConfigId, memberRevisions, ...decision }) ?? undefined
+                  modelConfigId: scheduler, memberRevisions, ...decision }) ?? undefined
                 if (!turn) { await send({ taskRunId: run.id, type: 'complete' }); return }
               } catch {
                 const latest = await deps.repositories.getTaskRun(run.id)

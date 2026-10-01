@@ -12,8 +12,10 @@ export function createSessionSummaryService(repositories: Repositories, modelCli
     const previous = await repositories.getLatestSessionSummary(run.channelId)
     if (previous?.taskRunId === run.id && previous.coveredThroughSeq >= cutoff) return
     const channel = await repositories.getChannel(run.channelId)
-    if (!channel?.schedulerModelConfigId) return
-    const config = await repositories.getModelConfig(channel.schedulerModelConfigId)
+    if (!channel) return
+    const scheduler = await repositories.getEffectiveScheduler(channel.id)
+    if (!scheduler) return
+    const config = await repositories.getModelConfig(scheduler)
     if (!config) return
     const snapshotMembers = async () => {
       const members = (await repositories.listChannelAgents(run.channelId)).filter((member) => member.isEnabled).sort((a, b) => a.agentId.localeCompare(b.agentId))
@@ -25,7 +27,7 @@ export function createSessionSummaryService(repositories: Repositories, modelCli
       const latest = await repositories.getTaskRun(run.id)
       const currentChannel = await repositories.getChannel(run.channelId)
       return latest?.status === 'running' && latest.generation === run.generation && !latest.currentTurnId
-        && currentChannel?.schedulerModelConfigId === config.id && JSON.stringify(await repositories.getModelConfig(config.id)) === modelSnapshot
+        && !!currentChannel && await repositories.getEffectiveScheduler(channel.id) === config.id && JSON.stringify(await repositories.getModelConfig(config.id)) === modelSnapshot
         && await snapshotMembers() === memberSnapshot && await repositories.hasCloudConsent(channel.projectId, config.id)
     }
     try {

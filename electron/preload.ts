@@ -48,6 +48,11 @@ const api: AgentTeamApi = {
   models: {
     list: () => ipcRenderer.invoke(IpcChannel.ModelList),
     save: (input: SaveModelConfigInput) => ipcRenderer.invoke(IpcChannel.ModelSave, input),
+    remove: (id) => ipcRenderer.invoke(IpcChannel.ModelRemove, id),
+    test: (id) => ipcRenderer.invoke(IpcChannel.ModelTest, id),
+    discover: (baseUrl) => ipcRenderer.invoke(IpcChannel.ModelDiscover, baseUrl),
+    getDefaultScheduler: () => ipcRenderer.invoke(IpcChannel.ModelDefaultGet),
+    setDefaultScheduler: (id) => ipcRenderer.invoke(IpcChannel.ModelDefaultSet, id),
   },
   tasks: {
     list: (channelId: string) => ipcRenderer.invoke(IpcChannel.TaskRunList, channelId),

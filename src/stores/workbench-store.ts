@@ -29,6 +29,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
   const listeners = new Set<() => void>()
   let selection = 0
   let lifecycle = 0
+  let channelRevision = 0
   let pendingEvents: StreamEvent[] | null = null
   const loadingEvents = new Map<string, StreamEvent[]>()
   const update = (patch: Partial<WorkbenchState>) => { state = { ...state, ...patch }; listeners.forEach((listener) => listener()) }
@@ -162,16 +163,24 @@ export function createWorkbenchStore(api: AgentTeamApi) {
     },
     async createChannel(name: string) {
       const projectId = state.projectId
+      const version = selection
+      const selectedChannelId = state.channelId
       const channel = await api.channels.create({ projectId, name })
       if (state.projectId !== projectId) return
+      channelRevision++
       update({ channels: [...state.channels, channel] })
-      await selectChannel(channel.id)
+      if (version === selection && state.channelId === selectedChannelId) await selectChannel(channel.id)
     },
-    updateChannel: (channel: Channel) => update({ channels: state.channels.map((item) => item.id === channel.id ? channel : item) }),
+    updateChannel: (channel: Channel) => {
+      if (!state.channels.some((item) => item.id === channel.id)) return
+      channelRevision++
+      update({ channels: state.channels.map((item) => item.id === channel.id ? channel : item) })
+    },
     async removeChannel(channelId: string) {
       const projectId = state.projectId
       const version = selection
       await api.channels.remove({ channelId, confirmation: 'delete_channel_records' })
+      const revision = ++channelRevision
       const conversations = { ...state.conversations }
       delete conversations[channelId]
       loadingEvents.delete(channelId)
@@ -180,9 +189,10 @@ export function createWorkbenchStore(api: AgentTeamApi) {
         channelId: state.channelId === channelId ? '' : state.channelId })
       let channels = remaining
       try { channels = await api.channels.list(projectId) }
-      catch { if (state.projectId === projectId && version === selection) update({ error: '群聊已删除，列表刷新失败，请重新加载工作台' }) }
+      catch { if (state.projectId === projectId && version === selection && revision === channelRevision) update({ error: '群聊已删除，列表刷新失败，请重新加载工作台' }) }
       if (state.projectId !== projectId || version !== selection) return
-      update({ channels })
+      if (revision === channelRevision) update({ channels })
+      else channels = state.channels
       if (!channels.some((item) => item.id === state.channelId) && channels[0]) await selectChannel(channels[0].id)
     },
     async saveModel(input: SaveModelConfigInput) {

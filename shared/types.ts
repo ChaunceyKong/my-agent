@@ -114,7 +114,9 @@ export interface OverwritePublication {
 }
 
 export interface ToolPolicySnapshot {
-  version: 1
+  version: 2
+  actualModelConfigId: string
+  modelFingerprint: string
   workspacePath: string
   agentId: string
   turnId: string | null
@@ -244,6 +246,7 @@ export interface SaveModelConfigInput {
   apiKey: string
   contextWindow?: number | null
   maxOutputTokens?: number | null
+  fallbackConfigId?: string | null
 }
 
 export interface ModelConfigSummary {
@@ -254,6 +257,7 @@ export interface ModelConfigSummary {
   hasApiKey: boolean
   contextWindow?: number | null
   maxOutputTokens?: number | null
+  fallbackConfigId?: string | null
 }
 
 export interface SendMessageInput {
@@ -273,6 +277,7 @@ export interface Message {
   channelId: string
   taskRunId: string | null
   agentId: string | null
+  actualModelConfigId?: string | null
   origin: MessageOrigin
   taskRunSeq: number | null
   role: MessageRole
@@ -312,12 +317,13 @@ export interface AgentTurn {
   id: string; taskRunId: string; ordinal: number; agentId: string; generation: number
   status: AgentTurnStatus; triggerEventSeq: number; messageId: string | null
   startedAt: string | null; finishedAt: string | null
+  configuredModelConfigId?: string | null; actualModelConfigId?: string | null
 }
 export type MentionSource = 'ceo' | 'agent'
 export type MentionStatus = 'pending' | 'consumed' | 'cancelled'
 export interface MentionQueueItem { taskRunId: string; position: number; agentId: string; sourceMessageId: string; source: MentionSource; status: MentionStatus }
 /** Covers a Channel prefix in durable Run creation order, through this Run's event seq. */
-export interface SessionSummary { id: string; channelId: string; taskRunId: string; coveredThroughSeq: number; content: string; modelConfigId: string; createdAt: string }
+export interface SessionSummary { id: string; channelId: string; taskRunId: string; coveredThroughSeq: number; content: string; modelConfigId: string; configuredModelConfigId?: string | null; createdAt: string }
 
 export interface AuditEvent {
   id: string

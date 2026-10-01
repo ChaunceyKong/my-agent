@@ -38,6 +38,10 @@ export interface CryptoAdapter {
   decryptString(value: Buffer): string
 }
 
+/** Main-only request provenance. The snapshot is never part of a StreamEvent or IPC response. */
+export interface ModelSelection { configuredModelConfigId: string; actualModelConfigId: string; modelSnapshot: string }
+export type OnModelSelected = (selection: ModelSelection) => Promise<void>
+
 export interface ModelClient {
   saveModelConfig(input: SaveModelConfigInput): Promise<ModelConfigSummary>
   listModelConfigs(): Promise<ModelConfigSummary[]>
@@ -45,9 +49,9 @@ export interface ModelClient {
   discover(baseUrl: string): Promise<string[]>
   recordCloudConsent(projectId: string, modelConfigId: string): Promise<void>
   requireCloudConsent(projectId: string, modelConfigId: string): Promise<void>
-  selectSpeaker(input: { projectId: string; modelConfigId: string; taskRunId: string; prompt: string }, canSend: () => Promise<boolean>): Promise<string>
-  summarizeSession(input: { projectId: string; modelConfigId: string; taskRunId: string; prompt: string }, canSend: () => Promise<boolean>): Promise<string>
-  streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void | Promise<void>, canSend?: () => Promise<boolean>): Promise<void>
+  selectSpeaker(input: { projectId: string; modelConfigId: string; taskRunId: string; prompt: string }, canSend: () => Promise<boolean>, onModelSelected?: OnModelSelected): Promise<string>
+  summarizeSession(input: { projectId: string; modelConfigId: string; taskRunId: string; prompt: string }, canSend: () => Promise<boolean>, onModelSelected?: OnModelSelected): Promise<string>
+  streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void | Promise<void>, canSend?: () => Promise<boolean>, onModelSelected?: OnModelSelected): Promise<void>
 }
 
 export interface ModelClientDependencies {
@@ -98,6 +102,7 @@ export function createModelClient({
         encryptedApiKey,
         contextWindow: input.contextWindow ?? null,
         maxOutputTokens: input.maxOutputTokens ?? null,
+        fallbackConfigId: input.fallbackConfigId === undefined ? previous?.fallbackConfigId ?? null : input.fallbackConfigId,
       }
       const saved = input.id ? await repositories.updateModelConfig(input.id, record) : await repositories.saveModelConfig(record)
       return summarize(saved)
@@ -132,7 +137,7 @@ export function createModelClient({
     recordCloudConsent: (projectId, modelConfigId) => consent.recordCloudConsent(projectId, modelConfigId),
     requireCloudConsent: (projectId, modelConfigId) => consent.requireCloudConsent(projectId, modelConfigId),
 
-    async summarizeSession(input, canSend) {
+    async summarizeSession(input, canSend, onModelSelected) {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), 30_000)
       const unsubscribe = taskRuns.onCancelled(input.taskRunId, () => controller.abort())
@@ -144,6 +149,8 @@ export function createModelClient({
         if (Buffer.byteLength(input.prompt, 'utf8') > 32_000) throw new Error('摘要输入过长')
         assertContextFits(messages, config)
         await verify(config, false, controller.signal)
+        await consent.requireCloudConsent(input.projectId, input.modelConfigId)
+        await onModelSelected?.({ configuredModelConfigId: input.modelConfigId, actualModelConfigId: config.id, modelSnapshot: JSON.stringify(config) })
         await consent.requireCloudConsent(input.projectId, input.modelConfigId)
         if (!await canSend() || JSON.stringify(await repositories.getModelConfig(config.id)) !== JSON.stringify(config)) throw new Error('摘要状态已失效')
         controller.signal.throwIfAborted()
@@ -159,7 +166,7 @@ export function createModelClient({
       } finally { clearTimeout(timer); unsubscribe() }
     },
 
-    async selectSpeaker(input, canSend) {
+    async selectSpeaker(input, canSend, onModelSelected) {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), 30_000)
       const unsubscribe = taskRuns.onCancelled(input.taskRunId, () => controller.abort())
@@ -173,6 +180,8 @@ export function createModelClient({
         ]
         assertContextFits(messages, config)
         await verify(config, false, controller.signal)
+        await consent.requireCloudConsent(input.projectId, input.modelConfigId)
+        await onModelSelected?.({ configuredModelConfigId: input.modelConfigId, actualModelConfigId: config.id, modelSnapshot: JSON.stringify(config) })
         await consent.requireCloudConsent(input.projectId, input.modelConfigId)
         if (JSON.stringify(await repositories.getModelConfig(config.id)) !== JSON.stringify(config) || !await canSend()) throw new Error('调度决策已失效')
         controller.signal.throwIfAborted()
@@ -195,7 +204,7 @@ export function createModelClient({
       } finally { clearTimeout(timer); unsubscribe() }
     },
 
-    async streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void | Promise<void>, canSend?: () => Promise<boolean>): Promise<void> {
+    async streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void | Promise<void>, canSend?: () => Promise<boolean>, onModelSelected?: OnModelSelected): Promise<void> {
       const controller = new AbortController()
       let timedOut = false
       const timer = setTimeout(() => { timedOut = true; controller.abort() }, 120_000)
@@ -211,6 +220,8 @@ export function createModelClient({
           ? [...input.messages, { role: 'system' as const, content: 'This model has no tool capability. Answer in ordinary text only. Do not claim to have read files, run commands, or made changes. Explain when a requested action requires a tool-capable model.' }]
           : input.messages
         assertContextFits(messages, modelConfig, tools)
+        await consent.requireCloudConsent(input.projectId, input.modelConfigId)
+        await onModelSelected?.({ configuredModelConfigId: input.modelConfigId, actualModelConfigId: modelConfig.id, modelSnapshot: JSON.stringify(modelConfig) })
         await consent.requireCloudConsent(input.projectId, input.modelConfigId)
         if (!await taskRuns.canAcceptChunk(input.taskRunId)) return
         if (JSON.stringify(await repositories.getModelConfig(modelConfig.id)) !== JSON.stringify(modelConfig)) throw new Error('模型配置已变化')
@@ -415,5 +426,6 @@ function summarize(config: ModelConfigRecord): ModelConfigSummary {
     hasApiKey: config.encryptedApiKey.length > 0,
     contextWindow: config.contextWindow ?? null,
     maxOutputTokens: config.maxOutputTokens ?? null,
+    fallbackConfigId: config.fallbackConfigId ?? null,
   }
 }

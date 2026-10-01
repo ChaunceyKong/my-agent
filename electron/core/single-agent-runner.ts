@@ -118,7 +118,10 @@ export function createSingleAgentRunner(deps: {
               streamErrorEmitted = true
               await input.onEvent(event)
             }
-          }, canSend)
+          }, canSend, async (selection) => {
+            await deps.repositories.bindAgentTurnModel({ turnId: input.turnId, configuredModelSnapshot: modelSnapshot,
+              actualModelSnapshot: selection.modelSnapshot, memberRevision: input.active.memberRevision, hasToolObservations: hasObservations || step > 0 })
+          })
         } catch (error) {
           if (error instanceof ContextBudgetError) return { status: 'paused', reason: error.message }
           streamFailed = true

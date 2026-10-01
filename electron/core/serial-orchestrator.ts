@@ -59,15 +59,21 @@ export function createSerialOrchestrator(deps: {
                   && currentMembers.length === members.length && currentMembers.every((member) => memberRevisions[member.agentId] === member.revision)
               }
               try {
+                const configuredModelSnapshot = JSON.stringify(await deps.repositories.getModelConfig(scheduler))
+                let actualModelConfigId = scheduler
+                let modelSnapshot = configuredModelSnapshot
                 const messages = (await deps.repositories.listMessages(run.channelId)).filter((message) => message.taskRunId === run.id)
                 const goal = messages.filter((message) => message.origin === 'ceo' && ['sent', 'completed'].includes(message.status)).at(-1)
                 if (!goal) throw new Error('任务目标不存在')
                 const latestAgent = messages.filter((message) => message.origin === 'agent' && message.status === 'completed').at(-1)
                 const raw = await deps.modelClient.selectSpeaker({ projectId: input.projectId, modelConfigId: scheduler,
-                  taskRunId: run.id, prompt: speakerSelectionPrompt(members, agents, goal.content, latestAgent?.content ?? '') }, current)
+                  taskRunId: run.id, prompt: speakerSelectionPrompt(members, agents, goal.content, latestAgent?.content ?? '') }, current, async (selection) => {
+                  actualModelConfigId = selection.actualModelConfigId
+                  modelSnapshot = selection.modelSnapshot
+                })
                 const decision = parseSpeakerDecision(raw, members, agents)
                 turn = await deps.repositories.commitSpeakerDecision({ taskRunId: run.id, generation: run.generation,
-                  modelConfigId: scheduler, memberRevisions, ...decision }) ?? undefined
+                  configuredModelConfigId: scheduler, configuredModelSnapshot, modelConfigId: actualModelConfigId, modelSnapshot, memberRevisions, ...decision }) ?? undefined
                 if (!turn) { await send({ taskRunId: run.id, type: 'complete' }); return }
               } catch {
                 const latest = await deps.repositories.getTaskRun(run.id)

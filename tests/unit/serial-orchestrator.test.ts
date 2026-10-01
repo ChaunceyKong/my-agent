@@ -321,6 +321,7 @@ it('serially follows a completed Agent handoff without parsing partial messages'
 
 it('uses a configured scheduler and validates each decision before starting a Turn', async () => {
   await repositories.setChannelScheduler(channelId, modelConfigId)
+  await repositories.recordCloudConsent(projectId, modelConfigId)
   const { orchestrator, modelClient } = setup(async (_system, emit) => {
     await emit({ taskRunId: 'ignored', type: 'delta', content: 'finished' })
     await emit({ taskRunId: 'ignored', type: 'complete' })
@@ -339,7 +340,10 @@ it('uses a configured scheduler and validates each decision before starting a Tu
   ])
   const decisions = (await repositories.listTaskRunEvents(run.id)).filter((event) => event.eventType === 'speaker_decided')
   expect(decisions.map((event) => event.displayReason)).toEqual(['Assign Alpha', 'Done'])
-  expect(decisions.map((event) => JSON.parse(event.metadataJson))).toEqual([{ reason: 'automatic_selection' }, { reason: 'automatic_complete' }])
+  expect(decisions.map((event) => JSON.parse(event.metadataJson))).toEqual([
+    { reason: 'automatic_selection', configuredModelConfigId: modelConfigId, actualModelConfigId: modelConfigId },
+    { reason: 'automatic_complete', configuredModelConfigId: modelConfigId, actualModelConfigId: modelConfigId },
+  ])
   database.close()
   database = createDatabase({ filePath: join(directory, 'test.sqlite') })
   repositories = createRepositories(database)

@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 import { sql } from 'drizzle-orm'
-import { integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
+import { integer, primaryKey, sqliteTable, text, uniqueIndex, type AnySQLiteColumn } from 'drizzle-orm/sqlite-core'
 import { randomUUID } from 'node:crypto'
 import type { AgentTurnStatus, ApprovalRequestStatus, ChannelSpeakerMode, MessageOrigin, MessageRole, MessageStatus, MentionSource, MentionStatus, ModelProviderPreset, OverwritePublicationState, TaskRunEventType, TaskRunStatus, ToolExecutionStatus, ToolName, ToolPermissions, ToolRiskLevel } from '../../shared/types'
 
@@ -45,6 +45,7 @@ export const messages = sqliteTable('messages', {
   channelId: text('channel_id').notNull().references(() => channels.id, { onDelete: 'cascade' }),
   taskRunId: text('task_run_id').references(() => taskRuns.id, { onDelete: 'set null' }),
   agentId: text('agent_id').references(() => agents.id, { onDelete: 'set null' }),
+  actualModelConfigId: text('actual_model_config_id').references(() => modelConfigs.id, { onDelete: 'restrict' }),
   origin: text('origin').$type<MessageOrigin>().notNull().default('legacy'),
   taskRunSeq: integer('task_run_seq'),
   role: text('role').$type<MessageRole>().notNull(),
@@ -79,6 +80,10 @@ export const agentTurns = sqliteTable('agent_turns', {
   generation: integer('generation').notNull(), status: text('status').$type<AgentTurnStatus>().notNull(),
   triggerEventSeq: integer('trigger_event_seq').notNull(), messageId: text('message_id').references(() => messages.id, { onDelete: 'set null' }),
   startedAt: text('started_at'), finishedAt: text('finished_at'),
+  configuredModelConfigId: text('configured_model_config_id').references(() => modelConfigs.id, { onDelete: 'restrict' }),
+  actualModelConfigId: text('actual_model_config_id').references(() => modelConfigs.id, { onDelete: 'restrict' }),
+  configuredModelFingerprint: text('configured_model_fingerprint'), actualModelFingerprint: text('actual_model_fingerprint'),
+  memberRevision: text('member_revision'),
 }, (table) => [uniqueIndex('agent_turns_run_ordinal_idx').on(table.taskRunId, table.ordinal), uniqueIndex('agent_turns_active_idx').on(table.taskRunId).where(sql`${table.status} IN ('queued','running','waiting_approval')`)])
 
 export const mentionQueue = sqliteTable('mention_queue', {
@@ -93,6 +98,7 @@ export const sessionSummaries = sqliteTable('session_summaries', {
   taskRunId: text('task_run_id').notNull().references(() => taskRuns.id, { onDelete: 'cascade' }),
   coveredThroughSeq: integer('covered_through_seq').notNull(), content: text('content').notNull(),
   modelConfigId: text('model_config_id').notNull().references(() => modelConfigs.id, { onDelete: 'restrict' }),
+  configuredModelConfigId: text('configured_model_config_id').references(() => modelConfigs.id, { onDelete: 'restrict' }),
   createdAt: text('created_at').notNull(),
 })
 
@@ -104,6 +110,7 @@ export const modelConfigs = sqliteTable('model_configs', {
   encryptedApiKey: text('encrypted_api_key').notNull(),
   contextWindow: integer('context_window'),
   maxOutputTokens: integer('max_output_tokens'),
+  fallbackConfigId: text('fallback_config_id').references((): AnySQLiteColumn => modelConfigs.id, { onDelete: 'restrict' }),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 })
@@ -487,5 +494,33 @@ export function migrate(sqlite: Database.Database): void {
       if ((sqlite.pragma('foreign_key_check') as unknown[]).length) throw new Error('模型配置迁移引用校验失败')
       sqlite.pragma('user_version = 16')
     })() } finally { sqlite.pragma('foreign_keys = ON') }
+  }
+  if (Number(sqlite.pragma('user_version', { simple: true })) < 17) {
+    sqlite.transaction(() => {
+      sqlite.exec(`ALTER TABLE model_configs ADD COLUMN fallback_config_id TEXT REFERENCES model_configs(id) ON DELETE RESTRICT;
+        ALTER TABLE agent_turns ADD COLUMN configured_model_config_id TEXT REFERENCES model_configs(id) ON DELETE RESTRICT;
+        ALTER TABLE agent_turns ADD COLUMN actual_model_config_id TEXT REFERENCES model_configs(id) ON DELETE RESTRICT;
+        ALTER TABLE agent_turns ADD COLUMN configured_model_fingerprint TEXT;
+        ALTER TABLE agent_turns ADD COLUMN actual_model_fingerprint TEXT;
+        ALTER TABLE agent_turns ADD COLUMN member_revision TEXT;
+        ALTER TABLE messages ADD COLUMN actual_model_config_id TEXT REFERENCES model_configs(id) ON DELETE RESTRICT;
+        ALTER TABLE session_summaries ADD COLUMN configured_model_config_id TEXT REFERENCES model_configs(id) ON DELETE RESTRICT;`)
+      // Historical model identity is unknown. Revoke only unclaimed legacy requests;
+      // every publication journal and claimed process retains its cleanup barrier.
+      const legacy = sqlite.prepare(`SELECT e.id,r.id AS task_run_id,r.channel_id FROM tool_executions e JOIN task_runs r ON r.id=e.task_run_id
+        WHERE e.status IN ('executing','waiting_approval') AND CASE WHEN json_valid(e.policy_snapshot_json) THEN json_extract(e.policy_snapshot_json,'$.version') ELSE NULL END IS NOT 2
+        AND e.process_recovery_required=0
+        AND NOT EXISTS (SELECT 1 FROM overwrite_publications p WHERE p.execution_id=e.id AND p.state NOT IN ('completed','recovered'))
+        AND NOT EXISTS (SELECT 1 FROM approval_requests a WHERE a.tool_execution_id=e.id AND a.status='executing')`).all() as Array<{ id: string; task_run_id: string; channel_id: string }>
+      const timestamp = new Date().toISOString()
+      for (const execution of legacy) {
+        sqlite.prepare("UPDATE tool_executions SET status='cancelled',result_summary='模型绑定策略已升级，请重新发起工具请求',updated_at=? WHERE id=?").run(timestamp, execution.id)
+        sqlite.prepare("UPDATE approval_requests SET status='cancelled',decided_at=? WHERE tool_execution_id=? AND status IN ('pending','approved')").run(timestamp, execution.id)
+        sqlite.prepare('INSERT INTO audit_events (id,channel_id,task_run_id,event_type,metadata_json,created_at) VALUES (?,?,?,?,?,?)').run(randomUUID(), execution.channel_id, execution.task_run_id,
+          'tool_policy_migration_invalidated', JSON.stringify({ toolExecutionId: execution.id, reason: 'model_bound_policy_upgrade' }), timestamp)
+      }
+      if ((sqlite.pragma('foreign_key_check') as unknown[]).length) throw new Error('模型来源迁移引用校验失败')
+      sqlite.pragma('user_version = 17')
+    })()
   }
 }

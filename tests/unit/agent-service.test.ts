@@ -164,7 +164,7 @@ it('keeps multiple enabled members after idempotent migration', () => {
     sqlite.exec("INSERT INTO channel_agents (channel_id,agent_id,is_enabled,model_config_override_id,tool_permissions_override,created_at,updated_at) VALUES ('c', 'a', 1, NULL, NULL, 'now', 'now');")
     sqlite.exec("INSERT INTO channel_agents (channel_id,agent_id,is_enabled,model_config_override_id,tool_permissions_override,created_at,updated_at) VALUES ('c', 'b', 1, NULL, NULL, 'now', 'now');")
     expect(sqlite.prepare('SELECT count(*) AS n FROM channel_agents WHERE is_enabled=1').get()).toEqual({ n: 2 })
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(16)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(17)
   } finally {
     sqlite.close()
   }

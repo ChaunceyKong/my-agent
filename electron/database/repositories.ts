@@ -4,7 +4,7 @@ import { and, asc, eq, inArray, or, sql, type SQL } from 'drizzle-orm'
 import type {
   Agent,
   AgentEditorInput,
-  AgentTurn,
+  AgentTurn as AgentTurnSummary,
   AuditEvent,
   ApprovalRequest,
   ApprovalRequestStatus,
@@ -49,6 +49,41 @@ export interface ToolContext {
 
 export type ToolOutcome = Pick<ToolExecution, 'status' | 'riskLevel' | 'resultSummary'>
 type Transaction = Parameters<Parameters<AppDatabase['transaction']>[0]>[0]
+interface AgentTurn extends AgentTurnSummary {
+  configuredModelFingerprint: string | null
+  actualModelFingerprint: string | null
+  memberRevision: string | null
+}
+
+/** Main-only, deterministic identity; credentials never appear in a persisted policy. */
+export function modelFingerprint(config: ModelConfigRecord): string {
+  return createHash('sha256').update(JSON.stringify({ id: config.id, providerPreset: config.providerPreset, baseUrl: config.baseUrl,
+    modelName: config.modelName, encryptedApiKey: config.encryptedApiKey, contextWindow: config.contextWindow ?? null,
+    maxOutputTokens: config.maxOutputTokens ?? null, fallbackConfigId: config.fallbackConfigId ?? null,
+    createdAt: config.createdAt, updatedAt: config.updatedAt }), 'utf8').digest('hex')
+}
+
+function fallbackPath(configs: ModelConfigRecord[], id: string): ModelConfigRecord[] {
+  const path: ModelConfigRecord[] = []
+  let next: string | null = id
+  while (next !== null) {
+    if (path.some((config) => config.id === next)) throw new Error('备选模型不能形成循环')
+    if (path.length === 3) throw new Error('备选模型最多允许两级降级')
+    const config = configs.find((item) => item.id === next)
+    if (!config) throw new Error('备选模型配置不存在')
+    path.push(config)
+    next = config.fallbackConfigId ?? null
+  }
+  return path
+}
+
+function validateFallbackGraph(tx: Transaction, config: ModelConfigRecord): void {
+  if (config.fallbackConfigId !== null && config.fallbackConfigId !== undefined
+    && (typeof config.fallbackConfigId !== 'string' || !config.fallbackConfigId.trim())) throw new Error('备选模型配置无效')
+  const configs: ModelConfigRecord[] = tx.select().from(modelConfigs).all().filter((item) => item.id !== config.id)
+  configs.push(config)
+  for (const item of configs) fallbackPath(configs, item.id)
+}
 function schedulerId(tx: Transaction, override: string | null): string | null {
   return override ?? tx.select().from(modelSettings).where(eq(modelSettings.id, 1)).get()?.schedulerModelConfigId ?? null
 }
@@ -77,8 +112,14 @@ function selectedTurn(tx: Transaction, run: TaskRun, agentId: string, triggerEve
     .where(and(eq(agentTurns.taskRunId, run.id), eq(agentTurns.triggerEventSeq, triggerEventSeq))).get()) throw new Error('发言决策已被使用')
   if (tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval']))).get()) throw new Error('任务仍有未完成操作')
   const timestamp = new Date().toISOString()
+  const agent = tx.select().from(agents).where(eq(agents.id, agentId)).get()!
+  const configuredModelConfigId = member.modelConfigOverrideId ?? agent.modelConfigId
+  const config = tx.select().from(modelConfigs).where(eq(modelConfigs.id, configuredModelConfigId)).get()
+  if (!config) throw new Error('Agent 模型配置不存在')
   const turn: AgentTurn = { id: randomUUID(), taskRunId: run.id, ordinal: run.turnCount + 1, agentId,
-    generation: run.generation, status: 'running', triggerEventSeq, messageId: null, startedAt: timestamp, finishedAt: null }
+    generation: run.generation, status: 'running', triggerEventSeq, messageId: null, startedAt: timestamp, finishedAt: null,
+    configuredModelConfigId, actualModelConfigId: configuredModelConfigId,
+    configuredModelFingerprint: modelFingerprint(config), actualModelFingerprint: modelFingerprint(config), memberRevision: member.revision }
   tx.insert(agentTurns).values(turn).run()
   tx.update(taskRuns).set({ currentTurnId: turn.id, turnCount: turn.ordinal }).where(eq(taskRuns.id, run.id)).run()
   appendEvent(tx, run, 'turn_started', { agentId, metadata: { ordinal: turn.ordinal } })
@@ -101,8 +142,19 @@ function currentPolicy(tx: Transaction, run: TaskRun, agentId: string, toolName:
   const effectiveTool = permissionTool(toolName)
   if (!agent || !member?.isEnabled || !project || agent.defaultToolPermissions[effectiveTool] !== true
     || (member.toolPermissionsOverride !== null && member.toolPermissionsOverride[effectiveTool] !== true)) return undefined
+  const configuredId = member.modelConfigOverrideId ?? agent.modelConfigId
+  const turn = run.currentTurnId && tx.select().from(agentTurns).where(eq(agentTurns.id, run.currentTurnId)).get()
+  const configured = tx.select().from(modelConfigs).where(eq(modelConfigs.id, configuredId)).get()
+  const actualId = turn ? turn.actualModelConfigId : configuredId
+  const actual = actualId && tx.select().from(modelConfigs).where(eq(modelConfigs.id, actualId)).get()
+  if (!configured || !actual || (turn && (turn.agentId !== agentId || turn.generation !== run.generation
+    || !['running', 'waiting_approval'].includes(turn.status) || turn.configuredModelConfigId !== configuredId
+    || turn.memberRevision !== member.revision
+    || turn.configuredModelFingerprint !== modelFingerprint(configured) || turn.actualModelFingerprint !== modelFingerprint(actual)))) return undefined
+  if (!fallbackPath(tx.select().from(modelConfigs).all(), configuredId).some((config) => config.id === actual.id)) return undefined
   const snapshot: ToolPolicySnapshot = {
-    version: 1, workspacePath: project.workspacePath, agentId, turnId: run.currentTurnId, memberRevision: member.revision,
+    version: 2, actualModelConfigId: actual.id, modelFingerprint: modelFingerprint(actual),
+    workspacePath: project.workspacePath, agentId, turnId: run.currentTurnId, memberRevision: member.revision,
     defaultToolPermissions: sortedPermissions(agent.defaultToolPermissions),
     toolPermissionsOverride: member.toolPermissionsOverride === null ? null : sortedPermissions(member.toolPermissionsOverride),
     registeredExecutable: null,
@@ -198,6 +250,7 @@ export interface SaveModelConfigRecordInput {
   encryptedApiKey: string
   contextWindow?: number | null
   maxOutputTokens?: number | null
+  fallbackConfigId?: string | null
 }
 
 export interface ModelConfigRecord extends SaveModelConfigRecordInput {
@@ -207,6 +260,8 @@ export interface ModelConfigRecord extends SaveModelConfigRecordInput {
 }
 
 export interface Repositories {
+  getModelFallbackChain(id: string): Promise<ModelConfigRecord[]>
+  bindAgentTurnModel(input: { turnId: string; configuredModelSnapshot: string; actualModelSnapshot: string; memberRevision: string; hasToolObservations?: boolean }): Promise<AgentTurn>
   beginTaskRunCancellation(id: string, expectedGeneration?: number): Promise<TaskRun>
   settleTaskRunCancellation(id: string, effectsSettled: boolean, pauseReason?: string): Promise<TaskRun>
   resumeTaskRun(id: string, agentId?: string): Promise<TaskRun>
@@ -214,7 +269,7 @@ export interface Repositories {
   acknowledgeProcessRecovery(taskRunId: string, executionId: string): Promise<void>
   getLatestSessionSummary(channelId: string): Promise<SessionSummary | undefined>
   listSessionSummaryMessages(taskRunId: string, coveredThroughSeq: number, previous?: SessionSummary): Promise<Message[]>
-  saveSessionSummary(input: { taskRunId: string; generation: number; coveredThroughSeq: number; content: string; modelConfigId: string; modelSnapshot: string; memberSnapshot: string }): Promise<SessionSummary>
+  saveSessionSummary(input: { taskRunId: string; generation: number; coveredThroughSeq: number; content: string; modelConfigId: string; modelSnapshot: string; memberSnapshot: string; configuredModelConfigId?: string; configuredModelSnapshot?: string }): Promise<SessionSummary>
   createToolExecution(context: ToolContext, request: ToolRequest): Promise<ToolExecution>
   getToolExecution(id: string): Promise<ToolExecution | undefined>
   listToolExecutions(taskRunId: string): Promise<ToolExecution[]>
@@ -262,13 +317,13 @@ export interface Repositories {
   validateStartedTaskRun(input: StartTaskRunInput): Promise<void>
   getTaskRun(id: string): Promise<TaskRun | undefined>
   listTaskRuns(channelId: string): Promise<TaskRun[]>
-  transitionTaskRun(id: string, from: 'running', to: 'completed' | 'failed' | 'cancelled', metadata: Record<string, string>, guard?: { generation: number; modelSnapshot?: string; requireNoEnabledMembers?: boolean }): Promise<TaskRun | undefined>
+  transitionTaskRun(id: string, from: 'running', to: 'completed' | 'failed' | 'cancelled', metadata: Record<string, string>, guard?: { generation: number; modelSnapshot?: string; actualModelConfigId?: string; actualModelSnapshot?: string; requireNoEnabledMembers?: boolean }): Promise<TaskRun | undefined>
   recoverRunningTaskRuns(): Promise<number>
   appendTaskRunEvent(id: string, generation: number, eventType: TaskRunEventType, refs?: { agentId?: string; messageId?: string; toolExecutionId?: string; metadata?: EventMetadata }): Promise<TaskRunEvent>
   listTaskRunEvents(id: string): Promise<TaskRunEvent[]>
   startNextMentionTurn(taskRunId: string, generation: number): Promise<AgentTurn | undefined>
   startSingleMemberTurn(taskRunId: string, generation: number): Promise<AgentTurn | undefined>
-  commitSpeakerDecision(input: { taskRunId: string; generation: number; modelConfigId: string; memberRevisions: Record<string, string>; nextSpeaker: string | null; reason: string }): Promise<AgentTurn | null>
+  commitSpeakerDecision(input: { taskRunId: string; generation: number; modelConfigId: string; configuredModelConfigId?: string; configuredModelSnapshot?: string; modelSnapshot?: string; memberRevisions: Record<string, string>; nextSpeaker: string | null; reason: string }): Promise<AgentTurn | null>
   markAgentTurnWaiting(id: string, toolExecutionId: string): Promise<AgentTurn>
   pauseTaskRun(id: string, reason: string): Promise<TaskRun>
   startAgentTurn(taskRunId: string, generation: number, agentId: string, triggerEventSeq: number): Promise<AgentTurn>
@@ -294,6 +349,26 @@ export interface Repositories {
 
 export function createRepositories(client: DatabaseClient): Repositories {
   return {
+    async getModelFallbackChain(id) { return fallbackPath(client.db.select().from(modelConfigs).all(), id) },
+    async bindAgentTurnModel(input) {
+      return client.db.transaction((tx) => {
+        const turn = tx.select().from(agentTurns).where(eq(agentTurns.id, input.turnId)).get()
+        const run = turn && tx.select().from(taskRuns).where(eq(taskRuns.id, turn.taskRunId)).get()
+        const member = run && turn && tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.agentId, turn.agentId))).get()
+        const agent = turn && tx.select().from(agents).where(eq(agents.id, turn.agentId)).get()
+        const channel = run && tx.select().from(channels).where(eq(channels.id, run.channelId)).get()
+        const configured = turn?.configuredModelConfigId ? tx.select().from(modelConfigs).where(eq(modelConfigs.id, turn.configuredModelConfigId)).get() : undefined
+        const actual = configured && fallbackPath(tx.select().from(modelConfigs).all(), configured.id).find((config) => JSON.stringify(config) === input.actualModelSnapshot)
+        if (!turn || turn.status !== 'running' || !run || run.status !== 'running' || run.currentTurnId !== turn.id || run.generation !== turn.generation
+          || !member?.isEnabled || member.revision !== input.memberRevision || turn.memberRevision !== input.memberRevision || !agent || (member.modelConfigOverrideId ?? agent.modelConfigId) !== configured?.id
+          || !configured || !actual || !channel || JSON.stringify(configured) !== input.configuredModelSnapshot
+          || turn.configuredModelFingerprint !== modelFingerprint(configured)
+          || (actual.providerPreset !== 'ollama' && !tx.select().from(cloudConsents).where(and(eq(cloudConsents.projectId, channel.projectId), eq(cloudConsents.modelConfigId, actual.id))).get())
+          || (input.hasToolObservations && actual.providerPreset !== 'ollama' && !tx.select().from(toolResultConsents).where(and(eq(toolResultConsents.projectId, channel.projectId), eq(toolResultConsents.modelConfigId, actual.id), eq(toolResultConsents.scopeVersion, 1))).get())) throw new Error('模型调用绑定已失效或未授权')
+        if (turn.actualModelConfigId !== actual.id && tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), sql`json_extract(${toolExecutions.policySnapshotJson}, '$.turnId') = ${turn.id}`)).get()) throw new Error('工具执行后的模型不可切换')
+        return tx.update(agentTurns).set({ actualModelConfigId: actual.id, actualModelFingerprint: modelFingerprint(actual) }).where(eq(agentTurns.id, turn.id)).returning().get()!
+      })
+    },
     async getLatestSessionSummary(channelId) {
       return client.db.select().from(sessionSummaries).where(eq(sessionSummaries.channelId, channelId)).orderBy(sql`rowid DESC`).limit(1).get()
     },
@@ -313,9 +388,13 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const run = tx.select().from(taskRuns).where(eq(taskRuns.id, input.taskRunId)).get()
         const channel = run && tx.select().from(channels).where(eq(channels.id, run.channelId)).get()
         const config = tx.select().from(modelConfigs).where(eq(modelConfigs.id, input.modelConfigId)).get()
+        const configuredId = input.configuredModelConfigId ?? input.modelConfigId
+        const configured = tx.select().from(modelConfigs).where(eq(modelConfigs.id, configuredId)).get()
         const members = run && tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.isEnabled, true))).all()
         const identities = members?.map((member) => ({ member, agent: tx.select().from(agents).where(eq(agents.id, member.agentId)).get() })).sort((a, b) => a.member.agentId.localeCompare(b.member.agentId))
-        if (!run || run.status !== 'running' || run.generation !== input.generation || run.currentTurnId || !channel || schedulerId(tx, channel.schedulerModelConfigId) !== input.modelConfigId
+        if (!run || run.status !== 'running' || run.generation !== input.generation || run.currentTurnId || !channel || schedulerId(tx, channel.schedulerModelConfigId) !== configuredId
+          || !configured || !fallbackPath(tx.select().from(modelConfigs).all(), configuredId).some((candidate) => candidate.id === input.modelConfigId)
+          || (input.configuredModelSnapshot !== undefined && JSON.stringify(configured) !== input.configuredModelSnapshot)
           || JSON.stringify(config) !== input.modelSnapshot || JSON.stringify(identities) !== input.memberSnapshot
           || (config?.providerPreset !== 'ollama' && !tx.select().from(cloudConsents).where(and(eq(cloudConsents.projectId, channel.projectId), eq(cloudConsents.modelConfigId, input.modelConfigId))).get())) throw new Error('摘要状态已失效')
         const cutoff = tx.select().from(taskRunEvents).where(and(eq(taskRunEvents.taskRunId, run.id), eq(taskRunEvents.seq, input.coveredThroughSeq), eq(taskRunEvents.eventType, 'turn_completed'))).get()
@@ -323,7 +402,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const prior = tx.select().from(sessionSummaries).where(eq(sessionSummaries.taskRunId, run.id)).orderBy(sql`${sessionSummaries.coveredThroughSeq} DESC`).limit(1).get()
         if (prior && prior.coveredThroughSeq >= input.coveredThroughSeq) return prior
         const saved = tx.insert(sessionSummaries).values({ id: randomUUID(), channelId: run.channelId, taskRunId: run.id,
-          coveredThroughSeq: input.coveredThroughSeq, content: input.content, modelConfigId: input.modelConfigId, createdAt: new Date().toISOString() }).returning().get()!
+          coveredThroughSeq: input.coveredThroughSeq, content: input.content, modelConfigId: input.modelConfigId, configuredModelConfigId: configuredId, createdAt: new Date().toISOString() }).returning().get()!
         appendEvent(tx, run, 'summary_created')
         return saved
       })
@@ -932,7 +1011,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
       from: 'running',
       to: 'completed' | 'failed' | 'cancelled',
       metadata: Record<string, string>,
-      guard?: { generation: number; modelSnapshot?: string; requireNoEnabledMembers?: boolean },
+      guard?: { generation: number; modelSnapshot?: string; actualModelConfigId?: string; actualModelSnapshot?: string; requireNoEnabledMembers?: boolean },
     ): Promise<TaskRun | undefined> {
       const timestamp = new Date().toISOString()
       return client.db.transaction((tx) => {
@@ -941,6 +1020,13 @@ export function createRepositories(client: DatabaseClient): Repositories {
         if (guard && (current.generation !== guard.generation
           || (guard.modelSnapshot !== undefined && JSON.stringify(tx.select().from(modelConfigs).where(eq(modelConfigs.id, current.modelConfigId)).get()) !== guard.modelSnapshot)
           || (guard.requireNoEnabledMembers && tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, current.channelId), eq(channelAgents.isEnabled, true))).get()))) return undefined
+        if (guard?.actualModelConfigId !== undefined) {
+          const actual = tx.select().from(modelConfigs).where(eq(modelConfigs.id, guard.actualModelConfigId)).get()
+          const channel = tx.select().from(channels).where(eq(channels.id, current.channelId)).get()
+          if (!actual || !channel || JSON.stringify(actual) !== guard.actualModelSnapshot
+            || !fallbackPath(tx.select().from(modelConfigs).all(), current.modelConfigId).some((candidate) => candidate.id === actual.id)
+            || (actual.providerPreset !== 'ollama' && !tx.select().from(cloudConsents).where(and(eq(cloudConsents.projectId, channel.projectId), eq(cloudConsents.modelConfigId, actual.id))).get())) return undefined
+        }
         const next = tx.update(taskRuns)
           .set({
             status: to,
@@ -961,6 +1047,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
             id: randomUUID(), channelId: next.channelId, taskRunId: next.id,
             role: 'agent', authorName: 'AI 助手', content: metadata.result ?? '',
             agentId: null, origin: 'legacy', taskRunSeq: null,
+            actualModelConfigId: guard?.actualModelConfigId ?? null,
             status: 'completed', createdAt: timestamp,
           }).returning().get()
           appendEvent(tx, next, 'task_completed', { messageId: reply.id, metadata: { reason: 'completed' } })
@@ -1136,8 +1223,15 @@ export function createRepositories(client: DatabaseClient): Repositories {
       return client.db.transaction((tx) => {
         const run = tx.select().from(taskRuns).where(eq(taskRuns.id, input.taskRunId)).get()
         const channel = run && tx.select().from(channels).where(eq(channels.id, run.channelId)).get()
+        const configuredId = input.configuredModelConfigId ?? input.modelConfigId
+        const configured = tx.select().from(modelConfigs).where(eq(modelConfigs.id, configuredId)).get()
+        const actual = tx.select().from(modelConfigs).where(eq(modelConfigs.id, input.modelConfigId)).get()
         if (!run || run.status !== 'running' || run.generation !== input.generation || run.currentTurnId || channel?.speakerMode !== 'automatic'
-          || schedulerId(tx, channel.schedulerModelConfigId) !== input.modelConfigId) throw new Error('调度决策已失效')
+          || schedulerId(tx, channel.schedulerModelConfigId) !== configuredId || !configured || !actual
+          || !fallbackPath(tx.select().from(modelConfigs).all(), configuredId).some((config) => config.id === actual.id)
+          || (input.configuredModelSnapshot !== undefined && JSON.stringify(configured) !== input.configuredModelSnapshot)
+          || (input.modelSnapshot !== undefined && JSON.stringify(actual) !== input.modelSnapshot)
+          || (input.modelSnapshot !== undefined && actual.providerPreset !== 'ollama' && !tx.select().from(cloudConsents).where(and(eq(cloudConsents.projectId, channel.projectId), eq(cloudConsents.modelConfigId, actual.id))).get())) throw new Error('调度决策已失效')
         const members = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.isEnabled, true))).all()
         if (members.length !== Object.keys(input.memberRevisions).length || members.some((member) => input.memberRevisions[member.agentId] !== member.revision)) throw new Error('群聊成员已变化')
         if (tx.select().from(mentionQueue).where(and(eq(mentionQueue.taskRunId, run.id), eq(mentionQueue.status, 'pending'))).get()
@@ -1146,13 +1240,13 @@ export function createRepositories(client: DatabaseClient): Repositories {
             .where(and(eq(toolExecutions.taskRunId, run.id), inArray(approvalRequests.status, ['pending', 'approved']))).get()) throw new Error('任务仍有待处理事项')
         if (input.nextSpeaker === null) {
           if (tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.toolName, ['write_file', 'replace_file_content', 'run_process']), eq(toolExecutions.status, 'completed'))).get()) throw new Error('任务有待验收产物')
-          appendEvent(tx, run, 'speaker_decided', { metadata: { reason: 'automatic_complete' }, displayReason: input.reason })
+          appendEvent(tx, run, 'speaker_decided', { metadata: { reason: 'automatic_complete', configuredModelConfigId: configuredId, actualModelConfigId: actual.id }, displayReason: input.reason })
           tx.update(taskRuns).set({ status: 'completed', finishedAt: new Date().toISOString() }).where(eq(taskRuns.id, run.id)).run()
           appendEvent(tx, run, 'task_completed')
           return null
         }
         if (!members.some((member) => member.agentId === input.nextSpeaker)) throw new Error('调度 Agent 已失效')
-        const decision = appendEvent(tx, run, 'speaker_decided', { agentId: input.nextSpeaker, metadata: { reason: 'automatic_selection' }, displayReason: input.reason })
+        const decision = appendEvent(tx, run, 'speaker_decided', { agentId: input.nextSpeaker, metadata: { reason: 'automatic_selection', configuredModelConfigId: configuredId, actualModelConfigId: actual.id }, displayReason: input.reason })
         return selectedTurn(tx, run, input.nextSpeaker, decision.seq)
       })
     },
@@ -1193,13 +1287,18 @@ export function createRepositories(client: DatabaseClient): Repositories {
         if (!content.trim()) throw new Error('Agent 回复为空')
         const agent = tx.select().from(agents).where(eq(agents.id, turn.agentId)).get()
         const member = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.agentId, turn.agentId))).get()
-        if (!agent || !member?.isEnabled) throw new Error('Agent 已失去发言资格')
+        if (!agent || !member?.isEnabled || member.revision !== turn.memberRevision) throw new Error('Agent 已失去发言资格')
+        const configured = turn.configuredModelConfigId && tx.select().from(modelConfigs).where(eq(modelConfigs.id, turn.configuredModelConfigId)).get()
+        const actual = turn.actualModelConfigId && tx.select().from(modelConfigs).where(eq(modelConfigs.id, turn.actualModelConfigId)).get()
+        if (!configured || !actual || (member.modelConfigOverrideId ?? agent.modelConfigId) !== configured.id
+          || modelFingerprint(configured) !== turn.configuredModelFingerprint || modelFingerprint(actual) !== turn.actualModelFingerprint
+          || !fallbackPath(tx.select().from(modelConfigs).all(), configured.id).some((config) => config.id === actual.id)) throw new Error('Agent 模型绑定已失效')
         const last = tx.select({ seq: taskRunEvents.seq }).from(taskRunEvents)
           .where(eq(taskRunEvents.taskRunId, run.id)).orderBy(sql`${taskRunEvents.seq} DESC`).limit(1).get()
         const timestamp = new Date().toISOString()
         const message: Message = { id: randomUUID(), channelId: run.channelId, taskRunId: run.id,
           agentId: turn.agentId, origin: 'agent', taskRunSeq: (last?.seq ?? 0) + 1,
-          role: 'agent', authorName: agent.name, content, status: 'completed', createdAt: timestamp }
+          role: 'agent', authorName: agent.name, content, status: 'completed', createdAt: timestamp, actualModelConfigId: actual.id }
         tx.insert(messages).values(message).run()
         const finished = tx.update(agentTurns).set({ status: 'completed', messageId: message.id, finishedAt: timestamp }).where(eq(agentTurns.id, id)).returning().get()!
         tx.update(taskRuns).set({ currentTurnId: null }).where(eq(taskRuns.id, run.id)).run()
@@ -1256,7 +1355,8 @@ export function createRepositories(client: DatabaseClient): Repositories {
             sql`CASE WHEN ${messages.taskRunSeq} IS NOT NULL THEN (SELECT created_at FROM task_runs WHERE id = ${messages.taskRunId}) ELSE ${messages.createdAt} END`,
             sql`CASE WHEN ${messages.taskRunSeq} IS NOT NULL THEN ${messages.taskRunId} ELSE ${messages.id} END`,
             sql`CASE WHEN ${messages.taskRunSeq} IS NOT NULL THEN ${messages.taskRunSeq} ELSE 0 END`, asc(messages.id)).all(),
-          turns: ids.length ? tx.select().from(agentTurns).where(inArray(agentTurns.taskRunId, ids)).orderBy(asc(agentTurns.ordinal)).all() : [],
+          turns: ids.length ? tx.select().from(agentTurns).where(inArray(agentTurns.taskRunId, ids)).orderBy(asc(agentTurns.ordinal)).all()
+            .map(({ configuredModelFingerprint: _configured, actualModelFingerprint: _actual, memberRevision: _member, ...turn }) => turn) : [],
           events: ids.length ? tx.select().from(taskRunEvents).where(inArray(taskRunEvents.taskRunId, ids)).orderBy(asc(taskRunEvents.seq)).all()
             .map(({ metadataJson: _metadata, ...event }) => event) : [],
         }
@@ -1294,15 +1394,20 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const previous = tx.select().from(modelConfigs).where(eq(modelConfigs.id, id)).get()
         if (!previous) throw new Error('模型配置不存在')
         const updatedAt = new Date(Math.max(Date.now(), (Date.parse(previous.updatedAt) || 0) + 1)).toISOString()
+        const record = { ...previous, ...input, fallbackConfigId: input.fallbackConfigId === undefined ? previous.fallbackConfigId : input.fallbackConfigId, updatedAt }
+        validateFallbackGraph(tx, record)
         tx.delete(cloudConsents).where(eq(cloudConsents.modelConfigId, id)).run()
         tx.delete(toolResultConsents).where(eq(toolResultConsents.modelConfigId, id)).run()
-        return tx.update(modelConfigs).set({ ...input, updatedAt }).where(eq(modelConfigs.id, id)).returning().get()!
+        const saved = tx.update(modelConfigs).set(record).where(eq(modelConfigs.id, id)).returning().get()!
+        invalidateChangedToolPolicies(tx, sql`1 = 1`)
+        return saved
       })
     },
     async removeModelConfig(id) {
+      if (client.db.select({ id: modelConfigs.id }).from(modelConfigs).where(eq(modelConfigs.fallbackConfigId, id)).get()) throw new Error('模型配置仍被备选模型引用')
       if (client.db.select({ id: taskRuns.id }).from(taskRuns).where(eq(taskRuns.modelConfigId, id)).get()) throw new Error('模型配置仍被任务引用')
       try { if (!client.db.delete(modelConfigs).where(eq(modelConfigs.id, id)).returning().get()) throw new Error('模型配置不存在') }
-      catch { throw new Error('模型配置不存在或仍被 Agent、群聊、任务、摘要或默认调度引用') }
+      catch { throw new Error('模型配置不存在或仍被 Agent、群聊、任务、轮次、消息、摘要或默认调度引用') }
     },
     async saveModelConfig(input: SaveModelConfigRecordInput): Promise<ModelConfigRecord> {
       validateModelBudget(input)
@@ -1312,11 +1417,14 @@ export function createRepositories(client: DatabaseClient): Repositories {
         ...input,
         contextWindow: input.contextWindow ?? null,
         maxOutputTokens: input.maxOutputTokens ?? null,
+        fallbackConfigId: input.fallbackConfigId ?? null,
         createdAt: timestamp,
         updatedAt: timestamp,
       }
-      client.db.insert(modelConfigs).values(modelConfig).run()
-      return modelConfig
+      return client.db.transaction((tx) => {
+        validateFallbackGraph(tx, modelConfig)
+        return tx.insert(modelConfigs).values(modelConfig).returning().get()!
+      })
     },
 
     async listModelConfigs(): Promise<ModelConfigRecord[]> {

@@ -298,6 +298,7 @@ it('pauses actual automatic scheduling after three consecutive same-Agent Turns'
   const second = await repo.createAgent({ name: 'Beta', avatar: null, title: '', systemPrompt: 'B', modelConfigId, defaultToolPermissions: {} })
   await repo.saveChannelAgent({ channelId, agentId: second.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
   await repo.setChannelScheduler(channelId, modelConfigId)
+  await repo.recordCloudConsent(projectId, modelConfigId)
   const run = await tasks.startTaskRun(channelId, modelConfigId, '@Alpha', [{ agentId: agent.id, start: 0, end: 6, text: '@Alpha' }])
   const modelClient: any = { requireCloudConsent: vi.fn().mockResolvedValue(undefined), selectSpeaker: vi.fn().mockResolvedValue(JSON.stringify({ nextSpeaker: agent.id, reason: 'work remains' })),
     streamChat: vi.fn(async (_input: any, emit: any) => { await emit({ type: 'delta', content: 'work' }); await emit({ type: 'complete' }) }) }

@@ -23,21 +23,29 @@ export function createSessionSummaryService(repositories: Repositories, modelCli
     }
     const memberSnapshot = await snapshotMembers()
     const modelSnapshot = JSON.stringify(config)
+    let actualModelConfigId = config.id
+    let actualModelSnapshot = modelSnapshot
     const current = async () => {
       const latest = await repositories.getTaskRun(run.id)
       const currentChannel = await repositories.getChannel(run.channelId)
       return latest?.status === 'running' && latest.generation === run.generation && !latest.currentTurnId
         && !!currentChannel && await repositories.getEffectiveScheduler(channel.id) === config.id && JSON.stringify(await repositories.getModelConfig(config.id)) === modelSnapshot
         && await snapshotMembers() === memberSnapshot && await repositories.hasCloudConsent(channel.projectId, config.id)
+        && JSON.stringify(await repositories.getModelConfig(actualModelConfigId)) === actualModelSnapshot
+        && await repositories.hasCloudConsent(channel.projectId, actualModelConfigId)
     }
     try {
       await modelClient.requireCloudConsent(channel.projectId, config.id)
       const history = await repositories.listSessionSummaryMessages(run.id, cutoff, previous)
       const prompt = JSON.stringify({ taskRunId: run.id, coveredThroughSeq: cutoff, previousSummary: previous?.content ?? null,
         conversation: history.map((message) => ({ taskRunId: message.taskRunId, seq: message.taskRunSeq, author: message.authorName, text: message.content })) })
-      const content = await modelClient.summarizeSession({ projectId: channel.projectId, modelConfigId: config.id, taskRunId: run.id, prompt }, current)
+      const content = await modelClient.summarizeSession({ projectId: channel.projectId, modelConfigId: config.id, taskRunId: run.id, prompt }, current, async (selection) => {
+        actualModelConfigId = selection.actualModelConfigId
+        actualModelSnapshot = selection.modelSnapshot
+      })
       if (!await current()) return
-      await repositories.saveSessionSummary({ taskRunId: run.id, generation: run.generation, coveredThroughSeq: cutoff, content, modelConfigId: config.id, modelSnapshot, memberSnapshot })
+      await repositories.saveSessionSummary({ taskRunId: run.id, generation: run.generation, coveredThroughSeq: cutoff, content,
+        configuredModelConfigId: config.id, configuredModelSnapshot: modelSnapshot, modelConfigId: actualModelConfigId, modelSnapshot: actualModelSnapshot, memberSnapshot })
     } catch {
       // A failed attempt preserves the old summary. A later completed Turn retries the same prefix.
     }

@@ -144,6 +144,13 @@ it('upgrades populated v15 model table without losing references, keys or consen
     migrate(sqlite)
     sqlite.pragma('foreign_keys = OFF')
     sqlite.exec(`DROP TABLE model_settings;
+      ALTER TABLE agent_turns DROP COLUMN configured_model_config_id;
+      ALTER TABLE agent_turns DROP COLUMN actual_model_config_id;
+      ALTER TABLE agent_turns DROP COLUMN configured_model_fingerprint;
+      ALTER TABLE agent_turns DROP COLUMN actual_model_fingerprint;
+      ALTER TABLE agent_turns DROP COLUMN member_revision;
+      ALTER TABLE messages DROP COLUMN actual_model_config_id;
+      ALTER TABLE session_summaries DROP COLUMN configured_model_config_id;
       CREATE TABLE model_configs_v15 (id TEXT PRIMARY KEY NOT NULL, provider_preset TEXT NOT NULL CHECK(provider_preset IN ('openai','deepseek')), base_url TEXT NOT NULL, model_name TEXT NOT NULL, encrypted_api_key TEXT NOT NULL, context_window INTEGER, max_output_tokens INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       DROP TABLE model_configs; ALTER TABLE model_configs_v15 RENAME TO model_configs;
       PRAGMA user_version=15;`)
@@ -160,11 +167,12 @@ it('upgrades populated v15 model table without losing references, keys or consen
     const tables = ['model_configs','agents','channels','channel_agents','task_runs','session_summaries','cloud_consents','tool_result_consents']
     const before = tables.map((table) => sqlite.prepare(`SELECT * FROM ${table}`).all())
     migrate(sqlite); migrate(sqlite)
-    expect(tables.map((table) => sqlite.prepare(`SELECT * FROM ${table}`).all())).toEqual(before)
+    expect(tables.map((table) => (sqlite.prepare(`SELECT * FROM ${table}`).all() as Record<string, unknown>[])
+      .map(({ fallback_config_id: _fallback, configured_model_config_id: _configured, ...row }) => row))).toEqual(before)
     expect(sqlite.pragma('foreign_key_check')).toEqual([])
     expect(sqlite.pragma('foreign_keys', { simple: true })).toBe(1)
     sqlite.exec("INSERT INTO model_settings VALUES (1,'m')")
     expect(() => sqlite.exec("DELETE FROM model_configs WHERE id='m'")).toThrow()
-    sqlite.exec("INSERT INTO model_configs VALUES ('local','ollama','http://localhost:11434/v1','llama','',NULL,NULL,'now','now')")
+    sqlite.exec("INSERT INTO model_configs (id,provider_preset,base_url,model_name,encrypted_api_key,context_window,max_output_tokens,created_at,updated_at) VALUES ('local','ollama','http://localhost:11434/v1','llama','',NULL,NULL,'now','now')")
   } finally { sqlite.close() }
 })

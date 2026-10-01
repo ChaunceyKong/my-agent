@@ -84,6 +84,15 @@ it('kills a running process when the task cancellation signal aborts', async () 
   await expect(result).resolves.toMatchObject({ exitCode: null })
 })
 
+it('rejects a spawn failure without treating it as an unresolved running child', async () => {
+  const child = Object.assign(new EventEmitter(), { stderr: new EventEmitter(), kill: vi.fn() })
+  const controller = new AbortController()
+  const pending = executeRegisteredProcess({ executable: { id: 'echo', absolutePath: 'C:\\tool.exe', isEnabled: true, argumentPolicyJson: '[]', createdAt: '', updatedAt: '' }, args: [], cwd: 'C:\\work', signal: controller.signal, spawnProcess: vi.fn(() => child) as any })
+  child.emit('error', new Error('spawn failed'))
+  await expect(pending).rejects.toThrow('无法启动')
+  controller.abort(); expect(child.kill).not.toHaveBeenCalled()
+})
+
 it('rejects wildcard and dangerous Node, Python and Git argument policies', async () => {
   const signal = new AbortController().signal
   const spawn = vi.fn()

@@ -51,12 +51,17 @@ export function executeRegisteredProcess(options: {
     try { child = spawnProcess(executable.absolutePath, args, { cwd, shell: false, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }) } catch { reject(new Error('受控进程无法启动')); return }
     let stderr = ''
     let settled = false
+    let spawned = typeof child.pid === 'number'
+    child.once('spawn', () => { spawned = true })
     const finish = (value: ProcessResult) => { if (!settled) { settled = true; signal.removeEventListener('abort', abort); resolve(value) } }
     // kill() requests termination; only close confirms the process is gone.
-    const abort = () => { if (!settled) child.kill() }
+    const abort = () => { if (!settled) { try { child.kill() } catch { /* A failed kill does not prove closure. */ } } }
     signal.addEventListener('abort', abort, { once: true })
     child.stderr?.on('data', (chunk: Buffer) => { if (!settled) stderr = (stderr + chunk.toString('utf8')).slice(0, MAX_STDERR) })
-    child.once('error', () => { if (!settled) { settled = true; reject(new Error('受控进程无法启动')) } })
+    child.on('error', () => {
+      if (!settled && !spawned) { settled = true; signal.removeEventListener('abort', abort); reject(new Error('受控进程无法启动')) }
+      // After spawn, errors (including failed kill) must still wait for close.
+    })
     child.once('close', (exitCode) => finish({ exitCode: signal.aborted ? null : exitCode, stderr: stderr.replace(/[\r\n]/g, ' ').slice(0, MAX_STDERR) }))
     if (signal.aborted) abort()
   })

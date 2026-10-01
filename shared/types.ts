@@ -72,6 +72,7 @@ export interface ToolExecution {
   policySnapshotJson: string
   /** Bound when an existing file is submitted for explicit replacement approval. */
   overwriteTargetIdentityJson: string | null
+  processRecoveryRequired: boolean
   status: ToolExecutionStatus
   resultSummary: string | null
   createdAt: string
@@ -357,7 +358,7 @@ export interface AgentTeamApi {
     runApproved(id: string): Promise<void>
     list(taskRunId: string): Promise<Array<Pick<ApprovalRequest, 'id' | 'toolExecutionId' | 'requestHash' | 'status' | 'expiresAt'>>>
   }
-  tools: { list(taskRunId: string): Promise<Array<Pick<ToolExecution, 'id' | 'taskRunId' | 'toolName' | 'riskLevel' | 'status' | 'resultSummary' | 'createdAt'>>> }
+  tools: { list(taskRunId: string): Promise<Array<Pick<ToolExecution, 'id' | 'taskRunId' | 'toolName' | 'riskLevel' | 'status' | 'resultSummary' | 'createdAt' | 'processRecoveryRequired'>>> }
   workspace: { list(channelId: string, path: string): Promise<ListDirectoryResult> }
   executables: {
     list(): Promise<Array<Pick<RegisteredExecutable, 'id' | 'isEnabled'>>>
@@ -392,6 +393,7 @@ export interface AgentTeamApi {
     assign(taskRunId: string, agentId: string): Promise<{ taskRunId: string }>
     terminate(taskRunId: string): Promise<void>
     interrupt(taskRunId: string, input: SendMessageInput): Promise<{ taskRunId: string }>
+    acknowledgeProcessRecovery(taskRunId: string, toolExecutionId: string, confirmation: 'manually_stopped_and_verified'): Promise<void>
   }
   events: {
     onStream(listener: (event: StreamEvent) => void): () => void

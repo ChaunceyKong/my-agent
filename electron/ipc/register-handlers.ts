@@ -58,7 +58,7 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
     return { id: saved.id, isEnabled: saved.isEnabled }
   })
   ipcMain.handle(IpcChannel.ToolExecutionList, async (_event, taskRunId: unknown) => (await repositories.listToolExecutions(validId(taskRunId))).map((item) => ({
-    id: item.id, taskRunId: item.taskRunId, toolName: item.toolName, riskLevel: item.riskLevel, status: item.status, resultSummary: item.resultSummary, createdAt: item.createdAt,
+    id: item.id, taskRunId: item.taskRunId, toolName: item.toolName, riskLevel: item.riskLevel, status: item.status, resultSummary: item.resultSummary, createdAt: item.createdAt, processRecoveryRequired: item.processRecoveryRequired,
   })))
   ipcMain.handle(IpcChannel.ApprovalList, async (_event, taskRunId: unknown) => (await repositories.listApprovalRequests(validId(taskRunId))).map((item) => ({
     id: item.id, toolExecutionId: item.toolExecutionId, requestHash: item.requestHash, status: item.status, expiresAt: item.expiresAt,
@@ -170,6 +170,10 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
   ipcMain.handle(IpcChannel.TaskRunTerminate, async (_event, id: unknown) => {
     if (!taskRuns) throw new Error('模型服务不可用')
     if ((await taskRuns.cancelTaskRun(validId(id))).status !== 'cancelled') throw new Error('任务效果仍需清理')
+  })
+  ipcMain.handle(IpcChannel.TaskRunAcknowledgeProcessRecovery, async (_event, id: unknown, executionId: unknown, confirmation: unknown) => {
+    if (!taskRuns || confirmation !== 'manually_stopped_and_verified') throw new Error('需要确认已人工停止并核验遗留进程')
+    await taskRuns.acknowledgeProcessRecovery(validId(id), validId(executionId))
   })
   ipcMain.handle(IpcChannel.TaskRunCancel, async (_event, taskRunId: string) => {
     if (!taskRuns) throw new Error('TaskRun service is unavailable')

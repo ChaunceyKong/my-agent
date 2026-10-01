@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -84,11 +85,66 @@ it('pauses both running/cancelling after restart without replaying a claimed pro
   await approvals.approve(approval.id, approval.requestHash)
   await repo.claimApprovedProcess(approval.id, new Date().toISOString())
   await repo.beginTaskRunCancellation(run.id)
+  db.close(); db = createDatabase({ filePath: join(directory, 'test.sqlite') }); repo = createRepositories(db); tasks = createTaskRunService(repo, 10)
   expect(await repo.recoverRunningTaskRuns()).toBe(1)
   expect(await repo.getTaskRun(run.id)).toMatchObject({ status: 'paused', generation: run.generation + 2 })
   expect(await repo.getToolExecution(execution.id)).toMatchObject({ status: 'executing' })
   await expect(tasks.resumeTaskRun(run.id, agent.id)).rejects.toThrow('未完成')
   expect(await tasks.cancelTaskRun(run.id)).toMatchObject({ status: 'paused', pauseReason: 'effect_cleanup_pending' })
+  expect(await repo.getToolExecution(execution.id)).toMatchObject({ processRecoveryRequired: true })
+  const { invoke } = ipc()
+  await expect(invoke(IpcChannel.TaskRunAcknowledgeProcessRecovery, run.id, execution.id, 'unchecked')).rejects.toThrow('确认')
+  await expect(tasks.acknowledgeProcessRecovery(run.id, 'unknown')).rejects.toThrow('不可用')
+  const effect = deferred(); const pending = tasks.trackEffect(run.id, () => effect.promise)
+  await expect(tasks.acknowledgeProcessRecovery(run.id, execution.id)).rejects.toThrow('清理')
+  effect.resolve(); await pending
+  await invoke(IpcChannel.TaskRunAcknowledgeProcessRecovery, run.id, execution.id, 'manually_stopped_and_verified')
+  expect(await repo.getToolExecution(execution.id)).toMatchObject({ status: 'cancelled', processRecoveryRequired: false })
+  expect((await repo.listAuditEvents(channelId)).find((item) => item.eventType === 'process_recovery_acknowledged')?.metadataJson).toContain('"osStateVerifiedByApplication":false')
+  await expect(tasks.acknowledgeProcessRecovery(run.id, execution.id)).rejects.toThrow('不可用')
+  await invoke(IpcChannel.TaskRunTerminate, run.id)
+  expect(await repo.getTaskRun(run.id)).toMatchObject({ status: 'cancelled' })
+})
+
+it('requires a restart marker before manual process recovery and can resume after acknowledgment', async () => {
+  const run = await start(); const turn = (await repo.startSingleMemberTurn(run.id, run.generation))!
+  await repo.saveRegisteredExecutable({ id: 'echo', absolutePath: 'C:\\tool.exe', isEnabled: true, argumentPolicyJson: '[]' })
+  const approvals = createApprovalService(repo)
+  const execution = (await createToolEngine(repo, approvals).execute({ taskRunId: run.id, generation: run.generation, turnId: turn.id, agentId: agent.id }, { toolName: 'run_process', input: { executableId: 'echo', args: [] } })).execution
+  const approval = (await repo.getApprovalForToolExecution(execution.id))!
+  await approvals.approve(approval.id, approval.requestHash)
+  await repo.claimApprovedProcess(approval.id, new Date().toISOString())
+  await expect(tasks.acknowledgeProcessRecovery(run.id, execution.id)).rejects.toThrow('不可用')
+  await tasks.cancelTaskRun(run.id)
+  await expect(tasks.acknowledgeProcessRecovery(run.id, execution.id)).rejects.toThrow('不可用')
+  // Restart recovery must also discover a Run already paused by a cleanup timeout.
+  expect(await repo.recoverRunningTaskRuns()).toBe(0)
+  await tasks.acknowledgeProcessRecovery(run.id, execution.id)
+  expect(await tasks.resumeTaskRun(run.id, agent.id)).toMatchObject({ status: 'running' })
+  expect(await repo.getApprovalRequest(approval.id)).toMatchObject({ status: 'cancelled' })
+})
+
+it('keeps a spawned process error unresolved through cancellation until late close', async () => {
+  vi.useFakeTimers()
+  const run = await start(); const turn = (await repo.startSingleMemberTurn(run.id, run.generation))!
+  await repo.saveRegisteredExecutable({ id: 'echo', absolutePath: 'C:\\tool.exe', isEnabled: true, argumentPolicyJson: '[]' })
+  const approvals = createApprovalService(repo)
+  const execution = (await createToolEngine(repo, approvals).execute({ taskRunId: run.id, generation: run.generation, turnId: turn.id, agentId: agent.id }, { toolName: 'run_process', input: { executableId: 'echo', args: [] } })).execution
+  const approval = (await repo.getApprovalForToolExecution(execution.id))!
+  await approvals.approve(approval.id, approval.requestHash)
+  const child = Object.assign(new EventEmitter(), { pid: 123, stderr: new EventEmitter(), kill: vi.fn(() => { child.emit('error', new Error('kill failed')); return false }) })
+  const execute = processTools.executeRegisteredProcess
+  vi.spyOn(processTools, 'executeRegisteredProcess').mockImplementation((options) => execute({ ...options, spawnProcess: vi.fn(() => child) as any }))
+  const pending = createProcessToolService(repo, tasks).runApproved(approval.id)
+  await vi.advanceTimersByTimeAsync(0)
+  const cancellation = tasks.cancelTaskRun(run.id)
+  await vi.advanceTimersByTimeAsync(11)
+  expect(await cancellation).toMatchObject({ status: 'paused', pauseReason: 'effect_cleanup_pending' })
+  expect(await repo.getToolExecution(execution.id)).toMatchObject({ status: 'executing' })
+  await expect(tasks.resumeTaskRun(run.id)).rejects.toThrow('清理')
+  child.emit('close', null); await pending
+  expect(await repo.getToolExecution(execution.id)).toMatchObject({ status: 'cancelled' })
+  expect(await tasks.cancelTaskRun(run.id)).toMatchObject({ status: 'cancelled' })
 })
 
 function ipc() {

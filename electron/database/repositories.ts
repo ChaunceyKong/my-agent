@@ -205,6 +205,7 @@ export interface Repositories {
   settleTaskRunCancellation(id: string, effectsSettled: boolean, pauseReason?: string): Promise<TaskRun>
   resumeTaskRun(id: string, agentId?: string): Promise<TaskRun>
   finishCancelledProcess(id: string): Promise<void>
+  acknowledgeProcessRecovery(taskRunId: string, executionId: string): Promise<void>
   getLatestSessionSummary(channelId: string): Promise<SessionSummary | undefined>
   listSessionSummaryMessages(taskRunId: string, coveredThroughSeq: number, previous?: SessionSummary): Promise<Message[]>
   saveSessionSummary(input: { taskRunId: string; generation: number; coveredThroughSeq: number; content: string; modelConfigId: string; modelSnapshot: string; memberSnapshot: string }): Promise<SessionSummary>
@@ -334,7 +335,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
           messageId: context.messageId ?? null, toolName: request.toolName, inputJson: JSON.stringify(request.input),
           policySnapshotJson,
           requestHash: hashToolRequest({ taskRunId: run.id, generation: run.generation, agentId: context.agentId, messageId: context.messageId ?? null, request, policySnapshotJson }),
-          overwriteTargetIdentityJson: null,
+          overwriteTargetIdentityJson: null, processRecoveryRequired: false,
           riskLevel: request.toolName === 'write_file' || request.toolName === 'replace_file_content' ? 'medium' : 'low', status: 'executing',
           resultSummary: null, createdAt: timestamp, updatedAt: timestamp,
         }
@@ -967,7 +968,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, id)).get()
         const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
         if (!execution || execution.toolName !== 'run_process' || execution.status !== 'executing' || !run || run.generation === execution.generation) return
-        const next = tx.update(toolExecutions).set({ status: 'cancelled', resultSummary: '受控进程已关闭', updatedAt: new Date().toISOString() }).where(eq(toolExecutions.id, id)).returning().get()!
+        const next = tx.update(toolExecutions).set({ status: 'cancelled', processRecoveryRequired: false, resultSummary: '受控进程已关闭', updatedAt: new Date().toISOString() }).where(eq(toolExecutions.id, id)).returning().get()!
         tx.update(approvalRequests).set({ status: 'cancelled', decidedAt: new Date().toISOString() }).where(and(eq(approvalRequests.toolExecutionId, id), eq(approvalRequests.status, 'executing'))).run()
         tx.insert(auditEvents).values(toolAuditEvent(run.channelId, next)).run()
       })
@@ -994,6 +995,22 @@ export function createRepositories(client: DatabaseClient): Repositories {
         return tx.select().from(taskRuns).where(eq(taskRuns.id, id)).get()!
       })
     },
+    async acknowledgeProcessRecovery(taskRunId, executionId) {
+      client.db.transaction((tx) => {
+        const run = tx.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).get()
+        const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, executionId)).get()
+        const approval = tx.select().from(approvalRequests).where(eq(approvalRequests.toolExecutionId, executionId)).get()
+        if (!run || run.status !== 'paused' || !execution || execution.taskRunId !== run.id || execution.toolName !== 'run_process'
+          || execution.status !== 'executing' || !execution.processRecoveryRequired || execution.generation === run.generation || approval?.status !== 'executing') throw new Error('进程恢复对象不可用')
+        const now = new Date().toISOString()
+        const next = tx.update(toolExecutions).set({ status: 'cancelled', processRecoveryRequired: false,
+          resultSummary: 'CEO 已确认人工停止并核验遗留进程；应用未验证操作系统进程状态', updatedAt: now }).where(eq(toolExecutions.id, executionId)).returning().get()!
+        tx.update(approvalRequests).set({ status: 'cancelled', decidedAt: now }).where(eq(approvalRequests.id, approval.id)).run()
+        tx.insert(auditEvents).values(toolAuditEvent(run.channelId, next)).run()
+        tx.insert(auditEvents).values({ id: randomUUID(), channelId: run.channelId, taskRunId: run.id,
+          eventType: 'process_recovery_acknowledged', metadataJson: JSON.stringify({ toolExecutionId: executionId, confirmation: 'manually_stopped_and_verified', osStateVerifiedByApplication: false }), createdAt: now }).run()
+      })
+    },
     async recoverRunningTaskRuns(): Promise<number> {
       const timestamp = new Date().toISOString()
       return client.db.transaction((tx) => {
@@ -1015,6 +1032,16 @@ export function createRepositories(client: DatabaseClient): Repositories {
             metadataJson: JSON.stringify({ reason: 'restart_recovery' }),
             createdAt: timestamp,
           }).run()
+        }
+        const orphans = tx.select({ execution: toolExecutions, run: taskRuns }).from(toolExecutions)
+          .innerJoin(taskRuns, eq(taskRuns.id, toolExecutions.taskRunId))
+          .innerJoin(approvalRequests, eq(approvalRequests.toolExecutionId, toolExecutions.id))
+          .where(and(eq(taskRuns.status, 'paused'), eq(toolExecutions.toolName, 'run_process'), eq(toolExecutions.status, 'executing'),
+            eq(approvalRequests.status, 'executing'), eq(toolExecutions.processRecoveryRequired, false))).all()
+        for (const { execution, run } of orphans) {
+          tx.update(toolExecutions).set({ processRecoveryRequired: true }).where(eq(toolExecutions.id, execution.id)).run()
+          tx.insert(auditEvents).values({ id: randomUUID(), channelId: run.channelId, taskRunId: run.id,
+            eventType: 'process_recovery_required', metadataJson: JSON.stringify({ toolExecutionId: execution.id }), createdAt: timestamp }).run()
         }
         return runningRuns.length
       })

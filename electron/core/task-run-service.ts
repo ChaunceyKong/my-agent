@@ -12,6 +12,7 @@ export interface TaskRunService {
   trackEffect<T>(id: string, effect: () => Promise<T>): Promise<T>
   pauseTaskRun(id: string, reason: string, expectedGeneration?: number): Promise<TaskRun>
   resumeTaskRun(id: string, agentId?: string): Promise<TaskRun>
+  acknowledgeProcessRecovery(id: string, executionId: string): Promise<void>
 }
 
 export function createTaskRunService(repositories: Repositories, cleanupTimeoutMs = 5_000): TaskRunService {
@@ -51,6 +52,10 @@ export function createTaskRunService(repositories: Repositories, cleanupTimeoutM
     async resumeTaskRun(id, agentId) {
       if (stopping.has(id) || effects.get(id)?.size) throw new Error('任务效果仍在清理')
       return repositories.resumeTaskRun(id, agentId)
+    },
+    async acknowledgeProcessRecovery(id, executionId) {
+      if (stopping.has(id) || effects.get(id)?.size) throw new Error('任务效果仍在清理')
+      await repositories.acknowledgeProcessRecovery(id, executionId)
     },
     async trackEffect(id, effect) {
       // Register before invoking the effect so cancellation cannot overlook an in-flight claim.

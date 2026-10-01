@@ -29,7 +29,7 @@ beforeEach(() => {
     models: { list: vi.fn().mockResolvedValue([model]), save: vi.fn().mockResolvedValue({ ...model, id: 'm2' }) },
     messages: { list: vi.fn().mockResolvedValue([]) },
     consent: { has: vi.fn().mockResolvedValue(true), grant: vi.fn().mockResolvedValue(undefined) },
-    tasks: { list: vi.fn().mockResolvedValue([]), send: vi.fn().mockResolvedValue({ taskRunId: 'run-1' }), cancel: vi.fn().mockResolvedValue(undefined), continue: vi.fn(), assign: vi.fn(), terminate: vi.fn(), interrupt: vi.fn() },
+    tasks: { list: vi.fn().mockResolvedValue([]), send: vi.fn().mockResolvedValue({ taskRunId: 'run-1' }), cancel: vi.fn().mockResolvedValue(undefined), continue: vi.fn(), assign: vi.fn(), terminate: vi.fn(), interrupt: vi.fn(), acknowledgeProcessRecovery: vi.fn() },
     events: { onStream: vi.fn((listener) => { emitStream = listener; return unsubscribe }) },
   }
   window.agentTeam = api

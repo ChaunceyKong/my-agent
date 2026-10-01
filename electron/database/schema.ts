@@ -153,6 +153,7 @@ export const toolExecutions = sqliteTable('tool_executions', {
   requestHash: text('request_hash').notNull(),
   policySnapshotJson: text('policy_snapshot_json').notNull(),
   overwriteTargetIdentityJson: text('overwrite_target_identity_json'),
+  processRecoveryRequired: integer('process_recovery_required', { mode: 'boolean' }).notNull().default(false),
   status: text('status').$type<ToolExecutionStatus>().notNull(),
   resultSummary: text('result_summary'),
   createdAt: text('created_at').notNull(),
@@ -464,6 +465,12 @@ export function migrate(sqlite: Database.Database): void {
     sqlite.transaction(() => {
       sqlite.exec('ALTER TABLE model_configs ADD COLUMN context_window INTEGER; ALTER TABLE model_configs ADD COLUMN max_output_tokens INTEGER; CREATE UNIQUE INDEX session_summaries_prefix_idx ON session_summaries(task_run_id, covered_through_seq)')
       sqlite.pragma('user_version = 14')
+    })()
+  }
+  if (Number(sqlite.pragma('user_version', { simple: true })) < 15) {
+    sqlite.transaction(() => {
+      sqlite.exec('ALTER TABLE tool_executions ADD COLUMN process_recovery_required INTEGER NOT NULL DEFAULT 0')
+      sqlite.pragma('user_version = 15')
     })()
   }
 }

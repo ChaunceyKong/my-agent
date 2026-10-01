@@ -11,6 +11,7 @@ export enum IpcChannel {
   TaskRunAssign = 'task-run:assign',
   TaskRunTerminate = 'task-run:terminate',
   TaskRunInterrupt = 'task-run:interrupt',
+  TaskRunAcknowledgeProcessRecovery = 'task-run:acknowledge-process-recovery',
   ModelSave = 'model:save',
   ModelList = 'model:list',
   MessageStream = 'message:stream',

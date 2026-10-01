@@ -57,6 +57,7 @@ const api: AgentTeamApi = {
     assign: (taskRunId, agentId) => ipcRenderer.invoke(IpcChannel.TaskRunAssign, taskRunId, agentId),
     terminate: (taskRunId) => ipcRenderer.invoke(IpcChannel.TaskRunTerminate, taskRunId),
     interrupt: (taskRunId, input) => ipcRenderer.invoke(IpcChannel.TaskRunInterrupt, taskRunId, input),
+    acknowledgeProcessRecovery: (taskRunId, toolExecutionId, confirmation) => ipcRenderer.invoke(IpcChannel.TaskRunAcknowledgeProcessRecovery, taskRunId, toolExecutionId, confirmation),
   },
   messages: {
     list: (channelId: string) => ipcRenderer.invoke(IpcChannel.MessageList, channelId),

@@ -47,6 +47,17 @@ function unchanged(path: string, expected: Stats): void {
     || relative(path, realpathSync(path)) !== '') throw new FileToolError('FILE_CHANGED', '文件路径已变化')
 }
 
+async function captureTemporaryIdentity(file: Awaited<ReturnType<typeof open>>, path: string): Promise<Stats> {
+  const handle = await file.stat()
+  const current = await lstat(path)
+  if (current.isSymbolicLink() || !current.isFile() || handle.ino !== current.ino
+    || relative(path, realpathSync(path)) !== '') throw new FileToolError('FILE_CHANGED', '临时文件已变化')
+  // Electron on Windows can report a different `dev` for FileHandle.stat() than
+  // lstat(). The matching inode binds the handle to this path; retain the path
+  // identity for subsequent race checks so both observations use one API.
+  return current
+}
+
 function targetIdentity(info: Stats): OverwriteTargetIdentity {
   return { dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs }
 }
@@ -103,7 +114,7 @@ export function createToolEngine(repositories: Repositories, approval?: {
     const file = await open(temporary, 'wx', 0o600)
     let identity: Stats | undefined
     try {
-      identity = await file.stat()
+      identity = await captureTemporaryIdentity(file, temporary)
       // Recheck the parent after opening and before putting any body into the handle.
       await resolveSafeWritePath(root, path)
       unchanged(target.parent, parent)

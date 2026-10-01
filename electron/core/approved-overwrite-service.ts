@@ -10,6 +10,13 @@ const names = (value: string, suffix: '.tmp' | '.backup') => new RegExp(`^\\.age
 const inode = (actual: Stats, expected: OverwriteTargetIdentity) => actual.isFile() && !actual.isSymbolicLink() && actual.dev === expected.dev && actual.ino === expected.ino
 const same = (actual: Stats, expected: OverwriteTargetIdentity) => inode(actual, expected) && actual.size === expected.size && actual.mtimeMs === expected.mtimeMs && actual.ctimeMs === expected.ctimeMs
 function unchanged(path: string, expected: Stats) { const current = lstatSync(path); if (current.isSymbolicLink() || current.dev !== expected.dev || current.ino !== expected.ino || relative(path, realpathSync(path)) !== '') throw new FileToolError('FILE_CHANGED', '文件路径已变化') }
+async function captureTemporaryIdentity(file: Awaited<ReturnType<typeof open>>, path: string): Promise<Stats> {
+  const handle = await file.stat(); const current = await lstat(path)
+  if (current.isSymbolicLink() || !current.isFile() || handle.ino !== current.ino || relative(path, realpathSync(path)) !== '') throw new FileToolError('FILE_CHANGED', '临时文件已变化')
+  // Electron on Windows can report FileHandle.stat().dev differently from lstat().
+  // Inode equality binds the open handle; later checks deliberately keep lstat identity.
+  return current
+}
 function parse(execution: ToolExecution): { path: string; content: string; old: OverwriteTargetIdentity } {
   try { const input = JSON.parse(execution.inputJson) as Record<string, unknown>; const old = JSON.parse(execution.overwriteTargetIdentityJson ?? '') as Record<string, unknown>
     if (Object.keys(input).length !== 2 || typeof input.path !== 'string' || typeof input.content !== 'string' || !['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every((key) => typeof old[key] === 'number' && Number.isFinite(old[key]))) throw new Error()
@@ -44,8 +51,9 @@ export function createApprovedOverwriteService(repositories: Repositories, clock
   async function stage(root: string, publication: OverwritePublication, input: ReturnType<typeof parse>) {
     const target = await resolveSafeWritePath(root, input.path); if (!target.exists || !same(await lstat(target.path), input.old)) throw new FileToolError('FILE_CHANGED', '目标文件已变化')
     const parent = await lstat(target.parent); const path = join(target.parent, publication.temporaryRelativePath); const file = await open(path, 'wx', 0o600)
-    try { const info = await file.stat(); await file.writeFile(input.content, 'utf8'); await file.sync(); await file.close(); unchanged(target.parent, parent); unchanged(path, info); if (!same(await lstat(target.path), input.old)) throw new FileToolError('FILE_CHANGED', '目标文件已变化')
-      return repositories.markOverwriteStaged(publication.executionId, JSON.stringify({ dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs }))
+    try { const info = await captureTemporaryIdentity(file, path); await file.writeFile(input.content, 'utf8'); await file.sync(); await file.close(); unchanged(target.parent, parent); unchanged(path, info); if (!same(await lstat(target.path), input.old)) throw new FileToolError('FILE_CHANGED', '目标文件已变化')
+      const staged = await lstat(path)
+      return repositories.markOverwriteStaged(publication.executionId, JSON.stringify({ dev: staged.dev, ino: staged.ino, size: staged.size, mtimeMs: staged.mtimeMs, ctimeMs: staged.ctimeMs }))
     } finally { await file.close() }
   }
   async function publish(root: string, publication: OverwritePublication, input: ReturnType<typeof parse>) {

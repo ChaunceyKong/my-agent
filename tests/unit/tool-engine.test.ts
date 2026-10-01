@@ -74,6 +74,19 @@ it('publishes a complete new file atomically and persists safe hash/policy/audit
   expect(JSON.stringify(events)).not.toContain(root.replaceAll('\\', '\\\\'))
 })
 
+it('uses path identity after binding the open temporary handle on Windows', async () => {
+  const realOpen = (await vi.importActual<typeof fsp>('node:fs/promises')).open
+  vi.mocked(fsp.open).mockImplementationOnce(async (...args) => {
+    const file = await realOpen(...args)
+    const stat = file.stat.bind(file)
+    vi.spyOn(file, 'stat').mockImplementationOnce(async () => ({ ...(await stat()), dev: 0 } as fs.Stats))
+    return file
+  })
+  const { execution } = await engine.execute(context, request())
+  expect(execution.status).toBe('completed')
+  expect(await fsp.readFile(join(root, 'drafts/article.md'), 'utf8')).toBe('private draft body')
+})
+
 it('requires approval for an existing file without changing it', async () => {
   await fsp.writeFile(join(root, 'drafts/article.md'), 'original')
   const { execution } = await engine.execute(context, request())

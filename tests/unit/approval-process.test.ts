@@ -131,6 +131,22 @@ it('allows exactly one concurrent process claim and leaves the loser without a f
   expect((await repositories.listAuditEvents((await repositories.getTaskRun(context.taskRunId))!.channelId)).filter((event) => event.eventType === 'tool_failed')).toEqual([])
 })
 
+it.each([
+  { absolutePath: 'C:\\other-tool.exe', argumentPolicyJson: '["ok"]' },
+  { absolutePath: 'C:\\tool.exe', argumentPolicyJson: '["changed"]' },
+])('rejects an approved process when its registration is edited before the effect boundary', async (replacement) => {
+  const service = createApprovalService(repositories, () => now)
+  const engine = createToolEngine(repositories, service)
+  await repositories.saveRegisteredExecutable({ id: 'echo', absolutePath: 'C:\\tool.exe', isEnabled: true, argumentPolicyJson: '["ok"]' })
+  const execution = (await engine.execute(context, { toolName: 'run_process', input: { executableId: 'echo', args: ['ok'] } })).execution
+  const approval = (await repositories.getApprovalForToolExecution(execution.id))!
+  await service.approve(approval.id, approval.requestHash)
+  await repositories.saveRegisteredExecutable({ id: 'echo', isEnabled: true, ...replacement })
+  await expect(repositories.claimApprovedProcess(approval.id, now.toISOString())).rejects.toThrow('不可用')
+  expect(await repositories.getApprovalRequest(approval.id)).toMatchObject({ status: 'cancelled' })
+  expect(await repositories.getToolExecution(execution.id)).toMatchObject({ status: 'cancelled' })
+})
+
 it('binds an existing write to one immutable approval and writes only after explicit execution', async () => {
   const service = createApprovalService(repositories, () => now)
   const engine = createToolEngine(repositories, service)
@@ -150,6 +166,19 @@ it('binds an existing write to one immutable approval and writes only after expl
   expect(await readFile(path, 'utf8')).toBe('replacement')
   expect((await repositories.getToolExecution(execution.id))!.status).toBe('completed')
   await expect(tools.runApproved(approval.id)).rejects.toThrow('不可用')
+})
+
+it('completes the paused task after an explicit approved effect so the channel accepts another message', async () => {
+  const service = createApprovalService(repositories, () => now)
+  const engine = createToolEngine(repositories, service)
+  await writeFile(join(directory, 'next.md'), 'original')
+  const execution = (await engine.execute(context, { toolName: 'write_file', input: { path: 'next.md', content: 'replacement' } })).execution
+  const approval = (await repositories.getApprovalForToolExecution(execution.id))!
+  await service.approve(approval.id, approval.requestHash)
+  await createProcessToolService(repositories, createTaskRunService(repositories), () => now).runApproved(approval.id)
+  expect(await repositories.getTaskRun(context.taskRunId)).toMatchObject({ status: 'completed' })
+  const finished = (await repositories.getTaskRun(context.taskRunId))!
+  await expect(repositories.createStartedTaskRun({ channelId: finished.channelId, modelConfigId: finished.modelConfigId, content: 'next message' })).resolves.toMatchObject({ status: 'running' })
 })
 
 it('does not overwrite after expiry, cancellation, policy revocation, or a stale target', async () => {
@@ -182,6 +211,9 @@ it('does not overwrite after expiry, cancellation, policy revocation, or a stale
   expect(await readFile(stale.path, 'utf8')).toBe('racer')
   expect((await repositories.getToolExecution(stale.execution.id))!.status).toBe('failed')
 
+  const afterStale = await repositories.getTaskRun(context.taskRunId)
+  const afterStaleRun = await repositories.createStartedTaskRun({ channelId: afterStale!.channelId, modelConfigId: afterStale!.modelConfigId, content: 'after stale' })
+  context = { ...context, taskRunId: afterStaleRun.id, generation: afterStaleRun.generation }
   const revoked = await makeApproved('revoked')
   await repositories.saveChannelAgent({ channelId: next.channelId, agentId: context.agentId, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
   await expect(tools.runApproved(revoked.approval.id)).rejects.toThrow('不可用')

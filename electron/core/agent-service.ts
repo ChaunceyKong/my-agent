@@ -1,7 +1,7 @@
 import type { Agent, AgentEditorInput, AgentSummary, SaveChannelAgentInput, ToolName, ToolPermissions } from '../../shared/types'
 import type { Repositories } from '../database/repositories'
 
-const toolNames: ToolName[] = ['list_dir', 'read_file', 'search_files', 'write_file', 'replace_file_content', 'run_process']
+const toolNames: ToolName[] = ['list_dir', 'read_file', 'search_files', 'write_file', 'run_process']
 
 function requireText(value: unknown, label: string, allowEmpty = false): string {
   if (typeof value !== 'string' || (!allowEmpty && !value.trim())) throw new Error(`${label}无效`)

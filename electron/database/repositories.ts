@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { win32 } from 'node:path'
 import { and, asc, eq, inArray, sql, type SQL } from 'drizzle-orm'
 import type {
   Agent,
@@ -53,8 +54,35 @@ function currentPolicy(tx: Transaction, run: TaskRun, agentId: string, toolName:
     version: 1, workspacePath: project.workspacePath, agentId,
     defaultToolPermissions: sortedPermissions(agent.defaultToolPermissions),
     toolPermissionsOverride: member.toolPermissionsOverride === null ? null : sortedPermissions(member.toolPermissionsOverride),
+    registeredExecutable: null,
   }
   return JSON.stringify(snapshot)
+}
+
+function executableIdentity(executable: RegisteredExecutable) {
+  return {
+    canonicalPath: win32.normalize(executable.absolutePath).toLocaleLowerCase('en-US'),
+    isEnabled: executable.isEnabled,
+    argumentPolicyHash: createHash('sha256').update(executable.argumentPolicyJson, 'utf8').digest('hex'),
+  }
+}
+
+function policyForRequest(tx: Transaction, run: TaskRun, agentId: string, request: ToolRequest): string | undefined {
+  const base = currentPolicy(tx, run, agentId, request.toolName)
+  if (!base || request.toolName !== 'run_process') return base
+  const snapshot = JSON.parse(base) as ToolPolicySnapshot
+  const executable = tx.select().from(registeredExecutables).where(eq(registeredExecutables.id, request.input.executableId)).get()
+  snapshot.registeredExecutable = executable ? executableIdentity(executable) : null
+  return JSON.stringify(snapshot)
+}
+
+function currentExecutionPolicy(tx: Transaction, run: TaskRun, execution: ToolExecution): string | undefined {
+  try {
+    return policyForRequest(tx, run, execution.agentId, {
+      toolName: execution.toolName,
+      input: JSON.parse(execution.inputJson),
+    } as ToolRequest)
+  } catch { return undefined }
 }
 
 function invalidateTools(tx: Transaction, run: TaskRun): void {
@@ -63,7 +91,7 @@ function invalidateTools(tx: Transaction, run: TaskRun): void {
     .returning().all()
   for (const execution of invalidated) {
     tx.update(approvalRequests).set({ status: 'cancelled', decidedAt: new Date().toISOString() })
-      .where(and(eq(approvalRequests.toolExecutionId, execution.id), eq(approvalRequests.status, 'pending'))).run()
+      .where(and(eq(approvalRequests.toolExecutionId, execution.id), inArray(approvalRequests.status, ['pending', 'approved']))).run()
     tx.insert(auditEvents).values(toolAuditEvent(run.channelId, execution)).run()
   }
 }
@@ -73,12 +101,12 @@ function invalidateChangedToolPolicies(tx: Transaction, scope: SQL): void {
     .innerJoin(taskRuns, eq(taskRuns.id, toolExecutions.taskRunId))
     .where(and(scope, inArray(toolExecutions.status, ['executing', 'waiting_approval']), sql`${toolExecutions.id} NOT IN (SELECT execution_id FROM overwrite_publications WHERE state = 'effect_claimed')`)).all()
   for (const { execution, run } of pending) {
-    if (currentPolicy(tx, run, execution.agentId, execution.toolName) === execution.policySnapshotJson) continue
+    if (currentExecutionPolicy(tx, run, execution) === execution.policySnapshotJson) continue
     const cancelled = tx.update(toolExecutions)
       .set({ status: 'cancelled', resultSummary: '任务操作已失效', updatedAt: new Date().toISOString() })
       .where(eq(toolExecutions.id, execution.id)).returning().get()!
     tx.update(approvalRequests).set({ status: 'cancelled', decidedAt: new Date().toISOString() })
-      .where(and(eq(approvalRequests.toolExecutionId, execution.id), eq(approvalRequests.status, 'pending'))).run()
+      .where(and(eq(approvalRequests.toolExecutionId, execution.id), inArray(approvalRequests.status, ['pending', 'approved']))).run()
     tx.insert(auditEvents).values(toolAuditEvent(run.channelId, cancelled)).run()
   }
 }
@@ -164,7 +192,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
       return client.db.transaction((tx) => {
         const run = tx.select().from(taskRuns).where(eq(taskRuns.id, context.taskRunId)).get()
         if (!run || run.status !== 'running' || run.generation !== context.generation) throw new Error('任务操作已失效')
-        const policySnapshotJson = currentPolicy(tx, run, context.agentId, request.toolName)
+        const policySnapshotJson = policyForRequest(tx, run, context.agentId, request)
         if (!policySnapshotJson) throw new Error('工具未授权')
         if (context.messageId) {
           const message = tx.select().from(messages).where(eq(messages.id, context.messageId)).get()
@@ -207,7 +235,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         if (current.status !== 'executing') return current
         const run = tx.select().from(taskRuns).where(eq(taskRuns.id, current.taskRunId)).get()!
         const valid = run.status === 'running' && run.generation === current.generation
-          && currentPolicy(tx, run, current.agentId, current.toolName) === current.policySnapshotJson
+          && currentExecutionPolicy(tx, run, current) === current.policySnapshotJson
         const result: ToolOutcome = valid ? outcome() : { status: 'cancelled', riskLevel: current.riskLevel, resultSummary: '任务操作已失效' }
         const next = tx.update(toolExecutions).set({ ...result, updatedAt: new Date().toISOString() })
           .where(eq(toolExecutions.id, id)).returning().get()!
@@ -222,7 +250,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         if (!execution || execution.status !== 'executing') throw new Error('审批对象不可用')
         const run = tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
         if (!run || run.status !== 'running' || run.generation !== execution.generation
-          || currentPolicy(tx, run, execution.agentId, execution.toolName) !== execution.policySnapshotJson) throw new Error('审批对象已失效')
+          || currentExecutionPolicy(tx, run, execution) !== execution.policySnapshotJson) throw new Error('审批对象已失效')
         const timestamp = new Date().toISOString()
         const approval: ApprovalRequest = { id: randomUUID(), toolExecutionId, requestHash: execution.requestHash,
           generation: execution.generation, policySnapshotJson: execution.policySnapshotJson, status: 'pending', expiresAt, decidedAt: null, createdAt: timestamp }
@@ -241,7 +269,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         if (!execution || execution.status !== 'executing' || execution.toolName !== 'write_file') throw new Error('审批对象不可用')
         const run = tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
         if (!run || run.status !== 'running' || run.generation !== execution.generation
-          || currentPolicy(tx, run, execution.agentId, execution.toolName) !== execution.policySnapshotJson) throw new Error('审批对象已失效')
+          || currentExecutionPolicy(tx, run, execution) !== execution.policySnapshotJson) throw new Error('审批对象已失效')
         const timestamp = new Date().toISOString()
         const approval: ApprovalRequest = { id: randomUUID(), toolExecutionId, requestHash: execution.requestHash,
           generation: execution.generation, policySnapshotJson: execution.policySnapshotJson, status: 'pending', expiresAt, decidedAt: null, createdAt: timestamp }
@@ -278,7 +306,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const valid = execution?.status === 'waiting_approval' && run?.status === 'running' && run.generation === approval.generation
           && execution.generation === approval.generation && execution.requestHash === approval.requestHash
           && execution.policySnapshotJson === approval.policySnapshotJson
-          && currentPolicy(tx, run, execution.agentId, execution.toolName) === approval.policySnapshotJson
+          && currentExecutionPolicy(tx, run, execution) === approval.policySnapshotJson
         const status: ApprovalRequestStatus = new Date(approval.expiresAt).getTime() <= new Date(now).getTime() ? 'expired' : valid ? decision : 'cancelled'
         const next = tx.update(approvalRequests).set({ status, decidedAt: now }).where(and(eq(approvalRequests.id, id), eq(approvalRequests.status, 'pending'))).returning().get()
         if (!next) throw new Error('审批请求不可用')
@@ -311,19 +339,29 @@ export function createRepositories(client: DatabaseClient): Repositories {
           }
           return undefined
         }
+        const invalidate = () => {
+          if (approval?.status === 'approved') tx.update(approvalRequests).set({ status: 'cancelled', decidedAt: now }).where(eq(approvalRequests.id, id)).run()
+          if (execution && run && execution.status === 'executing') {
+            const cancelled = tx.update(toolExecutions).set({ status: 'cancelled', resultSummary: '审批目标已失效', updatedAt: now })
+              .where(eq(toolExecutions.id, execution.id)).returning().get()
+            if (cancelled) tx.insert(auditEvents).values(toolAuditEvent(run.channelId, cancelled)).run()
+          }
+        }
         if (!approval || !execution || !run || approval.status !== 'approved' || execution.status !== 'executing'
           || execution.toolName !== 'run_process' || execution.requestHash !== approval.requestHash
           || execution.generation !== approval.generation || execution.policySnapshotJson !== approval.policySnapshotJson) throw new Error('审批请求不可用')
         if (new Date(approval.expiresAt).getTime() <= new Date(now).getTime()) return expire()
         if (run.status !== 'running' || run.generation !== approval.generation
-          || currentPolicy(tx, run, execution.agentId, execution.toolName) !== approval.policySnapshotJson) throw new Error('审批请求不可用')
+          || currentExecutionPolicy(tx, run, execution) !== approval.policySnapshotJson) {
+          invalidate(); throw new Error('审批请求不可用')
+        }
         let input: { executableId?: unknown; args?: unknown }
         let snapshot: { workspacePath?: unknown }
-        try { input = JSON.parse(execution.inputJson); snapshot = JSON.parse(execution.policySnapshotJson) } catch { throw new Error('审批请求不可用') }
+        try { input = JSON.parse(execution.inputJson); snapshot = JSON.parse(execution.policySnapshotJson) } catch { invalidate(); throw new Error('审批请求不可用') }
         if (typeof input.executableId !== 'string' || !Array.isArray(input.args) || input.args.some((arg) => typeof arg !== 'string')
-          || typeof snapshot.workspacePath !== 'string') throw new Error('审批请求不可用')
+          || typeof snapshot.workspacePath !== 'string') { invalidate(); throw new Error('审批请求不可用') }
         const executable = tx.select().from(registeredExecutables).where(eq(registeredExecutables.id, input.executableId)).get()
-        if (!executable?.isEnabled) throw new Error('登记可执行文件不可用')
+        if (!executable?.isEnabled) { invalidate(); throw new Error('登记可执行文件不可用') }
         const claimed = tx.update(approvalRequests).set({ status: 'executing', decidedAt: now })
           .where(and(eq(approvalRequests.id, id), eq(approvalRequests.status, 'approved'))).returning().get()
         if (!claimed) throw new Error('审批请求不可用')
@@ -351,7 +389,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
           || execution.generation !== approval.generation || execution.policySnapshotJson !== approval.policySnapshotJson) throw new Error('审批请求不可用')
         if (new Date(approval.expiresAt).getTime() <= new Date(now).getTime()) return expire()
         if (run.status !== 'running' || run.generation !== approval.generation
-          || currentPolicy(tx, run, execution.agentId, execution.toolName) !== approval.policySnapshotJson) throw new Error('审批请求不可用')
+          || currentExecutionPolicy(tx, run, execution) !== approval.policySnapshotJson) throw new Error('审批请求不可用')
         let input: { path?: unknown; content?: unknown }
         let snapshot: { workspacePath?: unknown }
         try { input = JSON.parse(execution.inputJson); snapshot = JSON.parse(execution.policySnapshotJson) } catch { throw new Error('审批请求不可用') }
@@ -385,7 +423,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
         if (!publication || publication.state !== 'staged' || !execution || !run || execution.status !== 'executing'
           || run.status !== 'running' || run.generation !== execution.generation
-          || currentPolicy(tx, run, execution.agentId, execution.toolName) !== execution.policySnapshotJson) throw new Error('任务操作已失效')
+          || currentExecutionPolicy(tx, run, execution) !== execution.policySnapshotJson) throw new Error('任务操作已失效')
         const next = tx.update(overwritePublications).set({ state: 'publishing', updatedAt: new Date().toISOString() })
           .where(and(eq(overwritePublications.executionId, executionId), eq(overwritePublications.state, 'staged'))).returning().get()
         if (!next) throw new Error('覆盖发布状态不可用')
@@ -398,7 +436,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const publication = tx.select().from(overwritePublications).where(eq(overwritePublications.executionId, executionId)).get()
         const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, executionId)).get()
         const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
-        if (!publication || publication.state !== 'publishing' || !execution || !run || execution.status !== 'executing' || run.status !== 'running' || run.generation !== execution.generation || currentPolicy(tx, run, execution.agentId, execution.toolName) !== execution.policySnapshotJson) throw new Error('任务操作已失效')
+        if (!publication || publication.state !== 'publishing' || !execution || !run || execution.status !== 'executing' || run.status !== 'running' || run.generation !== execution.generation || currentExecutionPolicy(tx, run, execution) !== execution.policySnapshotJson) throw new Error('任务操作已失效')
         const next = tx.update(overwritePublications).set({ state: 'effect_claimed', updatedAt: new Date().toISOString() }).where(and(eq(overwritePublications.executionId, executionId), eq(overwritePublications.state, 'publishing'))).returning().get()
         if (!next) throw new Error('覆盖发布状态不可用')
         return next
@@ -490,8 +528,14 @@ export function createRepositories(client: DatabaseClient): Repositories {
 
     async saveRegisteredExecutable(input) {
       const timestamp = new Date().toISOString()
-      return client.db.insert(registeredExecutables).values({ ...input, createdAt: timestamp, updatedAt: timestamp })
-        .onConflictDoUpdate({ target: registeredExecutables.id, set: { ...input, updatedAt: timestamp } }).returning().get()
+      return client.db.transaction((tx) => {
+        const saved = tx.insert(registeredExecutables).values({ ...input, createdAt: timestamp, updatedAt: timestamp })
+          .onConflictDoUpdate({ target: registeredExecutables.id, set: { ...input, updatedAt: timestamp } }).returning().get()
+        // A registration id is not a capability. Editing it changes the immutable
+        // approval target, so pending or merely approved process requests fail closed.
+        invalidateChangedToolPolicies(tx, eq(toolExecutions.toolName, 'run_process'))
+        return saved
+      })
     },
 
     async advanceTaskRunGeneration(id) {

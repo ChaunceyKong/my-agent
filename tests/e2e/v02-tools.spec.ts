@@ -108,6 +108,15 @@ test('keeps an existing file unchanged until an overwrite approval is explicitly
   })
   expect(postExecution[0]).toMatchObject({ toolName: 'write_file', status: 'completed' })
   expect(provider.requests).toHaveLength(1)
+
+  // Explicit effects terminate the paused run instead of trapping the channel.
+  await desktop.page.reload()
+  await desktop.page.getByLabel('消息内容', { exact: true }).fill('继续下一项任务')
+  await desktop.page.getByRole('button', { name: '发送消息', exact: true }).click()
+  await expect.poll(() => provider.requests.length).toBe(2)
+  provider.delta('下一项任务已开始。')
+  provider.complete()
+  await expect(desktop.page.getByText('下一项任务已开始。', { exact: true })).toBeVisible()
 })
 
 test('rejects dangerous registration and refuses an unregistered process without spawning it', async ({ desktop, provider }) => {

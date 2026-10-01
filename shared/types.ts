@@ -39,7 +39,7 @@ export interface CreateChannelInput {
   icon?: string
 }
 
-export type ToolName = 'list_dir' | 'read_file' | 'search_files' | 'write_file' | 'replace_file_content' | 'run_process'
+export type ToolName = 'list_dir' | 'read_file' | 'search_files' | 'write_file' | 'run_process'
 // Missing permissions deny access. Channel overrides are intersected with Agent defaults.
 export type ToolPermissions = Partial<Record<ToolName, boolean>>
 
@@ -100,6 +100,8 @@ export interface ToolPolicySnapshot {
   agentId: string
   defaultToolPermissions: ToolPermissions
   toolPermissionsOverride: ToolPermissions | null
+  /** Main-generated immutable identity of the process registration, when relevant. */
+  registeredExecutable: { canonicalPath: string; isEnabled: boolean; argumentPolicyHash: string } | null
 }
 
 export type ApprovalRequestStatus = 'pending' | 'approved' | 'executing' | 'rejected' | 'expired' | 'cancelled'

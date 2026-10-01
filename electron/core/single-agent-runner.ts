@@ -37,6 +37,8 @@ export function createSingleAgentRunner(deps: {
         return current?.status === 'running' && current.generation === input.generation && current.currentTurnId === input.turnId
           && active?.memberRevision === input.active.memberRevision && active.modelConfigId === input.active.modelConfigId
           && active.agent.systemPrompt === input.active.agent.systemPrompt
+          && active.agent.modelConfigId === input.active.agent.modelConfigId
+          && JSON.stringify(active.agent.defaultToolPermissions) === JSON.stringify(input.active.agent.defaultToolPermissions)
           && await deps.taskRuns.canAcceptChunk(input.taskRunId, input.generation)
       }
       const run = await deps.repositories.getTaskRun(input.taskRunId)
@@ -60,6 +62,7 @@ export function createSingleAgentRunner(deps: {
         let streamErrorEmitted = false
         let streamError = '模型流响应无效，任务已安全停止。'
         try {
+          if (!await currentTurn()) return { status: 'stale' }
           await deps.modelClient.streamChat({ projectId: input.projectId, modelConfigId: input.active.modelConfigId, taskRunId: current.id, messages, tools: TOOLS }, async (event) => {
             if (!await currentTurn()) return
             if (event.type === 'delta') reply += event.content ?? ''
@@ -74,7 +77,7 @@ export function createSingleAgentRunner(deps: {
               streamErrorEmitted = true
               await input.onEvent(event)
             }
-          })
+          }, currentTurn)
         } catch {
           streamFailed = true
           streamErrorEmitted = true

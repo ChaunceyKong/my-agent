@@ -10,6 +10,7 @@ import { createSerialOrchestrator } from '../../electron/core/serial-orchestrato
 import { createApprovalService } from '../../electron/core/approval-service'
 import { createProcessToolService } from '../../electron/core/process-tool-service'
 import { createToolEngine } from '../../electron/core/tool-engine'
+import { createModelClient } from '../../electron/core/model-client'
 import { registerHandlers } from '../../electron/ipc/register-handlers'
 import { IpcChannel } from '../../shared/ipc-channels'
 import type { Agent, StreamEvent } from '../../shared/types'
@@ -115,6 +116,56 @@ it('rejects a stale tool effect when the selected Agent is revoked then re-enabl
   expect(await repositories.listToolExecutions(run.id)).toEqual([])
 })
 
+it.each(['membership', 'prompt', 'model', 'permissions'] as const)('never sends Channel history after delayed consent changes the selected Agent %s', async (change) => {
+  let release!: () => void
+  let entered!: () => void
+  const waiting = new Promise<void>((resolve) => { entered = resolve })
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let consentCalls = 0
+  const fetchImpl = vi.fn()
+  const modelClient = createModelClient({ repositories, taskRuns, fetch: fetchImpl,
+    consent: {
+      recordCloudConsent: vi.fn(),
+      requireCloudConsent: async () => { if (++consentCalls === 2) { entered(); await gate } },
+    },
+    crypto: { isEncryptionAvailable: () => true, encryptString: (value) => Buffer.from(value), decryptString: (value) => value.toString() },
+  })
+  const runner = createSingleAgentRunner({ repositories, modelClient, taskRuns, toolEngine: createToolEngine(repositories, createApprovalService(repositories)) })
+  const orchestrator = createSerialOrchestrator({ repositories, modelClient, taskRuns, runner })
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, '@Alpha private history', [tokens()[0]])
+  const running = orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
+  await waiting
+  if (change === 'membership') await repositories.saveChannelAgent({ channelId, agentId: first.id, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  else await repositories.updateAgent(first.id, {
+    name: first.name, avatar: first.avatar, title: first.title,
+    systemPrompt: change === 'prompt' ? 'Changed prompt' : first.systemPrompt,
+    modelConfigId: change === 'model' ? (await repositories.saveModelConfig({ providerPreset: 'openai', baseUrl: 'https://other.test', modelName: 'other', encryptedApiKey: 'key' })).id : first.modelConfigId,
+    defaultToolPermissions: change === 'permissions' ? { write_file: false } : first.defaultToolPermissions,
+  })
+  release()
+  await running
+  expect(fetchImpl).not.toHaveBeenCalled()
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'failed' })
+})
+
+it('does not enter streamChat when the selected Agent is revoked during orchestrator consent', async () => {
+  let release!: () => void
+  let entered!: () => void
+  const waiting = new Promise<void>((resolve) => { entered = resolve })
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const modelClient: any = { requireCloudConsent: vi.fn(async () => { entered(); await gate }), streamChat: vi.fn() }
+  const runner = createSingleAgentRunner({ repositories, modelClient, taskRuns, toolEngine: createToolEngine(repositories, createApprovalService(repositories)) })
+  const orchestrator = createSerialOrchestrator({ repositories, modelClient, taskRuns, runner })
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, '@Alpha private history', [tokens()[0]])
+  const running = orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
+  await waiting
+  await repositories.saveChannelAgent({ channelId, agentId: first.id, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  release()
+  await running
+  expect(modelClient.streamChat).not.toHaveBeenCalled()
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'failed' })
+})
+
 it('keeps pending approval as a Turn barrier and never advances to the next speaker after approval', async () => {
   writeFileSync(join(directory, 'draft.md'), 'original')
   const { orchestrator } = setup(async (_system, emit) => {
@@ -157,4 +208,26 @@ it('routes IPC structured mentions to the serial orchestrator without selecting 
   expect(orchestrator.run).toHaveBeenCalledWith(expect.objectContaining({ taskRunId, projectId, channelId }))
   expect((await repositories.listTaskRunEvents(taskRunId)).filter((event) => event.eventType === 'mention_queued').map((event) => event.agentId)).toEqual([first.id, second.id])
   expect(modelClient.requireCloudConsent).not.toHaveBeenCalled() // Each Turn checks its own model when it starts.
+})
+
+it('routes 0-to-1 membership changes during delayed send consent through the Agent orchestrator', async () => {
+  await repositories.saveChannelAgent({ channelId, agentId: first.id, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  await repositories.saveChannelAgent({ channelId, agentId: second.id, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  let release!: () => void
+  let entered!: () => void
+  const waiting = new Promise<void>((resolve) => { entered = resolve })
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const handlers = new Map<string, (event: unknown, ...args: any[]) => unknown>()
+  const orchestrator = { run: vi.fn().mockResolvedValue(undefined) }
+  const modelClient = { requireCloudConsent: vi.fn(async () => { entered(); await gate }), streamChat: vi.fn() }
+  registerHandlers({ ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
+    dialog: { showOpenDialog: vi.fn() }, repositories, taskRuns, modelClient: modelClient as any, orchestrator: orchestrator as any })
+  const sending = handlers.get(IpcChannel.MessageSend)!({ sender: { isDestroyed: () => false, send: vi.fn() } },
+    { channelId, modelConfigId, content: 'hello' }) as Promise<{ taskRunId: string }>
+  await waiting
+  await repositories.saveChannelAgent({ channelId, agentId: first.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  release()
+  const { taskRunId } = await sending
+  expect(orchestrator.run).toHaveBeenCalledWith(expect.objectContaining({ taskRunId }))
+  expect(modelClient.streamChat).not.toHaveBeenCalled()
 })

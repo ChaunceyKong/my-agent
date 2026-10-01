@@ -40,7 +40,7 @@ export interface ModelClient {
   listModelConfigs(): Promise<ModelConfigSummary[]>
   recordCloudConsent(projectId: string, modelConfigId: string): Promise<void>
   requireCloudConsent(projectId: string, modelConfigId: string): Promise<void>
-  streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void | Promise<void>): Promise<void>
+  streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void | Promise<void>, canSend?: () => Promise<boolean>): Promise<void>
 }
 
 export interface ModelClientDependencies {
@@ -80,7 +80,7 @@ export function createModelClient({
     recordCloudConsent: (projectId, modelConfigId) => consent.recordCloudConsent(projectId, modelConfigId),
     requireCloudConsent: (projectId, modelConfigId) => consent.requireCloudConsent(projectId, modelConfigId),
 
-    async streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void | Promise<void>): Promise<void> {
+    async streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void | Promise<void>, canSend?: () => Promise<boolean>): Promise<void> {
       const controller = new AbortController()
       const unsubscribe = taskRuns.onCancelled(input.taskRunId, () => controller.abort())
       try {
@@ -88,6 +88,7 @@ export function createModelClient({
         await consent.requireCloudConsent(input.projectId, input.modelConfigId)
         const modelConfig = await repositories.getModelConfig(input.modelConfigId)
         if (!modelConfig) throw new Error('Model configuration not found')
+        if (canSend && !await canSend()) return
 
         try {
           controller.signal.throwIfAborted()

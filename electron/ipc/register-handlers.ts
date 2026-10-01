@@ -117,12 +117,12 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
     try {
       const channel = await repositories.getChannel(input.channelId)
       if (!channel || !await repositories.getModelConfig(input.modelConfigId)) throw new Error('群聊或模型配置不存在')
+      if ((await repositories.listTaskRuns(channel.id)).some((run) => ['running', 'cancelling', 'paused'].includes(run.status))) throw new Error('当前群聊已有任务正在运行')
+      if (!(await repositories.listChannelAgents(channel.id)).some((member) => member.isEnabled)) await modelClient.requireCloudConsent(channel.projectId, input.modelConfigId)
       const enabled = (await repositories.listChannelAgents(channel.id)).filter((member) => member.isEnabled)
       if (!enabled.length && input.mentions?.length) throw new Error('群聊没有可提及的 Agent')
       if (enabled.length > 1 && !input.mentions?.length) throw new Error('请先指派下一位 Agent')
       if (enabled.length && !orchestrator) throw new Error('Agent 协作服务不可用')
-      if ((await repositories.listTaskRuns(channel.id)).some((run) => ['running', 'cancelling', 'paused'].includes(run.status))) throw new Error('当前群聊已有任务正在运行')
-      if (!enabled.length) await modelClient.requireCloudConsent(channel.projectId, input.modelConfigId)
       const run = await taskRuns.startTaskRun(channel.id, input.modelConfigId, input.content, input.mentions)
       const sender = (event as { sender: StreamSender }).sender
       if (enabled.length && orchestrator) void orchestrator.run({ taskRunId: run.id, projectId: channel.projectId, channelId: channel.id,
@@ -193,9 +193,20 @@ async function streamReply(
   }
   try {
     const history = await repositories.listMessages(channelId)
+    let routeRevoked = false
     await modelClient.streamChat({ projectId, modelConfigId, taskRunId,
       messages: history.map((message) => ({ role: message.role === 'ceo' ? 'user' : 'assistant', content: message.content })),
-    }, accept)
+    }, accept, async () => {
+      const allowed = await taskRuns.canAcceptChunk(taskRunId)
+        && !(await repositories.listChannelAgents(channelId)).some((member) => member.isEnabled)
+      if (!allowed) routeRevoked = true
+      return allowed
+    })
+    if (routeRevoked && await taskRuns.canAcceptChunk(taskRunId)) {
+      const message = '群聊 Agent 配置已变化，请重新发起任务'
+      const failed = await repositories.transitionTaskRun(taskRunId, 'running', 'failed', { errorMessage: message })
+      if (failed && !sender.isDestroyed()) sender.send(IpcChannel.MessageStream, { taskRunId, type: 'error', content: message })
+    }
   } catch {
     // Never expose credential, storage, or transport exception text through IPC.
     const message = '模型请求失败，请检查配置后重试'

@@ -99,6 +99,28 @@ it('streams from Main, persists reply and terminal state, and returns only safe 
   expect(await invoke(IpcChannel.MessageList, other.id)).toEqual([])
 })
 
+it('blocks the no-Agent request when a member is enabled during delayed model consent', async () => {
+  let release!: () => void
+  let entered!: () => void
+  const waiting = new Promise<void>((resolve) => { entered = resolve })
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let checks = 0
+  const modelClient = createModelClient({ repositories, taskRuns: createTaskRunService(repositories), fetch: fetchImpl,
+    consent: { recordCloudConsent: vi.fn(), requireCloudConsent: async () => { if (++checks === 2) { entered(); await gate } } },
+    crypto: { isEncryptionAvailable: () => true, encryptString: (key) => Buffer.from(key), decryptString: (key) => key.toString() },
+  })
+  registerHandlers({ ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
+    dialog: { showOpenDialog: vi.fn() }, repositories, taskRuns: createTaskRunService(repositories), modelClient })
+  const { taskRunId } = await send()
+  await waiting
+  const agent = await repositories.createAgent({ name: 'Alpha', avatar: null, title: '', systemPrompt: 'Prompt', modelConfigId, defaultToolPermissions: {} })
+  await repositories.saveChannelAgent({ channelId, agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  release()
+  await vi.waitFor(async () => expect(await repositories.getTaskRun(taskRunId)).toMatchObject({ status: 'failed' }))
+  expect(fetchImpl).not.toHaveBeenCalled()
+  expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, expect.objectContaining({ taskRunId, type: 'error' }))
+})
+
 it('rejects duplicate channel sends and suppresses stream events after cancellation', async () => {
   await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: true })
   let resolveFetch!: (response: Response) => void

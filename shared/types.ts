@@ -39,7 +39,7 @@ export interface CreateChannelInput {
   icon?: string
 }
 
-export type ToolName = 'list_dir' | 'read_file' | 'search_files' | 'write_file' | 'run_process'
+export type ToolName = 'list_dir' | 'read_file' | 'search_files' | 'write_file' | 'replace_file_content' | 'run_process'
 // Missing permissions deny access. Channel overrides are intersected with Agent defaults.
 export type ToolPermissions = Partial<Record<ToolName, boolean>>
 
@@ -48,6 +48,7 @@ export type ToolRequest =
   | { toolName: 'read_file'; input: { path: string } }
   | { toolName: 'search_files'; input: { path: string; query: string } }
   | { toolName: 'write_file'; input: { path: string; content: string } }
+  | { toolName: 'replace_file_content'; input: { path: string; content: string } }
   | { toolName: 'run_process'; input: { executableId: string; args: string[] } }
 
 export type ToolExecutionStatus = 'executing' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled'

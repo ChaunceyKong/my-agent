@@ -122,6 +122,10 @@ it('validates untrusted editor and permission fields before persistence', async 
   expect(JSON.stringify(await service.get(agent.id))).not.toContain('INJECTED_KEY')
   await expect(service.saveChannelAgent({ channelId, agentId: agent.id, isEnabled: 'yes', modelConfigOverrideId: null, toolPermissionsOverride: null } as any)).rejects.toThrow()
   await expect(service.saveChannelAgent({ channelId, agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: { write_file: true } })).rejects.toThrow('群聊权限不能超出 Agent 默认权限')
+  const aliasOnly = await service.create({ ...input(), defaultToolPermissions: { write_file: false, replace_file_content: true } })
+  expect(aliasOnly.defaultToolPermissions).toEqual({ write_file: false })
+  const writeOnly = await service.create({ ...input(), defaultToolPermissions: { write_file: true, replace_file_content: false } })
+  expect(writeOnly.defaultToolPermissions).toEqual({ write_file: true })
   expect(await service.listChannelAgents(channelId)).toEqual([])
 })
 

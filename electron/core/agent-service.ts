@@ -12,6 +12,9 @@ function permissions(value: unknown): ToolPermissions {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('工具权限无效')
   const result: ToolPermissions = {}
   for (const [key, enabled] of Object.entries(value)) {
+    // Compatibility alias only: its authority is always write_file and it is never
+    // stored as an independently grantable capability.
+    if (key === 'replace_file_content' && typeof enabled === 'boolean') continue
     if (!toolNames.includes(key as ToolName) || typeof enabled !== 'boolean') throw new Error('工具权限无效')
     result[key as ToolName] = enabled
   }

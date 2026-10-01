@@ -95,6 +95,31 @@ it('requires approval for an existing file without changing it', async () => {
   expect(fs.linkSync).not.toHaveBeenCalled()
 })
 
+it('routes replace_file_content through the same explicit overwrite approval and never creates a missing target', async () => {
+  const target = join(root, 'drafts/article.md')
+  await fsp.writeFile(target, 'original')
+  const missing = await engine.execute(context, { toolName: 'replace_file_content', input: { path: 'drafts/missing.md', content: 'replacement' } })
+  expect(missing.execution).toMatchObject({ status: 'failed' })
+  await expect(fsp.access(join(root, 'drafts/missing.md'))).rejects.toThrow()
+  const replacement = await engine.execute(context, { toolName: 'replace_file_content', input: { path: 'drafts/article.md', content: 'replacement' } })
+  expect(replacement.execution).toMatchObject({ toolName: 'replace_file_content', status: 'waiting_approval', riskLevel: 'high' })
+  expect(await fsp.readFile(target, 'utf8')).toBe('original')
+  expect(await repositories.getApprovalForToolExecution(replacement.execution.id)).toMatchObject({ requestHash: replacement.execution.requestHash, status: 'pending' })
+})
+
+it('maps replace_file_content authority to write_file rather than an independent permission', async () => {
+  const agent = (await repositories.getAgent(context.agentId))!
+  await repositories.updateAgent(agent.id, { ...agent, defaultToolPermissions: { ...agent.defaultToolPermissions, write_file: false, replace_file_content: true } })
+  await expect(engine.execute(context, { toolName: 'replace_file_content', input: { path: 'drafts/article.md', content: 'replacement' } })).rejects.toThrow('工具未授权')
+  await repositories.updateAgent(agent.id, { ...agent, defaultToolPermissions: { ...agent.defaultToolPermissions, write_file: true, replace_file_content: false } })
+  await repositories.saveChannelAgent({ channelId, agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: { write_file: false, replace_file_content: true } })
+  await expect(engine.execute(context, { toolName: 'replace_file_content', input: { path: 'drafts/article.md', content: 'replacement' } })).rejects.toThrow('工具未授权')
+  await repositories.saveChannelAgent({ channelId, agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: { write_file: true, replace_file_content: false } })
+  await fsp.writeFile(join(root, 'drafts/article.md'), 'original')
+  const execution = await engine.execute(context, { toolName: 'replace_file_content', input: { path: 'drafts/article.md', content: 'replacement' } })
+  expect(execution.execution).toMatchObject({ status: 'waiting_approval' })
+})
+
 it('turns a target racing into existence at publication into pending approval', async () => {
   const realLink = (await vi.importActual<typeof fs>('node:fs')).linkSync
   vi.mocked(fs.linkSync).mockImplementationOnce((source, target) => {

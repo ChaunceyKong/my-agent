@@ -5,7 +5,7 @@ import type { TaskRunService } from './task-run-service'
 import { createToolEngine, validateToolRequest } from './tool-engine'
 
 const MAX_TOOL_STEPS = 4
-const TOOLS = ['list_dir', 'read_file', 'search_files', 'write_file', 'run_process'].map((name) => ({ type: 'function' as const, function: { name: name as ToolRequest['toolName'], description: 'Use only with user-authorized project data.', parameters: { type: 'object' } } }))
+const TOOLS = ['list_dir', 'read_file', 'search_files', 'write_file', 'replace_file_content', 'run_process'].map((name) => ({ type: 'function' as const, function: { name: name as ToolRequest['toolName'], description: 'Use only with user-authorized project data.', parameters: { type: 'object' } } }))
 
 export interface ActiveAgent { agent: Agent; modelConfigId: string }
 

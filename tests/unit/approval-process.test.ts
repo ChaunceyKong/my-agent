@@ -147,6 +147,27 @@ it.each([
   expect(await repositories.getToolExecution(execution.id)).toMatchObject({ status: 'cancelled' })
 })
 
+it.each([
+  ['cancellation', async () => { await createTaskRunService(repositories).cancelTaskRun(context.taskRunId) }, 'cancelled'],
+  ['generation change', async () => { await repositories.advanceTaskRunGeneration(context.taskRunId) }, 'running'],
+  ['permission revocation', async () => {
+    const run = (await repositories.getTaskRun(context.taskRunId))!
+    await repositories.saveChannelAgent({ channelId: run.channelId, agentId: context.agentId, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  }, 'running'],
+] as const)('does not complete a TaskRun when %s wins after approval is read but before process claim', async (_name, invalidate, expectedRunStatus) => {
+  const service = createApprovalService(repositories, () => now)
+  const engine = createToolEngine(repositories, service)
+  await repositories.saveRegisteredExecutable({ id: 'echo', absolutePath: 'C:\\tool.exe', isEnabled: true, argumentPolicyJson: '["ok"]' })
+  const execution = (await engine.execute(context, { toolName: 'run_process', input: { executableId: 'echo', args: ['ok'] } })).execution
+  const approval = (await repositories.getApprovalForToolExecution(execution.id))!
+  await service.approve(approval.id, approval.requestHash)
+  const claim = repositories.claimApprovedProcess.bind(repositories)
+  repositories.claimApprovedProcess = async (id, timestamp) => { await invalidate(); return claim(id, timestamp) }
+  await expect(createProcessToolService(repositories, createTaskRunService(repositories), () => now).runApproved(approval.id)).rejects.toThrow('不可用')
+  expect(await repositories.getTaskRun(context.taskRunId)).toMatchObject({ status: expectedRunStatus })
+  expect(await repositories.getToolExecution(execution.id)).toMatchObject({ status: 'cancelled' })
+})
+
 it('binds an existing write to one immutable approval and writes only after explicit execution', async () => {
   const service = createApprovalService(repositories, () => now)
   const engine = createToolEngine(repositories, service)

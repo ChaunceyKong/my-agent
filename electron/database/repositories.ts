@@ -43,13 +43,18 @@ function sortedPermissions(value: ToolPermissions): ToolPermissions {
   return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
 }
 
+function permissionTool(toolName: ToolName): ToolName {
+  return toolName === 'replace_file_content' ? 'write_file' : toolName
+}
+
 function currentPolicy(tx: Transaction, run: TaskRun, agentId: string, toolName: ToolName): string | undefined {
   const agent = tx.select().from(agents).where(eq(agents.id, agentId)).get()
   const member = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.agentId, agentId))).get()
   const channel = tx.select().from(channels).where(eq(channels.id, run.channelId)).get()
   const project = channel && tx.select().from(projects).where(eq(projects.id, channel.projectId)).get()
-  if (!agent || !member?.isEnabled || !project || agent.defaultToolPermissions[toolName] !== true
-    || (member.toolPermissionsOverride !== null && member.toolPermissionsOverride[toolName] !== true)) return undefined
+  const effectiveTool = permissionTool(toolName)
+  if (!agent || !member?.isEnabled || !project || agent.defaultToolPermissions[effectiveTool] !== true
+    || (member.toolPermissionsOverride !== null && member.toolPermissionsOverride[effectiveTool] !== true)) return undefined
   const snapshot: ToolPolicySnapshot = {
     version: 1, workspacePath: project.workspacePath, agentId,
     defaultToolPermissions: sortedPermissions(agent.defaultToolPermissions),
@@ -208,7 +213,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
           policySnapshotJson,
           requestHash: hashToolRequest({ taskRunId: run.id, generation: run.generation, agentId: context.agentId, messageId: context.messageId ?? null, request, policySnapshotJson }),
           overwriteTargetIdentityJson: null,
-          riskLevel: request.toolName === 'write_file' ? 'medium' : 'low', status: 'executing',
+          riskLevel: request.toolName === 'write_file' || request.toolName === 'replace_file_content' ? 'medium' : 'low', status: 'executing',
           resultSummary: null, createdAt: timestamp, updatedAt: timestamp,
         }
         tx.insert(toolExecutions).values(execution).run()
@@ -266,7 +271,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
     async createOverwriteApproval(toolExecutionId, expiresAt, targetIdentityJson) {
       return client.db.transaction((tx) => {
         const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, toolExecutionId)).get()
-        if (!execution || execution.status !== 'executing' || execution.toolName !== 'write_file') throw new Error('审批对象不可用')
+        if (!execution || execution.status !== 'executing' || !['write_file', 'replace_file_content'].includes(execution.toolName)) throw new Error('审批对象不可用')
         const run = tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
         if (!run || run.status !== 'running' || run.generation !== execution.generation
           || currentExecutionPolicy(tx, run, execution) !== execution.policySnapshotJson) throw new Error('审批对象已失效')
@@ -385,7 +390,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
           return undefined
         }
         if (!approval || !execution || !run || approval.status !== 'approved' || execution.status !== 'executing'
-          || execution.toolName !== 'write_file' || !execution.overwriteTargetIdentityJson || execution.requestHash !== approval.requestHash
+          || !['write_file', 'replace_file_content'].includes(execution.toolName) || !execution.overwriteTargetIdentityJson || execution.requestHash !== approval.requestHash
           || execution.generation !== approval.generation || execution.policySnapshotJson !== approval.policySnapshotJson) throw new Error('审批请求不可用')
         if (new Date(approval.expiresAt).getTime() <= new Date(now).getTime()) return expire()
         if (run.status !== 'running' || run.generation !== approval.generation

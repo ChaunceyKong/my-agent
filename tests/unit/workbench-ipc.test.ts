@@ -76,6 +76,14 @@ it('rejects dangerous executable registrations before persisting them', async ()
   expect(await repositories.listRegisteredExecutables()).toEqual([])
 })
 
+it('allows only Main-validated replacement of a Windows executable registration with the same id', async () => {
+  await invoke(IpcChannel.ExecutableSave, { id: 'safe-tool', absolutePath: 'C:\\safe\\tool.exe', isEnabled: true, allowedArgs: ['status'] })
+  await invoke(IpcChannel.ExecutableSave, { id: 'safe-tool', absolutePath: 'C:\\safe\\tool-v2.exe', isEnabled: true, allowedArgs: ['version'] })
+  expect(await repositories.getRegisteredExecutable('safe-tool')).toMatchObject({
+    id: 'safe-tool', absolutePath: 'C:\\safe\\tool-v2.exe', isEnabled: true, argumentPolicyJson: '["version"]',
+  })
+})
+
 it('streams from Main, persists reply and terminal state, and returns only safe channel data', async () => {
   await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: true })
   fetchImpl.mockResolvedValue(new Response('data: {"choices":[{"delta":{"content":"你好，主理人"}}]}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))

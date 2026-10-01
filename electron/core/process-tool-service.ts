@@ -10,13 +10,14 @@ export function createProcessToolService(repositories: Repositories, taskRuns: T
       const approval = await repositories.getApprovalRequest(approvalId)
       if (!approval || approval.status !== 'approved') throw new Error('审批请求不可用')
       const execution = await repositories.getToolExecution(approval.toolExecutionId)
-      if (execution?.toolName === 'write_file') {
+      if (execution?.toolName === 'write_file' || execution?.toolName === 'replace_file_content') {
         try {
           const result = await overwrites.runApproved(approvalId)
           if (result.status === 'completed' || result.status === 'failed') await finishRun(execution.taskRunId, result.resultSummary)
           return result
         } catch (error) {
-          await finishRun(execution.taskRunId, '已批准操作未执行')
+          const latest = await repositories.getToolExecution(execution.id)
+          if (latest?.status === 'completed' || latest?.status === 'failed') await finishRun(execution.taskRunId, latest.resultSummary)
           throw error
         }
       }
@@ -30,15 +31,12 @@ export function createProcessToolService(repositories: Repositories, taskRuns: T
         const result = await executeRegisteredProcess({ executable: claimed.executable, args: input.args, cwd: claimed.workspacePath, signal: controller.signal })
         const completed = await repositories.finishToolExecution(claimed.execution.id, () => ({ status: result.exitCode === 0 ? 'completed' : 'failed', riskLevel: 'high',
           resultSummary: result.exitCode === null ? '进程已取消' : `进程退出码 ${result.exitCode}${result.stderr ? '; stderr 已截断' : ''}` }))
-        await finishRun(claimed.execution.taskRunId, completed.resultSummary)
+        if (completed.status === 'completed' || completed.status === 'failed') await finishRun(claimed.execution.taskRunId, completed.resultSummary)
         return completed
       } catch {
-        if (!claimed) {
-          await finishRun(execution.taskRunId, '已批准操作未执行')
-          throw new Error('审批请求不可用')
-        }
+        if (!claimed) throw new Error('审批请求不可用')
         const failed = await repositories.finishToolExecution(claimed.execution.id, () => ({ status: 'failed', riskLevel: 'high', resultSummary: '受控进程执行失败' }))
-        await finishRun(claimed.execution.taskRunId, failed.resultSummary)
+        if (failed.status === 'completed' || failed.status === 'failed') await finishRun(claimed.execution.taskRunId, failed.resultSummary)
         return failed
       } finally { unsubscribe() }
     },

@@ -46,13 +46,13 @@ export interface ToolContext {
 export type ToolOutcome = Pick<ToolExecution, 'status' | 'riskLevel' | 'resultSummary'>
 type Transaction = Parameters<Parameters<AppDatabase['transaction']>[0]>[0]
 
-function appendEvent(tx: Transaction, run: TaskRun, eventType: TaskRunEventType, refs: { agentId?: string; messageId?: string; toolExecutionId?: string; metadata?: EventMetadata } = {}): TaskRunEvent {
+function appendEvent(tx: Transaction, run: TaskRun, eventType: TaskRunEventType, refs: { agentId?: string; messageId?: string; toolExecutionId?: string; metadata?: EventMetadata; displayReason?: string } = {}): TaskRunEvent {
   const last = tx.select({ seq: taskRunEvents.seq }).from(taskRunEvents)
     .where(eq(taskRunEvents.taskRunId, run.id)).orderBy(sql`${taskRunEvents.seq} DESC`).limit(1).get()
   const event = makeTaskRunEvent({
     taskRunId: run.id, seq: (last?.seq ?? 0) + 1, generation: run.generation, eventType,
     agentId: refs.agentId ?? null, messageId: refs.messageId ?? null, toolExecutionId: refs.toolExecutionId ?? null,
-    metadata: refs.metadata,
+    metadata: refs.metadata, displayReason: refs.displayReason,
   })
   tx.insert(taskRunEvents).values(event).run()
   return event
@@ -954,14 +954,13 @@ export function createRepositories(client: DatabaseClient): Repositories {
             .where(and(eq(toolExecutions.taskRunId, run.id), inArray(approvalRequests.status, ['pending', 'approved']))).get()) throw new Error('任务仍有待处理事项')
         if (input.nextSpeaker === null) {
           if (tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.toolName, ['write_file', 'replace_file_content', 'run_process']), eq(toolExecutions.status, 'completed'))).get()) throw new Error('任务有待验收产物')
-          // The model's free-form reason is untrusted; persist only a safe decision code.
-          appendEvent(tx, run, 'speaker_decided', { metadata: { reason: 'automatic_complete' } })
+          appendEvent(tx, run, 'speaker_decided', { metadata: { reason: 'automatic_complete' }, displayReason: input.reason })
           tx.update(taskRuns).set({ status: 'completed', finishedAt: new Date().toISOString() }).where(eq(taskRuns.id, run.id)).run()
           appendEvent(tx, run, 'task_completed')
           return null
         }
         if (!members.some((member) => member.agentId === input.nextSpeaker)) throw new Error('调度 Agent 已失效')
-        const decision = appendEvent(tx, run, 'speaker_decided', { agentId: input.nextSpeaker, metadata: { reason: 'automatic_selection' } })
+        const decision = appendEvent(tx, run, 'speaker_decided', { agentId: input.nextSpeaker, metadata: { reason: 'automatic_selection' }, displayReason: input.reason })
         return selectedTurn(tx, run, input.nextSpeaker, decision.seq)
       })
     },

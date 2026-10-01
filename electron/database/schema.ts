@@ -70,7 +70,7 @@ export const taskRunEvents = sqliteTable('task_run_events', {
   agentId: text('agent_id').references(() => agents.id, { onDelete: 'set null' }),
   messageId: text('message_id').references(() => messages.id, { onDelete: 'set null' }),
   toolExecutionId: text('tool_execution_id').references(() => toolExecutions.id, { onDelete: 'set null' }),
-  metadataJson: text('metadata_json').notNull(), createdAt: text('created_at').notNull(),
+  metadataJson: text('metadata_json').notNull(), displayReason: text('display_reason'), createdAt: text('created_at').notNull(),
 }, (table) => [uniqueIndex('task_run_events_run_seq_idx').on(table.taskRunId, table.seq)])
 
 export const agentTurns = sqliteTable('agent_turns', {
@@ -450,6 +450,12 @@ export function migrate(sqlite: Database.Database): void {
       sqlite.exec("ALTER TABLE channel_agents ADD COLUMN revision TEXT NOT NULL DEFAULT ''")
       sqlite.exec('DROP INDEX IF EXISTS channel_agents_one_enabled_idx')
       sqlite.pragma('user_version = 12')
+    })()
+  }
+  if (Number(sqlite.pragma('user_version', { simple: true })) < 13) {
+    sqlite.transaction(() => {
+      sqlite.exec('ALTER TABLE task_run_events ADD COLUMN display_reason TEXT')
+      sqlite.pragma('user_version = 13')
     })()
   }
 }

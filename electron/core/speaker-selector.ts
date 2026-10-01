@@ -12,7 +12,9 @@ export function parseSpeakerDecision(raw: string, members: ChannelAgent[], agent
     || !record.reason.trim() || record.reason.length > 200
     || (record.nextSpeaker !== null && typeof record.nextSpeaker !== 'string')) throw new Error('调度结果格式无效')
   if (record.nextSpeaker !== null && !members.some((member) => member.isEnabled && member.agentId === record.nextSpeaker && agents.some((agent) => agent.id === member.agentId))) throw new Error('调度 Agent 不可用')
-  return { nextSpeaker: record.nextSpeaker as string | null, reason: record.reason.trim() }
+  const reason = record.reason.replace(/\s+/gu, ' ').trim()
+  if (!reason || /[\p{Cc}\p{Cf}]/u.test(reason)) throw new Error('调度理由包含不可显示字符')
+  return { nextSpeaker: record.nextSpeaker as string | null, reason }
 }
 
 export function speakerSelectionPrompt(members: ChannelAgent[], agents: Agent[], latestMessage: string): string {

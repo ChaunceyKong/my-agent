@@ -15,6 +15,7 @@ import { registerHandlers } from '../../electron/ipc/register-handlers'
 import { IpcChannel } from '../../shared/ipc-channels'
 import type { Agent, StreamEvent } from '../../shared/types'
 import { parseAgentMentions } from '../../electron/core/mention-parser'
+import { parseSpeakerDecision } from '../../electron/core/speaker-selector'
 
 let directory: string
 let database: DatabaseClient
@@ -211,6 +212,21 @@ it('routes IPC structured mentions to the serial orchestrator without selecting 
   expect(modelClient.requireCloudConsent).not.toHaveBeenCalled() // Each Turn checks its own model when it starts.
 })
 
+it('persists an unassigned IPC send before safely pausing a multi-member Run', async () => {
+  const { orchestrator, modelClient } = setup(async () => {})
+  const handlers = new Map<string, (event: unknown, ...args: any[]) => unknown>()
+  registerHandlers({ ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
+    dialog: { showOpenDialog: vi.fn() }, repositories, taskRuns, modelClient, orchestrator })
+  const send = vi.fn()
+  const { taskRunId } = await handlers.get(IpcChannel.MessageSend)!({ sender: { isDestroyed: () => false, send } },
+    { channelId, modelConfigId, content: '请团队讨论，但暂不指定发言人' }) as { taskRunId: string }
+  await vi.waitFor(async () => expect(await repositories.getTaskRun(taskRunId)).toMatchObject({ status: 'paused', turnCount: 0 }))
+  expect((await repositories.listMessages(channelId)).map((message) => message.content)).toEqual(['请团队讨论，但暂不指定发言人'])
+  expect(await repositories.listAgentTurns(taskRunId)).toEqual([])
+  expect(modelClient.streamChat).not.toHaveBeenCalled()
+  expect(send).toHaveBeenCalledWith(IpcChannel.MessageStream, expect.objectContaining({ taskRunId, type: 'error' }))
+})
+
 it('routes 0-to-1 membership changes during delayed send consent through the Agent orchestrator', async () => {
   await repositories.saveChannelAgent({ channelId, agentId: first.id, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
   await repositories.saveChannelAgent({ channelId, agentId: second.id, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
@@ -249,6 +265,16 @@ it('queues only exact, unique enabled names from a completed Agent message', asy
   expect((await repositories.listAgentTurns(run.id)).map((turn) => turn.agentId)).toEqual([first.id])
 })
 
+it('recognizes punctuation-delimited handoffs without matching email-like or longer names', async () => {
+  const members = await repositories.listChannelAgents(channelId)
+  const agents = await repositories.listAgents()
+  expect(parseAgentMentions('请 @Beta. 然后 @Beta、请检查；不要问 @BetaX 或 mail@Beta。', first.id, members, agents)).toEqual([second.id])
+  expect(parseAgentMentions('@BetaX mail@Beta', first.id, members, agents)).toEqual([])
+  const duplicate = await repositories.createAgent({ name: 'Beta', avatar: null, title: '', systemPrompt: '', modelConfigId, defaultToolPermissions: {} })
+  await repositories.saveChannelAgent({ channelId, agentId: duplicate.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  expect(parseAgentMentions('@Beta. @Beta、请检查', first.id, await repositories.listChannelAgents(channelId), await repositories.listAgents())).toEqual([])
+})
+
 it('serially follows a completed Agent handoff without parsing partial messages', async () => {
   const { orchestrator, modelClient } = setup(async (system, emit) => {
     await emit({ taskRunId: 'ignored', type: 'delta', content: system.includes('Prompt A') ? 'handoff @Beta' : 'done' })
@@ -274,6 +300,31 @@ it('uses a configured scheduler and validates each decision before starting a Tu
   expect((await repositories.listAgentTurns(run.id)).map((turn) => turn.agentId)).toEqual([first.id])
   expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'completed' })
   expect(modelClient.selectSpeaker).toHaveBeenCalledTimes(2)
+  const decisions = (await repositories.listTaskRunEvents(run.id)).filter((event) => event.eventType === 'speaker_decided')
+  expect(decisions.map((event) => event.displayReason)).toEqual(['Assign Alpha', 'Done'])
+  expect(decisions.map((event) => JSON.parse(event.metadataJson))).toEqual([{ reason: 'automatic_selection' }, { reason: 'automatic_complete' }])
+  database.close()
+  database = createDatabase({ filePath: join(directory, 'test.sqlite') })
+  repositories = createRepositories(database)
+  expect((await repositories.listTaskRunEvents(run.id)).filter((event) => event.eventType === 'speaker_decided').map((event) => event.displayReason)).toEqual(['Assign Alpha', 'Done'])
+})
+
+it('rejects unsafe scheduler reason before persisting a decision', async () => {
+  await repositories.setChannelScheduler(channelId, modelConfigId)
+  const { orchestrator, modelClient } = setup(async () => {})
+  modelClient.selectSpeaker = vi.fn().mockResolvedValue(JSON.stringify({ nextSpeaker: first.id, reason: 'hidden\u202Econtrol' }))
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, 'Choose')
+  await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused', turnCount: 0 })
+  expect((await repositories.listTaskRunEvents(run.id)).filter((event) => event.eventType === 'speaker_decided')).toEqual([])
+})
+
+it('normalizes display reason whitespace and rejects oversized reasons', async () => {
+  const members = await repositories.listChannelAgents(channelId)
+  const agents = await repositories.listAgents()
+  expect(parseSpeakerDecision(JSON.stringify({ nextSpeaker: first.id, reason: '  Alpha\n  can inspect\tthis.  ' }), members, agents))
+    .toEqual({ nextSpeaker: first.id, reason: 'Alpha can inspect this.' })
+  expect(() => parseSpeakerDecision(JSON.stringify({ nextSpeaker: first.id, reason: 'x'.repeat(201) }), members, agents)).toThrow()
 })
 
 it.each(['not-json', JSON.stringify({ nextSpeaker: 'unknown', reason: 'bad' }), JSON.stringify({ nextSpeaker: null, reason: '' })])('pauses invalid scheduler output: %s', async (decision) => {

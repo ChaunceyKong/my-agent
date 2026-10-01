@@ -9,7 +9,7 @@ export function parseAgentMentions(content: string, speakerId: string, members: 
     byName.set(agent.name, [...(byName.get(agent.name) ?? []), agent.id])
   }
   const selected: string[] = []
-  for (const match of content.matchAll(/@([^\s@,，。:：;；!?！？()\[\]{}]+)/gu)) {
+  for (const match of content.matchAll(/(?<![\p{L}\p{N}_])@([^\s@,.，。、:：;；!?！？()\[\]{}]+)/gu)) {
     const ids = byName.get(match[1])
     if (ids?.length === 1 && ids[0] !== speakerId && !selected.includes(ids[0])) selected.push(ids[0])
   }

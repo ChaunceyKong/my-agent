@@ -287,7 +287,7 @@ export type TaskRunEventType = 'ceo_message' | 'mention_queued' | 'mention_consu
 export interface TaskRunEvent {
   id: string; taskRunId: string; seq: number; generation: number; eventType: TaskRunEventType
   agentId: string | null; messageId: string | null; toolExecutionId: string | null
-  metadataJson: string; createdAt: string
+  metadataJson: string; displayReason: string | null; createdAt: string
 }
 export type AgentTurnStatus = 'queued' | 'running' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled'
 export interface AgentTurn {

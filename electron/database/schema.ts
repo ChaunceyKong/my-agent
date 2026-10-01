@@ -1,7 +1,8 @@
 import type Database from 'better-sqlite3'
 import { sql } from 'drizzle-orm'
 import { integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
-import type { ApprovalRequestStatus, MessageRole, MessageStatus, ModelProviderPreset, OverwritePublicationState, TaskRunStatus, ToolExecutionStatus, ToolName, ToolPermissions, ToolRiskLevel } from '../../shared/types'
+import { randomUUID } from 'node:crypto'
+import type { AgentTurnStatus, ApprovalRequestStatus, ChannelSpeakerMode, MessageOrigin, MessageRole, MessageStatus, MentionSource, MentionStatus, ModelProviderPreset, OverwritePublicationState, TaskRunEventType, TaskRunStatus, ToolExecutionStatus, ToolName, ToolPermissions, ToolRiskLevel } from '../../shared/types'
 
 export const projects = sqliteTable('projects', {
   id: text('id').primaryKey(),
@@ -17,6 +18,9 @@ export const channels = sqliteTable('channels', {
   projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
   name: text('name').notNull(),
   icon: text('icon'),
+  speakerMode: text('speaker_mode').$type<ChannelSpeakerMode>().notNull().default('automatic'),
+  maxTurns: integer('max_turns').notNull().default(30),
+  schedulerModelConfigId: text('scheduler_model_config_id').references(() => modelConfigs.id, { onDelete: 'restrict' }),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 })
@@ -27,6 +31,9 @@ export const taskRuns = sqliteTable('task_runs', {
   modelConfigId: text('model_config_id').notNull(),
   status: text('status').$type<TaskRunStatus>().notNull(),
   generation: integer('generation').notNull().default(0),
+  currentTurnId: text('current_turn_id'),
+  turnCount: integer('turn_count').notNull().default(0),
+  pauseReason: text('pause_reason'),
   startedAt: text('started_at'),
   finishedAt: text('finished_at'),
   errorMessage: text('error_message'),
@@ -37,6 +44,9 @@ export const messages = sqliteTable('messages', {
   id: text('id').primaryKey(),
   channelId: text('channel_id').notNull().references(() => channels.id, { onDelete: 'cascade' }),
   taskRunId: text('task_run_id').references(() => taskRuns.id, { onDelete: 'set null' }),
+  agentId: text('agent_id').references(() => agents.id, { onDelete: 'set null' }),
+  origin: text('origin').$type<MessageOrigin>().notNull().default('legacy'),
+  taskRunSeq: integer('task_run_seq'),
   role: text('role').$type<MessageRole>().notNull(),
   authorName: text('author_name').notNull(),
   content: text('content').notNull(),
@@ -50,6 +60,39 @@ export const auditEvents = sqliteTable('audit_events', {
   taskRunId: text('task_run_id').references(() => taskRuns.id, { onDelete: 'set null' }),
   eventType: text('event_type').notNull(),
   metadataJson: text('metadata_json').notNull(),
+  createdAt: text('created_at').notNull(),
+})
+
+export const taskRunEvents = sqliteTable('task_run_events', {
+  id: text('id').primaryKey(), taskRunId: text('task_run_id').notNull().references(() => taskRuns.id, { onDelete: 'cascade' }),
+  seq: integer('seq').notNull(), generation: integer('generation').notNull(),
+  eventType: text('event_type').$type<TaskRunEventType>().notNull(),
+  agentId: text('agent_id').references(() => agents.id, { onDelete: 'set null' }),
+  messageId: text('message_id').references(() => messages.id, { onDelete: 'set null' }),
+  toolExecutionId: text('tool_execution_id').references(() => toolExecutions.id, { onDelete: 'set null' }),
+  metadataJson: text('metadata_json').notNull(), createdAt: text('created_at').notNull(),
+}, (table) => [uniqueIndex('task_run_events_run_seq_idx').on(table.taskRunId, table.seq)])
+
+export const agentTurns = sqliteTable('agent_turns', {
+  id: text('id').primaryKey(), taskRunId: text('task_run_id').notNull().references(() => taskRuns.id, { onDelete: 'cascade' }),
+  ordinal: integer('ordinal').notNull(), agentId: text('agent_id').notNull().references(() => agents.id, { onDelete: 'restrict' }),
+  generation: integer('generation').notNull(), status: text('status').$type<AgentTurnStatus>().notNull(),
+  triggerEventSeq: integer('trigger_event_seq').notNull(), messageId: text('message_id').references(() => messages.id, { onDelete: 'set null' }),
+  startedAt: text('started_at'), finishedAt: text('finished_at'),
+}, (table) => [uniqueIndex('agent_turns_run_ordinal_idx').on(table.taskRunId, table.ordinal), uniqueIndex('agent_turns_active_idx').on(table.taskRunId).where(sql`${table.status} IN ('queued','running','waiting_approval')`)])
+
+export const mentionQueue = sqliteTable('mention_queue', {
+  taskRunId: text('task_run_id').notNull().references(() => taskRuns.id, { onDelete: 'cascade' }),
+  position: integer('position').notNull(), agentId: text('agent_id').notNull().references(() => agents.id, { onDelete: 'restrict' }),
+  sourceMessageId: text('source_message_id').notNull().references(() => messages.id, { onDelete: 'cascade' }),
+  source: text('source').$type<MentionSource>().notNull(), status: text('status').$type<MentionStatus>().notNull(),
+}, (table) => [primaryKey({ columns: [table.taskRunId, table.position] })])
+
+export const sessionSummaries = sqliteTable('session_summaries', {
+  id: text('id').primaryKey(), channelId: text('channel_id').notNull().references(() => channels.id, { onDelete: 'cascade' }),
+  taskRunId: text('task_run_id').notNull().references(() => taskRuns.id, { onDelete: 'cascade' }),
+  coveredThroughSeq: integer('covered_through_seq').notNull(), content: text('content').notNull(),
+  modelConfigId: text('model_config_id').notNull().references(() => modelConfigs.id, { onDelete: 'restrict' }),
   createdAt: text('created_at').notNull(),
 })
 
@@ -145,7 +188,7 @@ export const registeredExecutables = sqliteTable('registered_executables', {
   updatedAt: text('updated_at').notNull(),
 })
 
-export const schema = { agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, messages, modelConfigs, overwritePublications, projects, registeredExecutables, taskRuns, toolExecutions }
+export const schema = { agentTurns, agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, mentionQueue, messages, modelConfigs, overwritePublications, projects, registeredExecutables, sessionSummaries, taskRunEvents, taskRuns, toolExecutions }
 
 export function migrate(sqlite: Database.Database): void {
   sqlite.pragma('foreign_keys = ON')
@@ -329,4 +372,76 @@ export function migrate(sqlite: Database.Database): void {
   if (version < 10) { sqlite.exec(`ALTER TABLE overwrite_publications RENAME TO overwrite_publications_old;
     CREATE TABLE overwrite_publications (execution_id TEXT PRIMARY KEY NOT NULL REFERENCES tool_executions(id) ON DELETE CASCADE, temporary_relative_path TEXT NOT NULL, backup_relative_path TEXT NOT NULL, temporary_identity_json TEXT, state TEXT NOT NULL CHECK (state IN ('preparing','staged','publishing','effect_claimed','published','cleanup_pending','completed','needs_recovery','recovered')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     INSERT INTO overwrite_publications SELECT * FROM overwrite_publications_old; DROP TABLE overwrite_publications_old;`); sqlite.pragma('user_version = 10') }
+  if (version < 11) {
+    sqlite.pragma('foreign_keys = OFF')
+    try {
+      sqlite.transaction(() => {
+        sqlite.exec(`
+          ALTER TABLE channels ADD COLUMN speaker_mode TEXT NOT NULL DEFAULT 'automatic' CHECK (speaker_mode IN ('automatic','manual'));
+          ALTER TABLE channels ADD COLUMN max_turns INTEGER NOT NULL DEFAULT 30 CHECK (max_turns BETWEEN 1 AND 100);
+          ALTER TABLE channels ADD COLUMN scheduler_model_config_id TEXT REFERENCES model_configs(id) ON DELETE RESTRICT;
+          CREATE TABLE task_runs_new (
+            id TEXT PRIMARY KEY NOT NULL, channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            model_config_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('queued','running','cancelling','cancelled','failed','completed','paused')),
+            generation INTEGER NOT NULL DEFAULT 0, current_turn_id TEXT, turn_count INTEGER NOT NULL DEFAULT 0,
+            pause_reason TEXT, started_at TEXT, finished_at TEXT, error_message TEXT, created_at TEXT NOT NULL
+          );
+          INSERT INTO task_runs_new (id,channel_id,model_config_id,status,generation,started_at,finished_at,error_message,created_at)
+            SELECT id,channel_id,model_config_id,status,generation,started_at,finished_at,error_message,created_at FROM task_runs;
+          DROP TABLE task_runs;
+          ALTER TABLE task_runs_new RENAME TO task_runs;
+          CREATE INDEX task_runs_channel_id_status_idx ON task_runs(channel_id,status);
+          ALTER TABLE messages ADD COLUMN agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL;
+          ALTER TABLE messages ADD COLUMN origin TEXT NOT NULL DEFAULT 'legacy' CHECK (origin IN ('ceo','agent','legacy'));
+          ALTER TABLE messages ADD COLUMN task_run_seq INTEGER;
+          CREATE TABLE task_run_events (
+            id TEXT PRIMARY KEY NOT NULL, task_run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
+            seq INTEGER NOT NULL, generation INTEGER NOT NULL, event_type TEXT NOT NULL,
+            agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+            message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+            tool_execution_id TEXT REFERENCES tool_executions(id) ON DELETE SET NULL,
+            metadata_json TEXT NOT NULL CHECK (length(metadata_json) <= 2048), created_at TEXT NOT NULL,
+            UNIQUE(task_run_id,seq)
+          );
+          CREATE TABLE agent_turns (
+            id TEXT PRIMARY KEY NOT NULL, task_run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL, agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+            generation INTEGER NOT NULL, status TEXT NOT NULL CHECK (status IN ('queued','running','waiting_approval','completed','failed','cancelled')),
+            trigger_event_seq INTEGER NOT NULL, message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+            started_at TEXT, finished_at TEXT, UNIQUE(task_run_id,ordinal)
+          );
+          CREATE UNIQUE INDEX agent_turns_active_idx ON agent_turns(task_run_id) WHERE status IN ('queued','running','waiting_approval');
+          CREATE TABLE mention_queue (
+            task_run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE, position INTEGER NOT NULL,
+            agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+            source_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            source TEXT NOT NULL CHECK (source IN ('ceo','agent')),
+            status TEXT NOT NULL CHECK (status IN ('pending','consumed','cancelled')),
+            PRIMARY KEY (task_run_id,position)
+          );
+          CREATE TABLE session_summaries (
+            id TEXT PRIMARY KEY NOT NULL, channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            task_run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
+            covered_through_seq INTEGER NOT NULL, content TEXT NOT NULL,
+            model_config_id TEXT NOT NULL REFERENCES model_configs(id) ON DELETE RESTRICT, created_at TEXT NOT NULL
+          );
+        `)
+        const duplicates = sqlite.prepare(`SELECT id,channel_id,generation FROM task_runs WHERE status='running' AND channel_id IN (SELECT channel_id FROM task_runs WHERE status='running' GROUP BY channel_id HAVING count(*) > 1)`).all() as Array<{ id: string; channel_id: string; generation: number }>
+        const pause = sqlite.prepare(`UPDATE task_runs SET status='paused',generation=generation+1,pause_reason='migration_duplicate_running' WHERE id=?`)
+        const audit = sqlite.prepare(`INSERT INTO audit_events (id,channel_id,task_run_id,event_type,metadata_json,created_at) VALUES (?,?,?,?,?,?)`)
+        const now = new Date().toISOString()
+        for (const run of duplicates) {
+          pause.run(run.id)
+          audit.run(randomUUID(), run.channel_id, run.id, 'task_run_paused', JSON.stringify({ reason: 'migration_duplicate_running', generation: run.generation + 1 }), now)
+        }
+        sqlite.exec(`CREATE UNIQUE INDEX task_runs_one_active_idx ON task_runs(channel_id) WHERE status IN ('running','cancelling');`)
+        const violations = sqlite.pragma('foreign_key_check') as Array<unknown>
+        if (violations.length) throw new Error('v0.3 migration foreign key check failed')
+        sqlite.pragma('user_version = 11')
+      })()
+    } finally {
+      sqlite.pragma('foreign_keys = ON')
+    }
+  }
 }

@@ -69,7 +69,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
     }
     const replyId = `reply-${event.taskRunId}`
     const existing = current.messages.find((message) => message.taskRunId === event.taskRunId && message.role === 'agent')
-    const reply: Message = existing ?? { id: replyId, channelId, taskRunId: event.taskRunId, role: 'agent', authorName: 'AI 助手', content: '', status: 'streaming', createdAt: new Date().toISOString() }
+    const reply: Message = existing ?? { id: replyId, channelId, taskRunId: event.taskRunId, agentId: null, origin: 'legacy', taskRunSeq: null, role: 'agent', authorName: 'AI 助手', content: '', status: 'streaming', createdAt: new Date().toISOString() }
     const messages = current.messages.filter((message) => message.id !== reply.id)
     messages.push({ ...reply, content: reply.content + (event.type === 'delta' ? event.content ?? '' : ''), status: event.type === 'delta' ? 'streaming' : 'failed' })
     updateConversation(channelId, { messages,
@@ -134,8 +134,8 @@ export function createWorkbenchStore(api: AgentTeamApi) {
       const createdAt = new Date().toISOString()
       updateConversation(message.channelId, {
         draft: '', error: '',
-        messages: [...current.messages, { id: `ceo-${taskRunId}`, channelId: message.channelId, taskRunId, role: 'ceo', authorName: '主理人', content: message.content, status: 'sent', createdAt }],
-        runs: [...current.runs, { id: taskRunId, channelId: message.channelId, modelConfigId: message.modelConfigId, status: 'running', generation: 0, createdAt, startedAt: createdAt, finishedAt: null, errorMessage: null }],
+        messages: [...current.messages, { id: `ceo-${taskRunId}`, channelId: message.channelId, taskRunId, agentId: null, origin: 'ceo', taskRunSeq: 1, role: 'ceo', authorName: '主理人', content: message.content, status: 'sent', createdAt }],
+        runs: [...current.runs, { id: taskRunId, channelId: message.channelId, modelConfigId: message.modelConfigId, status: 'running', generation: 0, currentTurnId: null, turnCount: 0, pauseReason: null, createdAt, startedAt: createdAt, finishedAt: null, errorMessage: null }],
       })
       const earlyEvents = pendingEvents
       pendingEvents = null

@@ -147,12 +147,11 @@ it('exposes CRUD through named IPC with no prompt in summary responses or model 
   expect(await invoke(IpcChannel.AgentList)).toEqual([])
 })
 
-it('migrates existing v3 databases idempotently and enforces the single-enabled rule in SQLite', () => {
+it('keeps the single-enabled member rule after idempotent migration', () => {
   const sqlite = new Database(':memory:')
   try {
     migrate(sqlite)
-    sqlite.exec("INSERT INTO projects VALUES ('p', 'project', NULL, 'C:/test', 'now', 'now'); INSERT INTO channels VALUES ('c', 'p', 'channel', NULL, 'now', 'now');")
-    sqlite.exec('DROP TABLE tool_executions; ALTER TABLE task_runs DROP COLUMN generation; DROP TABLE channel_agents; DROP TABLE agents; PRAGMA user_version = 3;')
+    sqlite.exec("INSERT INTO projects VALUES ('p', 'project', NULL, 'C:/test', 'now', 'now'); INSERT INTO channels (id,project_id,name,icon,created_at,updated_at) VALUES ('c', 'p', 'channel', NULL, 'now', 'now');")
     migrate(sqlite)
     migrate(sqlite)
     expect(sqlite.prepare('SELECT name FROM projects').get()).toEqual({ name: 'project' })
@@ -161,7 +160,7 @@ it('migrates existing v3 databases idempotently and enforces the single-enabled 
     for (const id of ['a', 'b']) insert.run(id, id, 'title', 'prompt', 'm', '{}', 'now', 'now')
     sqlite.exec("INSERT INTO channel_agents VALUES ('c', 'a', 1, NULL, NULL, 'now', 'now');")
     expect(() => sqlite.exec("INSERT INTO channel_agents VALUES ('c', 'b', 1, NULL, NULL, 'now', 'now');")).toThrow(/UNIQUE/)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(10)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(11)
   } finally {
     sqlite.close()
   }

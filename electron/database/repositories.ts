@@ -4,6 +4,7 @@ import { and, asc, eq, inArray, sql, type SQL } from 'drizzle-orm'
 import type {
   Agent,
   AgentEditorInput,
+  AgentTurn,
   AuditEvent,
   ApprovalRequest,
   ApprovalRequestStatus,
@@ -12,6 +13,8 @@ import type {
   CreateChannelInput,
   CreateProjectInput,
   Message,
+  TaskRunEvent,
+  TaskRunEventType,
   ModelProviderPreset,
   OverwritePublication,
   OverwritePublicationState,
@@ -26,8 +29,9 @@ import type {
   RegisteredExecutable,
 } from '../../shared/types'
 import { hashToolRequest, toolAuditEvent } from '../core/audit-service'
+import { makeTaskRunEvent, type EventMetadata } from '../core/orchestrator-events'
 import type { AppDatabase, DatabaseClient } from './client'
-import { agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, messages, modelConfigs, overwritePublications, projects, registeredExecutables, taskRuns, toolExecutions } from './schema'
+import { agentTurns, agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, messages, modelConfigs, overwritePublications, projects, registeredExecutables, taskRunEvents, taskRuns, toolExecutions } from './schema'
 
 export interface ToolContext {
   taskRunId: string
@@ -38,6 +42,18 @@ export interface ToolContext {
 
 export type ToolOutcome = Pick<ToolExecution, 'status' | 'riskLevel' | 'resultSummary'>
 type Transaction = Parameters<Parameters<AppDatabase['transaction']>[0]>[0]
+
+function appendEvent(tx: Transaction, run: TaskRun, eventType: TaskRunEventType, refs: { agentId?: string; messageId?: string; toolExecutionId?: string; metadata?: EventMetadata } = {}): TaskRunEvent {
+  const last = tx.select({ seq: taskRunEvents.seq }).from(taskRunEvents)
+    .where(eq(taskRunEvents.taskRunId, run.id)).orderBy(sql`${taskRunEvents.seq} DESC`).limit(1).get()
+  const event = makeTaskRunEvent({
+    taskRunId: run.id, seq: (last?.seq ?? 0) + 1, generation: run.generation, eventType,
+    agentId: refs.agentId ?? null, messageId: refs.messageId ?? null, toolExecutionId: refs.toolExecutionId ?? null,
+    metadata: refs.metadata,
+  })
+  tx.insert(taskRunEvents).values(event).run()
+  return event
+}
 
 function sortedPermissions(value: ToolPermissions): ToolPermissions {
   return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
@@ -180,6 +196,12 @@ export interface Repositories {
   listTaskRuns(channelId: string): Promise<TaskRun[]>
   transitionTaskRun(id: string, from: 'running', to: 'completed' | 'failed' | 'cancelled', metadata: Record<string, string>): Promise<TaskRun | undefined>
   recoverRunningTaskRuns(): Promise<number>
+  appendTaskRunEvent(id: string, generation: number, eventType: TaskRunEventType, refs?: { agentId?: string; messageId?: string; toolExecutionId?: string; metadata?: EventMetadata }): Promise<TaskRunEvent>
+  listTaskRunEvents(id: string): Promise<TaskRunEvent[]>
+  startAgentTurn(taskRunId: string, generation: number, agentId: string, triggerEventSeq: number): Promise<AgentTurn>
+  completeAgentTurn(id: string, content: string): Promise<{ turn: AgentTurn; message: Message }>
+  finishAgentTurn(id: string, status: 'failed' | 'cancelled'): Promise<AgentTurn>
+  listAgentTurns(taskRunId: string): Promise<AgentTurn[]>
   listMessages(channelId: string): Promise<Message[]>
   listAuditEvents(channelId: string): Promise<AuditEvent[]>
   saveModelConfig(input: SaveModelConfigRecordInput): Promise<ModelConfigRecord>
@@ -547,8 +569,11 @@ export function createRepositories(client: DatabaseClient): Repositories {
       return client.db.transaction((tx) => {
         const current = tx.select().from(taskRuns).where(eq(taskRuns.id, id)).get()
         if (current?.status !== 'running') throw new Error('任务操作已失效')
-        const next = tx.update(taskRuns).set({ generation: current.generation + 1 }).where(eq(taskRuns.id, id)).returning().get()!
+        const next = tx.update(taskRuns).set({ generation: current.generation + 1, currentTurnId: null }).where(eq(taskRuns.id, id)).returning().get()!
+        tx.update(agentTurns).set({ status: 'cancelled', finishedAt: new Date().toISOString() })
+          .where(and(eq(agentTurns.taskRunId, id), inArray(agentTurns.status, ['queued', 'running', 'waiting_approval']))).run()
         invalidateTools(tx, next)
+        appendEvent(tx, next, 'generation_advanced')
         tx.insert(auditEvents).values({ id: randomUUID(), channelId: next.channelId, taskRunId: id,
           eventType: 'task_run_generation_changed', metadataJson: JSON.stringify({ generation: next.generation }), createdAt: new Date().toISOString() }).run()
         return next
@@ -628,6 +653,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         projectId: project.id,
         name: input.firstChannelName?.trim() || '主线任务协同群',
         icon: null,
+        speakerMode: 'automatic', maxTurns: 30, schedulerModelConfigId: null,
         createdAt: timestamp,
         updatedAt: timestamp,
       }
@@ -654,6 +680,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         projectId: input.projectId,
         name: input.name,
         icon: input.icon ?? null,
+        speakerMode: 'automatic', maxTurns: 30, schedulerModelConfigId: null,
         createdAt: timestamp,
         updatedAt: timestamp,
       }
@@ -678,6 +705,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         modelConfigId: input.modelConfigId,
         status: 'queued',
         generation: 0,
+        currentTurnId: null, turnCount: 0, pauseReason: null,
         startedAt: null,
         finishedAt: null,
         errorMessage: null,
@@ -687,6 +715,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         id: randomUUID(),
         channelId: input.channelId,
         taskRunId: queuedRun.id,
+        agentId: null, origin: 'ceo', taskRunSeq: 1,
         role: 'ceo',
         authorName: 'CEO',
         content: input.content,
@@ -703,6 +732,9 @@ export function createRepositories(client: DatabaseClient): Repositories {
       }
 
       return client.db.transaction((tx) => {
+        if (tx.select().from(taskRuns).where(and(eq(taskRuns.channelId, input.channelId), inArray(taskRuns.status, ['running', 'cancelling', 'paused']))).get()) {
+          throw new Error('请先继续或结束当前任务')
+        }
         tx.insert(taskRuns).values(queuedRun).run()
         const runningRun = tx.update(taskRuns)
           .set({ status: 'running', startedAt: timestamp })
@@ -711,6 +743,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
           .get()
         if (!runningRun) throw new Error('TaskRun cannot transition from queued to running')
         tx.insert(messages).values(message).run()
+        appendEvent(tx, runningRun, 'ceo_message', { messageId: message.id })
         tx.insert(auditEvents).values(auditEvent).run()
         return runningRun
       })
@@ -736,18 +769,25 @@ export function createRepositories(client: DatabaseClient): Repositories {
             generation: current.generation + 1,
             finishedAt: to === 'completed' || to === 'failed' || to === 'cancelled' ? timestamp : current.finishedAt,
             errorMessage: to === 'failed' ? metadata.errorMessage ?? 'TaskRun failed' : current.errorMessage,
+            currentTurnId: null,
           })
           .where(and(eq(taskRuns.id, id), eq(taskRuns.status, from)))
           .returning()
           .get()
         if (!next) return undefined
+        tx.update(agentTurns).set({ status: 'cancelled', finishedAt: timestamp })
+          .where(and(eq(agentTurns.taskRunId, id), inArray(agentTurns.status, ['queued', 'running', 'waiting_approval']))).run()
         invalidateTools(tx, next)
         if (to === 'completed') {
-          tx.insert(messages).values({
+          const reply = tx.insert(messages).values({
             id: randomUUID(), channelId: next.channelId, taskRunId: next.id,
             role: 'agent', authorName: 'AI 助手', content: metadata.result ?? '',
+            agentId: null, origin: 'legacy', taskRunSeq: null,
             status: 'completed', createdAt: timestamp,
-          }).run()
+          }).returning().get()
+          appendEvent(tx, next, 'task_completed', { messageId: reply.id, metadata: { reason: 'completed' } })
+        } else {
+          appendEvent(tx, next, to === 'failed' ? 'task_failed' : 'task_cancelled', { metadata: to === 'cancelled' ? { reason: 'cancelled' } : {} })
         }
         tx.insert(auditEvents).values({
           id: randomUUID(),
@@ -764,13 +804,16 @@ export function createRepositories(client: DatabaseClient): Repositories {
     async recoverRunningTaskRuns(): Promise<number> {
       const timestamp = new Date().toISOString()
       return client.db.transaction((tx) => {
-        const runningRuns = tx.select().from(taskRuns).where(eq(taskRuns.status, 'running')).all()
+        const runningRuns = tx.select().from(taskRuns).where(inArray(taskRuns.status, ['running', 'cancelling'])).all()
         for (const run of runningRuns) {
-          tx.update(taskRuns)
-            .set({ status: 'paused', generation: run.generation + 1 })
-            .where(and(eq(taskRuns.id, run.id), eq(taskRuns.status, 'running')))
-            .run()
-          invalidateTools(tx, run)
+          const paused = tx.update(taskRuns)
+            .set({ status: 'paused', generation: run.generation + 1, pauseReason: 'restart_recovery', currentTurnId: null })
+            .where(and(eq(taskRuns.id, run.id), eq(taskRuns.status, run.status)))
+            .returning().get()!
+          tx.update(agentTurns).set({ status: 'cancelled', finishedAt: timestamp })
+            .where(and(eq(agentTurns.taskRunId, run.id), inArray(agentTurns.status, ['queued', 'running', 'waiting_approval']))).run()
+          invalidateTools(tx, paused)
+          appendEvent(tx, paused, 'task_paused', { metadata: { reason: 'restart_recovery' } })
           tx.insert(auditEvents).values({
             id: randomUUID(),
             channelId: run.channelId,
@@ -782,6 +825,71 @@ export function createRepositories(client: DatabaseClient): Repositories {
         }
         return runningRuns.length
       })
+    },
+
+    async appendTaskRunEvent(id, generation, eventType, refs = {}) {
+      return client.db.transaction((tx) => {
+        const run = tx.select().from(taskRuns).where(eq(taskRuns.id, id)).get()
+        if (!run || run.status !== 'running' || run.generation !== generation) throw new Error('任务事件已失效')
+        return appendEvent(tx, run, eventType, refs)
+      })
+    },
+    async listTaskRunEvents(id) {
+      return client.db.select().from(taskRunEvents).where(eq(taskRunEvents.taskRunId, id)).orderBy(asc(taskRunEvents.seq)).all()
+    },
+    async startAgentTurn(taskRunId, generation, agentId, triggerEventSeq) {
+      return client.db.transaction((tx) => {
+        const run = tx.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).get()
+        if (!run || run.status !== 'running' || run.generation !== generation || run.currentTurnId) throw new Error('任务轮次不可开始')
+        const trigger = tx.select().from(taskRunEvents).where(and(eq(taskRunEvents.taskRunId, taskRunId), eq(taskRunEvents.seq, triggerEventSeq))).get()
+        const member = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.agentId, agentId))).get()
+        if (!trigger || !member?.isEnabled) throw new Error('Agent 未获得当前发言资格')
+        if (tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval']))).get()) throw new Error('任务仍有未完成操作')
+        const timestamp = new Date().toISOString()
+        const turn: AgentTurn = { id: randomUUID(), taskRunId, ordinal: run.turnCount + 1, agentId,
+          generation, status: 'running', triggerEventSeq, messageId: null, startedAt: timestamp, finishedAt: null }
+        tx.insert(agentTurns).values(turn).run()
+        tx.update(taskRuns).set({ currentTurnId: turn.id, turnCount: turn.ordinal }).where(eq(taskRuns.id, taskRunId)).run()
+        appendEvent(tx, run, 'turn_started', { agentId, metadata: { ordinal: turn.ordinal } })
+        return turn
+      })
+    },
+    async completeAgentTurn(id, content) {
+      return client.db.transaction((tx) => {
+        const turn = tx.select().from(agentTurns).where(eq(agentTurns.id, id)).get()
+        const run = turn && tx.select().from(taskRuns).where(eq(taskRuns.id, turn.taskRunId)).get()
+        if (!turn || !run || turn.status !== 'running' || run.status !== 'running' || run.generation !== turn.generation || run.currentTurnId !== id) throw new Error('任务轮次已失效')
+        if (tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval']))).get()) throw new Error('任务仍有未完成操作')
+        if (!content.trim()) throw new Error('Agent 回复为空')
+        const agent = tx.select().from(agents).where(eq(agents.id, turn.agentId)).get()
+        const member = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.agentId, turn.agentId))).get()
+        if (!agent || !member?.isEnabled) throw new Error('Agent 已失去发言资格')
+        const last = tx.select({ seq: taskRunEvents.seq }).from(taskRunEvents)
+          .where(eq(taskRunEvents.taskRunId, run.id)).orderBy(sql`${taskRunEvents.seq} DESC`).limit(1).get()
+        const timestamp = new Date().toISOString()
+        const message: Message = { id: randomUUID(), channelId: run.channelId, taskRunId: run.id,
+          agentId: turn.agentId, origin: 'agent', taskRunSeq: (last?.seq ?? 0) + 1,
+          role: 'agent', authorName: agent.name, content, status: 'completed', createdAt: timestamp }
+        tx.insert(messages).values(message).run()
+        const finished = tx.update(agentTurns).set({ status: 'completed', messageId: message.id, finishedAt: timestamp }).where(eq(agentTurns.id, id)).returning().get()!
+        tx.update(taskRuns).set({ currentTurnId: null }).where(eq(taskRuns.id, run.id)).run()
+        appendEvent(tx, run, 'turn_completed', { agentId: turn.agentId, messageId: message.id, metadata: { ordinal: turn.ordinal } })
+        return { turn: finished, message }
+      })
+    },
+    async finishAgentTurn(id, status) {
+      return client.db.transaction((tx) => {
+        const turn = tx.select().from(agentTurns).where(eq(agentTurns.id, id)).get()
+        const run = turn && tx.select().from(taskRuns).where(eq(taskRuns.id, turn.taskRunId)).get()
+        if (!turn || !run || turn.status !== 'running' || run.status !== 'running' || run.generation !== turn.generation || run.currentTurnId !== id) throw new Error('任务轮次已失效')
+        const finished = tx.update(agentTurns).set({ status, finishedAt: new Date().toISOString() }).where(eq(agentTurns.id, id)).returning().get()!
+        tx.update(taskRuns).set({ currentTurnId: null }).where(eq(taskRuns.id, run.id)).run()
+        appendEvent(tx, run, status === 'cancelled' ? 'turn_cancelled' : 'turn_failed', { agentId: turn.agentId, metadata: { ordinal: turn.ordinal } })
+        return finished
+      })
+    },
+    async listAgentTurns(taskRunId) {
+      return client.db.select().from(agentTurns).where(eq(agentTurns.taskRunId, taskRunId)).orderBy(asc(agentTurns.ordinal)).all()
     },
 
     async listMessages(channelId: string): Promise<Message[]> {

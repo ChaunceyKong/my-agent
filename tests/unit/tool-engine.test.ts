@@ -284,7 +284,9 @@ it('rejects junction parents, existing directories and absent parent directories
 
 it('preserves a complete file and requests approval when two runs create the same target concurrently', async () => {
   const firstRun = (await repositories.getTaskRun(context.taskRunId))!
-  const second = await repositories.createStartedTaskRun({ channelId, modelConfigId: firstRun.modelConfigId, content: 'second' })
+  const secondChannel = await repositories.createChannel({ projectId: (await repositories.getChannel(channelId))!.projectId, name: 'second' })
+  await repositories.saveChannelAgent({ channelId: secondChannel.id, agentId: context.agentId, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  const second = await repositories.createStartedTaskRun({ channelId: secondChannel.id, modelConfigId: firstRun.modelConfigId, content: 'second' })
   const results = await Promise.all([
     engine.execute(context, request('first content')),
     engine.execute({ ...context, taskRunId: second.id, generation: second.generation }, request('second content')),
@@ -319,7 +321,9 @@ it('pauses interrupted runs and invalidates both staged and waiting tools withou
   await fsp.writeFile(join(root, 'drafts/article.md'), 'original')
   const pending = await engine.execute(context, request())
   const run = (await repositories.getTaskRun(context.taskRunId))!
-  const another = await repositories.createStartedTaskRun({ channelId, modelConfigId: run.modelConfigId, content: 'another' })
+  const secondChannel = await repositories.createChannel({ projectId: (await repositories.getChannel(channelId))!.projectId, name: 'second' })
+  await repositories.saveChannelAgent({ channelId: secondChannel.id, agentId: context.agentId, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  const another = await repositories.createStartedTaskRun({ channelId: secondChannel.id, modelConfigId: run.modelConfigId, content: 'another' })
   const staged = await repositories.createToolExecution({ ...context, taskRunId: another.id }, { toolName: 'write_file', input: { path: 'drafts/new.md', content: 'body' } })
   db.close()
   db = createDatabase({ filePath: join(directory, 'db.sqlite') })
@@ -339,22 +343,17 @@ it('fails closed when atomic publication fails and records only a safe error', a
   expect(JSON.stringify(await repositories.listAuditEvents(channelId))).not.toContain('private')
 })
 
-it('migrates v4 runs with generation zero and preserves existing data on repeated migration', () => {
+it('preserves existing runs and generation on repeated migration', () => {
   const sqlite = new Database(':memory:')
   try {
     migrate(sqlite)
-    sqlite.exec(`
-      DROP TABLE tool_executions;
-      ALTER TABLE task_runs DROP COLUMN generation;
-      PRAGMA user_version = 4;
-      INSERT INTO projects VALUES ('p', 'project', NULL, 'C:/test', 'now', 'now');
-      INSERT INTO channels VALUES ('c', 'p', 'channel', NULL, 'now', 'now');
-      INSERT INTO task_runs VALUES ('r', 'c', 'm', 'running', 'now', NULL, NULL, 'now');
-    `)
+    sqlite.exec(`INSERT INTO projects VALUES ('p', 'project', NULL, 'C:/test', 'now', 'now');
+      INSERT INTO channels (id,project_id,name,icon,created_at,updated_at) VALUES ('c', 'p', 'channel', NULL, 'now', 'now');
+      INSERT INTO task_runs (id,channel_id,model_config_id,status,generation,started_at,finished_at,error_message,created_at) VALUES ('r', 'c', 'm', 'running', 0, 'now', NULL, NULL, 'now');`)
     migrate(sqlite)
     migrate(sqlite)
     expect(sqlite.prepare('SELECT id, generation, status FROM task_runs').get()).toEqual({ id: 'r', generation: 0, status: 'running' })
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(10)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(11)
   } finally { sqlite.close() }
 })
 

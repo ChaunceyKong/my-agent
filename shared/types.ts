@@ -29,9 +29,14 @@ export interface Channel {
   projectId: string
   name: string
   icon: string | null
+  speakerMode: ChannelSpeakerMode
+  maxTurns: number
+  schedulerModelConfigId: string | null
   createdAt: string
   updatedAt: string
 }
+
+export type ChannelSpeakerMode = 'automatic' | 'manual'
 
 export interface CreateChannelInput {
   projectId: string
@@ -243,6 +248,9 @@ export interface Message {
   id: string
   channelId: string
   taskRunId: string | null
+  agentId: string | null
+  origin: MessageOrigin
+  taskRunSeq: number | null
   role: MessageRole
   authorName: string
   content: string
@@ -250,7 +258,9 @@ export interface Message {
   createdAt: string
 }
 
-export type TaskRunStatus = 'queued' | 'running' | 'cancelled' | 'failed' | 'completed' | 'paused'
+export type MessageOrigin = 'ceo' | 'agent' | 'legacy'
+
+export type TaskRunStatus = 'queued' | 'running' | 'cancelling' | 'cancelled' | 'failed' | 'completed' | 'paused'
 
 export interface TaskRun {
   id: string
@@ -258,11 +268,31 @@ export interface TaskRun {
   modelConfigId: string
   status: TaskRunStatus
   generation: number
+  currentTurnId: string | null
+  turnCount: number
+  pauseReason: string | null
   startedAt: string | null
   finishedAt: string | null
   errorMessage: string | null
   createdAt: string
 }
+
+export type TaskRunEventType = 'ceo_message' | 'mention_queued' | 'mention_consumed' | 'speaker_decided' | 'turn_started' | 'turn_completed' | 'turn_failed' | 'turn_cancelled' | 'tool_waiting' | 'tool_decided' | 'summary_created' | 'generation_advanced' | 'task_paused' | 'task_resumed' | 'task_cancelling' | 'task_cancelled' | 'task_completed' | 'task_failed'
+export interface TaskRunEvent {
+  id: string; taskRunId: string; seq: number; generation: number; eventType: TaskRunEventType
+  agentId: string | null; messageId: string | null; toolExecutionId: string | null
+  metadataJson: string; createdAt: string
+}
+export type AgentTurnStatus = 'queued' | 'running' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled'
+export interface AgentTurn {
+  id: string; taskRunId: string; ordinal: number; agentId: string; generation: number
+  status: AgentTurnStatus; triggerEventSeq: number; messageId: string | null
+  startedAt: string | null; finishedAt: string | null
+}
+export type MentionSource = 'ceo' | 'agent'
+export type MentionStatus = 'pending' | 'consumed' | 'cancelled'
+export interface MentionQueueItem { taskRunId: string; position: number; agentId: string; sourceMessageId: string; source: MentionSource; status: MentionStatus }
+export interface SessionSummary { id: string; channelId: string; taskRunId: string; coveredThroughSeq: number; content: string; modelConfigId: string; createdAt: string }
 
 export interface AuditEvent {
   id: string

@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import type { Conversation } from '../../stores/workbench-store'
 import { EmptyState } from '../common/EmptyState'
 
-const statusLabels = { queued: '排队中', running: '正在生成', completed: '已完成', cancelled: '已取消', failed: '生成失败', paused: '任务已暂停，应用重启后不会自动续跑' }
+const statusLabels = { queued: '排队中', running: '正在生成', cancelling: '正在停止', completed: '已完成', cancelled: '已取消', failed: '生成失败', paused: '任务已暂停，应用重启后不会自动续跑' }
 export function MessageStream({ conversation }: { conversation: Conversation }) {
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight }, [conversation.messages, conversation.runs])

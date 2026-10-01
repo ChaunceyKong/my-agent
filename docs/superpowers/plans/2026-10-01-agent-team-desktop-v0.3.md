@@ -18,9 +18,9 @@
 
 **Likely files:** `electron/database/schema.ts`, `electron/database/repositories.ts`, `shared/types.ts`, new `electron/core/orchestrator-events.ts`, focused unit tests.
 
-- Add idempotent migration for TaskRun ordered events, Agent Turn, mention queue and summary records, Message agent identity/provenance, Channel mode/budget/scheduler config. Add a database partial unique index for one `running` TaskRun per Channel. Backfill old Message provenance as `legacy`; do not infer an Agent identity.
+- Add idempotent migration for TaskRun ordered events, Agent Turn, mention queue and summary records, Message agent identity/provenance, Channel mode/budget/scheduler config and persisted `cancelling` state. Recover historical duplicate `running` runs to `paused` with audit before adding a database partial unique index for one `running` or `cancelling` TaskRun per Channel. Backfill old Message provenance as `legacy`; do not infer an Agent identity.
 - Keep the old unique enabled-member index and old send path in this task. Add transactional event-sequence allocation, one active Turn check, atomic TaskRun/message/event creation, and restart recovery that pauses Turn and invalidates generation.
-- Verify v10 database migration with old 0/1 member chats, unique sequence under concurrent appends, no duplicate active Turn, restart without replay, no content or secrets copied into event metadata.
+- Verify v10 database migration with old 0/1 member chats and duplicate-running recovery, unique sequence under concurrent appends, no duplicate active Turn, restart without replay, no content or secrets copied into event metadata. New send/resume transactions reject an unresolved `paused` Run; CEO must explicitly continue or terminate it.
 - Commit only Task 1 and obtain an independent review before Task 2.
 
 ## Task 2 — Atomic serial cutover and CEO structured mentions
@@ -30,6 +30,7 @@
 - Build Main serial Turn runner using the existing single-Agent model/tool loop and its approval, consent and file/process services. Refactor the existing runner to return a Turn outcome instead of finishing TaskRun or inserting a generic assistant message; the Orchestrator commits the real speaker Message and decides whether to continue. Bind each stream/tool effect to `taskRunId + generation + turnId + agentId` and verify enabled membership/model/permissions at start and before effect.
 - In one reviewed commit, drop `channel_agents_one_enabled_idx`, stop `saveChannelAgent` from disabling peers, and replace `MessageSend`'s first-enabled-member path with the serial orchestrator. Preserve 0/1 member behavior; no-member ordinary chat stays supported.
 - Accept CEO MentionTokens only from the composer schema. Validate ranges, source content, current enabled IDs, bounded count, order and duplicate handling in Main; persist ordered queue and consume one speaker at a time. Without a token and before automatic routing exists, pause with an explicit manual-selection reason.
+- Replace the v0.2 approval completion callback in the same cutover: approved overwrite and approved process execution persist their ToolExecution/Turn effect event without ending the collaborative TaskRun; only CEO explicit continue or termination advances it. Verify both approval paths.
 - Verify multiple enabled members persist, two structured mentions run in order, malformed/disabled/forged token fails, concurrent sends yield one active Run, revoked member loses effect rights, approval wait blocks next Turn, legacy single Agent still works.
 - Commit and independently review the migration plus routing cutover as one security-sensitive change.
 
@@ -56,9 +57,9 @@
 **Likely files:** `electron/core/serial-orchestrator.ts`, `electron/core/task-run-service.ts`, model/tool timeout boundaries, repository transitions, named IPC and tests.
 
 - Enforce Channel max Turns (default 30), three same-Agent consecutive Turns, repeated `A→B→A→B` cycles, 120-second Agent model timeout and bounded scheduler/summary/tool calls. Pauses show a reason and need CEO action.
-- CEO interruption increments old Run generation and cancels old Turn before creating the next Run. Abort cancellable calls, fence late chunks/tool results and preserve any already committed effect. Restart pauses without re-running a decision or tool.
+- CEO interruption increments old Run generation and enters persisted `cancelling` before creating the next Run. That status retains the Channel lease until Abort/cleanup reaches a safe terminal state; unresolved effects become `paused` and block new send. Abort cancellable calls, fence late chunks/tool results and preserve any already committed effect. Restart pauses without re-running a decision or tool.
 - Approval wait leaves Run `running` and blocks another Turn. Approval executes only the immutable prior request; CEO explicit continue starts a fresh Turn/generation from persisted safe facts. Rejection/expiry/cancellation and recovery states cannot silently restart.
-- Verify stop-vs-file effect race, old-generation chunks, two competing CEO sends, interrupt while approval pending, timeout of model/process, process cleanup pending, restart and explicit resume.
+- Verify stop-vs-file effect race, old-generation chunks, two competing CEO sends, interrupt while approval pending, timeout of model/process, process cleanup pending, restart and explicit resume. A paused older Run must be explicitly continued or terminated before a new Run can be created.
 - Commit and independently review.
 
 ## Task 6 — PRD v0.3 configuration gaps

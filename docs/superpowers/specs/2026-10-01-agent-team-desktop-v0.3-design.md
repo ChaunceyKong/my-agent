@@ -16,7 +16,7 @@
 - `channels` 增加 `speaker_mode`（`automatic` / `manual`，默认 `automatic`）、`max_turns`（默认 30，上限 100）和 `scheduler_model_config_id`（可空，空时使用应用默认调度模型）。默认调度模型持久化在单行设置表；引用的配置删除必须先解除引用。
 - `messages` 增加可空 `agent_id`、`origin`（`ceo` / `agent` / `legacy`）、`task_run_seq`。旧 Agent 消息标记 `legacy` 且不推断 Agent ID；旧行按现有 `(created_at,id)` 展示。新消息以事务分配的 TaskRun 内序号排序，跨 TaskRun 以创建顺序排序。Agent 提及只解析 `origin=agent`、`status=completed`、`agent_id` 有效的新消息。
 - 新增 `task_run_events`：`id`、`task_run_id`、单调递增 `seq`、`generation`、`event_type`、`agent_id?`、`message_id?`、`tool_execution_id?`、有限长度安全元数据、`created_at`；唯一 `(task_run_id,seq)`。事件用于恢复、调度和可解释性，正文继续以 Message 为唯一来源，密钥、原始工具输出和文件正文不复制进事件。
-- 新增 `agent_turns`：`id`、`task_run_id`、`ordinal`、`agent_id`、`generation`、`status`（`queued/running/waiting_approval/completed/failed/cancelled`）、`trigger_event_seq`、`message_id?`、`started_at/finished_at`；唯一 `(task_run_id,ordinal)`，每个 TaskRun 至多一个非终态 Turn。`task_runs` 增加 `current_turn_id?`、`turn_count`、`pause_reason?`，并保持现有状态枚举。等待审批仍是 `TaskRun.running`，由 Turn 和 ToolExecution 表示；不要引入仅完成一半的新 TaskRun 状态。
+- 新增 `agent_turns`：`id`、`task_run_id`、`ordinal`、`agent_id`、`generation`、`status`（`queued/running/waiting_approval/completed/failed/cancelled`）、`trigger_event_seq`、`message_id?`、`started_at/finished_at`；唯一 `(task_run_id,ordinal)`，每个 TaskRun 至多一个非终态 Turn。`task_runs` 增加 `current_turn_id?`、`turn_count`、`pause_reason?`，并增加持久 `cancelling` 状态。等待审批仍是 `TaskRun.running`，由 Turn 和 ToolExecution 表示。
 - 新增 `mention_queue`：`task_run_id`、`position`、`agent_id`、`source_message_id`、`source`（`ceo/agent`）、`status`；仅结构化 CEO token 或经验证的已完成 Agent 回复可写入。新增 `session_summaries`：Channel/TaskRun、覆盖的末尾事件序号、摘要正文、模型配置 ID、生成时间；结构化任务事实仍从现有 TaskRun/ToolExecution/Approval/审计记录查询。
 - 提议中的提及 token 传 `agentId`、显示区间与原文；Main 验证区间、原文、当前 Channel 启用成员、去重/顺序，拒绝伪造、重名显示名或越界。不要从 CEO 普通文本正则解析 `@`。
 
@@ -24,7 +24,7 @@
 
 ## 主进程事件与调度
 
-所有状态转换在 Main 的同一 Channel 队列和 SQLite 写事务中分配事件序号；数据库部分唯一索引保证一个 Channel 至多一个 `running` TaskRun。事件至少包含 CEO 消息、提及入队/消费、speaker 决策、Turn 开始/完成、工具等待/决议、摘要版本、暂停/恢复/取消/结束。UI 通过命名 IPC 订阅事件并按序去重；数据库是权威状态。模型分片只更新当前 Turn 的临时展示，完成后才持久化 Agent 消息；序号及 `taskRunId + generation + turnId` 不匹配的迟到分片不得改写状态。现有单 Agent runner 必须改为返回 Turn 结果，不再自行结束整个 TaskRun 或写通用“AI 助手”消息。
+所有状态转换在 Main 的同一 Channel 队列和 SQLite 写事务中分配事件序号；数据库部分唯一索引保证一个 Channel 至多一个 `running` 或 `cancelling` TaskRun。创建和恢复还须在同一事务检查该 Channel 的 `paused` Run；存在暂停 Run 时，新 CEO 消息先明确选择“继续”或“插话终止旧任务”，不能直接新建 Run。旧库若已有多个 `running` Run，迁移先把它们逐条标 `paused` 并留下恢复审计，再建唯一索引；多个暂停 Run 由 CEO 逐条处置，不自动重放。事件至少包含 CEO 消息、提及入队/消费、speaker 决策、Turn 开始/完成、工具等待/决议、摘要版本、暂停/恢复/取消/结束。UI 通过命名 IPC 订阅事件并按序去重；数据库是权威状态。模型分片只更新当前 Turn 的临时展示，完成后才持久化 Agent 消息；序号及 `taskRunId + generation + turnId` 不匹配的迟到分片不得改写状态。现有单 Agent runner 必须改为返回 Turn 结果，不再自行结束整个 TaskRun 或写通用“AI 助手”消息。
 
 选择下一位的顺序：
 
@@ -45,7 +45,7 @@
 
 最多 30 个完成或启动的 Agent Turn（Channel 可配置），同一 Agent 连续 3 Turn、`A→B→A→B` 重复 3 次均暂停并给 CEO 可见原因。单 Agent 模型调用 120 秒超时；工具调用继续使用 v0.2 边界，新增 60 秒单工具超时的可取消调用约束，无法可靠中止的效果进入现有待清理/恢复状态，不伪称已取消。调度和摘要请求同样有限时及 AbortSignal。暂停后只能由 CEO 明确指派或继续，且再次校验预算/成员/同意。
 
-CEO 插话按事务先停止旧 Turn、使 TaskRun generation 递增并进入取消流程，再 Abort 模型及可取消工具；保留已有不可逆效果和审计，丢弃旧代次后续分片/请求/回调。确认旧 Run 已终止或处于需人工恢复的安全状态后，才为新 CEO 消息创建 Run。正常取消、重启恢复、成员撤权均遵循代次栅栏。审批等待期间不启动下一位 Agent；批准只按现有 requestHash/generation/policy snapshot 执行已批准效果，拒绝/过期仍安全终止该 Turn。v0.3 不自动从待审批点重放模型调用；CEO 明确点击“继续”后，以新的 Turn/代次和已持久化的结果摘要重建上下文。不能完成的效果先进入恢复处理并暂停 Run。重启时 `running` Run/Turn 置 `paused`、递增 generation，不能自动重放调度、工具或批准。
+CEO 插话按事务先停止旧 Turn、使 TaskRun generation 递增并进入持久 `cancelling`，再 Abort 模型及可取消工具；`cancelling` 与 `running` 共同占用 Channel 执行租约。保留已有不可逆效果和审计，丢弃旧代次后续分片/请求/回调。确认旧 Run 已终止且没有待恢复效果后，才为新 CEO 消息创建 Run；若效果仍需人工恢复则保持 `paused` 并阻止新建。正常取消、重启恢复、成员撤权均遵循代次栅栏。审批等待期间不启动下一位 Agent；批准只按现有 requestHash/generation/policy snapshot 执行已批准效果，拒绝/过期仍安全终止该 Turn。Task 2 串行切换必须同时替换 v0.2 审批服务的 `finishTaskRun` 回调：获批覆盖与进程执行只写入效果终态及 Turn 事件，Run 保持等待 CEO 指令；不可提前完成协作 Run。v0.3 不自动从待审批点重放模型调用；CEO 明确点击“继续”后，以新的 Turn/代次和已持久化的结果摘要重建上下文。重启时 `running` Run/Turn 置 `paused`、递增 generation，不能自动重放调度、工具或批准。
 
 ## 模型中心、Channel 和 Studio 的 v0.3 缺口
 

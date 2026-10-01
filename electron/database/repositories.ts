@@ -845,6 +845,10 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const member = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.agentId, agentId))).get()
         if (!trigger || trigger.generation !== run.generation || trigger.eventType !== 'speaker_decided'
           || trigger.agentId !== agentId || !member?.isEnabled) throw new Error('Agent 未获得当前发言资格')
+        if (tx.select({ id: agentTurns.id }).from(agentTurns)
+          .where(and(eq(agentTurns.taskRunId, taskRunId), eq(agentTurns.triggerEventSeq, triggerEventSeq))).get()) {
+          throw new Error('发言决策已被使用')
+        }
         if (tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval']))).get()) throw new Error('任务仍有未完成操作')
         const timestamp = new Date().toISOString()
         const turn: AgentTurn = { id: randomUUID(), taskRunId, ordinal: run.turnCount + 1, agentId,

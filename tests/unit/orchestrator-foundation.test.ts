@@ -131,12 +131,17 @@ it('commits Agent message, identity and completion event in one Turn transaction
     ])
     expect(JSON.stringify(await repositories.listTaskRunEvents(run.id))).not.toMatch(/CEO secret|Agent private reply/)
     await expect(repositories.completeAgentTurn(turn.id, 'late reply')).rejects.toThrow()
+    await expect(repositories.startAgentTurn(run.id, run.generation, agent.id, decision.seq)).rejects.toThrow('发言决策已被使用')
+    const freshDecision = await repositories.appendTaskRunEvent(run.id, run.generation, 'speaker_decided', { agentId: agent.id })
+    const nextTurn = await repositories.startAgentTurn(run.id, run.generation, agent.id, freshDecision.seq)
+    expect(nextTurn.ordinal).toBe(2)
+    await repositories.finishAgentTurn(nextTurn.id, 'cancelled')
     const advanced = await repositories.advanceTaskRunGeneration(run.id)
     await expect(repositories.startAgentTurn(run.id, advanced.generation, agent.id, decision.seq)).rejects.toThrow()
     const wrongSpeaker = await repositories.appendTaskRunEvent(run.id, advanced.generation, 'speaker_decided')
     await expect(repositories.startAgentTurn(run.id, advanced.generation, agent.id, wrongSpeaker.seq)).rejects.toThrow()
     const currentDecision = await repositories.appendTaskRunEvent(run.id, advanced.generation, 'speaker_decided', { agentId: agent.id })
-    await expect(repositories.startAgentTurn(run.id, advanced.generation, agent.id, currentDecision.seq)).resolves.toMatchObject({ ordinal: 2 })
+    await expect(repositories.startAgentTurn(run.id, advanced.generation, agent.id, currentDecision.seq)).resolves.toMatchObject({ ordinal: 3 })
   } finally { db.close(); rmSync(directory, { recursive: true, force: true }) }
 })
 

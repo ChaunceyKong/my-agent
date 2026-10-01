@@ -21,11 +21,23 @@ function permissions(value: unknown): ToolPermissions {
   return result
 }
 
-function summary(agent: Agent): AgentSummary {
+export function agentSummary(agent: Agent): AgentSummary {
   return {
     id: agent.id, name: agent.name, avatar: agent.avatar, title: agent.title,
     modelConfigId: agent.modelConfigId, defaultToolPermissions: agent.defaultToolPermissions,
-    isBuiltin: agent.isBuiltin, createdAt: agent.createdAt, updatedAt: agent.updatedAt,
+    isBuiltin: agent.isBuiltin, sourceTemplateId: agent.sourceTemplateId ?? null, createdAt: agent.createdAt, updatedAt: agent.updatedAt,
+  }
+}
+
+export function validateAgentEditorInput(input: AgentEditorInput): AgentEditorInput {
+  if (!input || typeof input !== 'object') throw new Error('Agent 配置无效')
+  return {
+    name: requireText(input.name, 'Agent 名称').trim(),
+    avatar: avatar(input.avatar),
+    title: requireText(input.title, 'Agent 职位', true),
+    systemPrompt: requireText(input.systemPrompt, '系统提示词', true),
+    modelConfigId: requireText(input.modelConfigId, '模型配置'),
+    defaultToolPermissions: permissions(input.defaultToolPermissions),
   }
 }
 
@@ -55,32 +67,24 @@ export function createAgentService(repositories: Repositories) {
   }
 
   async function editorInput(input: AgentEditorInput): Promise<AgentEditorInput> {
-    if (!input || typeof input !== 'object') throw new Error('Agent 配置无效')
-    const validated: AgentEditorInput = {
-      name: requireText(input.name, 'Agent 名称').trim(),
-      avatar: avatar(input.avatar),
-      title: requireText(input.title, 'Agent 职位', true),
-      systemPrompt: requireText(input.systemPrompt, '系统提示词', true),
-      modelConfigId: requireText(input.modelConfigId, '模型配置'),
-      defaultToolPermissions: permissions(input.defaultToolPermissions),
-    }
+    const validated = validateAgentEditorInput(input)
     await requireModel(validated.modelConfigId)
     return validated
   }
 
   return {
     async list(): Promise<AgentSummary[]> {
-      return (await repositories.listAgents()).map(summary)
+      return (await repositories.listAgents()).map(agentSummary)
     },
     get,
     async create(input: AgentEditorInput): Promise<AgentSummary> {
-      return summary(await repositories.createAgent(await editorInput(input)))
+      return agentSummary(await repositories.createAgent(await editorInput(input)))
     },
     async update(id: string, input: AgentEditorInput): Promise<AgentSummary> {
       await get(id)
       const agent = await repositories.updateAgent(id, await editorInput(input))
       if (!agent) throw new Error('Agent 不存在')
-      return summary(agent)
+      return agentSummary(agent)
     },
     async remove(id: string): Promise<void> {
       await get(id)

@@ -1,10 +1,11 @@
 import { IpcChannel } from '../../shared/ipc-channels'
-import type { AgentEditorInput, ConfigureChannelInput, CreateChannelInput, CreateProjectInput, DeleteChannelInput, RegisteredExecutableInput, SaveChannelAgentInput, SaveModelConfigInput, SendMessageInput, StreamEvent } from '../../shared/types'
+import type { AgentEditorInput, ConfigureChannelInput, CopyAgentTemplateInput, CreateChannelInput, CreateProjectInput, DeleteChannelInput, ImportAgentTemplateInput, RegisteredExecutableInput, SaveChannelAgentInput, SaveModelConfigInput, SendMessageInput, StreamEvent } from '../../shared/types'
 import { buildAgentContext, ContextBudgetError } from '../core/context-manager'
 import type { createApprovalService } from '../core/approval-service'
 import type { createProcessToolService } from '../core/process-tool-service'
 import { hasWindowsAliasSegment, isSafeRegisteredExecutable } from '../core/process-tool'
 import { createAgentService } from '../core/agent-service'
+import { createTemplateService } from '../core/template-service'
 import type { TaskRunService } from '../core/task-run-service'
 import { ModelInterventionError, type ModelClient } from '../core/model-client'
 import type { createSingleAgentRunner } from '../core/single-agent-runner'
@@ -39,6 +40,21 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
   const startingChannels = new Set<string>()
   const workspaceSelections = new Map<string, string>()
   const agents = createAgentService(repositories)
+  const templates = createTemplateService(repositories)
+  ipcMain.handle(IpcChannel.TemplateList, () => templates.list())
+  ipcMain.handle(IpcChannel.TemplateGet, (_event, id: string) => templates.get(id))
+  async function importTemplate(input: ImportAgentTemplateInput | CopyAgentTemplateInput, copy: boolean) {
+    const channelId = validId(input?.channelId)
+    if (startingChannels.has(channelId)) throw new Error('群聊任务或模板正在启动，请稍后重试')
+    startingChannels.add(channelId)
+    try {
+      const runs = await repositories.listTaskRuns(channelId)
+      if (runs.some((run) => taskRuns?.hasActiveEffects(run.id))) throw new Error('请先结束当前任务并等待操作清理，再导入模板')
+      return await (copy ? templates.copyAgent(input as CopyAgentTemplateInput) : templates.importTeam(input as ImportAgentTemplateInput))
+    } finally { startingChannels.delete(channelId) }
+  }
+  ipcMain.handle(IpcChannel.TemplateImport, (_event, input: ImportAgentTemplateInput) => importTemplate(input, false))
+  ipcMain.handle(IpcChannel.TemplateCopy, (_event, input: CopyAgentTemplateInput) => importTemplate(input, true))
   ipcMain.handle(IpcChannel.AgentList, () => agents.list())
   ipcMain.handle(IpcChannel.AgentGet, (_event, id: string) => agents.get(id))
   ipcMain.handle(IpcChannel.AgentCreate, (_event, input: AgentEditorInput) => agents.create(input))

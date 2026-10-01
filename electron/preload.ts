@@ -10,6 +10,12 @@ import type {
 } from '../shared/types'
 
 const api: AgentTeamApi = {
+  templates: {
+    list: () => ipcRenderer.invoke(IpcChannel.TemplateList),
+    get: (id) => ipcRenderer.invoke(IpcChannel.TemplateGet, id),
+    importTeam: (input) => ipcRenderer.invoke(IpcChannel.TemplateImport, input),
+    copyAgent: (input) => ipcRenderer.invoke(IpcChannel.TemplateCopy, input),
+  },
   agents: {
     list: () => ipcRenderer.invoke(IpcChannel.AgentList),
     get: (id) => ipcRenderer.invoke(IpcChannel.AgentGet, id),

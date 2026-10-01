@@ -216,11 +216,57 @@ export interface AgentEditorInput {
 export interface Agent extends AgentEditorInput {
   id: string
   isBuiltin: boolean
+  sourceTemplateId?: string | null
   createdAt: string
   updatedAt: string
 }
 
 export type AgentSummary = Omit<Agent, 'systemPrompt'>
+
+export interface AgentTemplateRole {
+  id: string
+  name: string
+  avatar: string
+  title: string
+  systemPrompt: string
+  responsibilities: string[]
+  outputFormat: string
+}
+
+export interface AgentTemplateSummary {
+  id: string
+  name: string
+  avatar: string
+  description: string
+  roleCount: number
+  roleNames: string[]
+}
+
+export interface AgentTemplate {
+  id: string
+  name: string
+  avatar: string
+  description: string
+  roles: AgentTemplateRole[]
+}
+
+export interface ImportAgentTemplateInput {
+  templateId: string
+  channelId: string
+  modelConfigId: string
+}
+
+export interface CopyAgentTemplateInput {
+  templateId: string
+  roleId: string
+  channelId: string
+  editor: Omit<AgentEditorInput, 'defaultToolPermissions'>
+}
+
+export interface AgentTemplateImportResult {
+  agents: AgentSummary[]
+  members: ChannelAgent[]
+}
 
 export interface SaveChannelAgentInput {
   channelId: string
@@ -380,6 +426,12 @@ export interface StreamChatInput {
 }
 
 export interface AgentTeamApi {
+  templates: {
+    list(): Promise<AgentTemplateSummary[]>
+    get(id: string): Promise<AgentTemplate>
+    importTeam(input: ImportAgentTemplateInput): Promise<AgentTemplateImportResult>
+    copyAgent(input: CopyAgentTemplateInput): Promise<AgentTemplateImportResult>
+  }
   agents: {
     list(): Promise<AgentSummary[]>
     get(id: string): Promise<Agent>

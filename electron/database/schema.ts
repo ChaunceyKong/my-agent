@@ -135,6 +135,7 @@ export const agents = sqliteTable('agents', {
   modelConfigId: text('model_config_id').notNull().references(() => modelConfigs.id, { onDelete: 'restrict' }),
   defaultToolPermissions: text('default_tool_permissions', { mode: 'json' }).$type<ToolPermissions>().notNull(),
   isBuiltin: integer('is_builtin', { mode: 'boolean' }).notNull().default(false),
+  sourceTemplateId: text('source_template_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 })
@@ -521,6 +522,14 @@ export function migrate(sqlite: Database.Database): void {
       }
       if ((sqlite.pragma('foreign_key_check') as unknown[]).length) throw new Error('模型来源迁移引用校验失败')
       sqlite.pragma('user_version = 17')
+    })()
+  }
+
+  if (version < 18) {
+    sqlite.transaction(() => {
+      sqlite.exec('ALTER TABLE agents ADD COLUMN source_template_id TEXT;')
+      if ((sqlite.pragma('foreign_key_check') as unknown[]).length) throw new Error('模板来源迁移引用校验失败')
+      sqlite.pragma('user_version = 18')
     })()
   }
 }

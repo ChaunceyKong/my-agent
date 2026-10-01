@@ -159,12 +159,12 @@ it('keeps multiple enabled members after idempotent migration', () => {
     migrate(sqlite)
     expect(sqlite.prepare('SELECT name FROM projects').get()).toEqual({ name: 'project' })
     sqlite.exec("INSERT INTO model_configs (id,provider_preset,base_url,model_name,encrypted_api_key,created_at,updated_at) VALUES ('m', 'openai', 'https://example.test', 'test', 'key', 'now', 'now');")
-    const insert = sqlite.prepare('INSERT INTO agents VALUES (?, ?, NULL, ?, ?, ?, ?, 0, ?, ?)')
+    const insert = sqlite.prepare('INSERT INTO agents (id,name,avatar,title,system_prompt,model_config_id,default_tool_permissions,is_builtin,created_at,updated_at) VALUES (?, ?, NULL, ?, ?, ?, ?, 0, ?, ?)')
     for (const id of ['a', 'b']) insert.run(id, id, 'title', 'prompt', 'm', '{}', 'now', 'now')
     sqlite.exec("INSERT INTO channel_agents (channel_id,agent_id,is_enabled,model_config_override_id,tool_permissions_override,created_at,updated_at) VALUES ('c', 'a', 1, NULL, NULL, 'now', 'now');")
     sqlite.exec("INSERT INTO channel_agents (channel_id,agent_id,is_enabled,model_config_override_id,tool_permissions_override,created_at,updated_at) VALUES ('c', 'b', 1, NULL, NULL, 'now', 'now');")
     expect(sqlite.prepare('SELECT count(*) AS n FROM channel_agents WHERE is_enabled=1').get()).toEqual({ n: 2 })
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(17)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(18)
   } finally {
     sqlite.close()
   }

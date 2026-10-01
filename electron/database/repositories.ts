@@ -300,6 +300,7 @@ export interface Repositories {
   listAgents(): Promise<Agent[]>
   getAgent(id: string): Promise<Agent | undefined>
   createAgent(input: AgentEditorInput): Promise<Agent>
+  createTemplateAgents(input: { templateId: string; channelId: string; copies: Array<Omit<AgentEditorInput, 'defaultToolPermissions'>> }): Promise<{ agents: Agent[]; members: ChannelAgent[] }>
   updateAgent(id: string, input: AgentEditorInput): Promise<Agent | undefined>
   removeAgent(id: string): Promise<void>
   listChannelAgents(channelId: string): Promise<ChannelAgent[]>
@@ -800,6 +801,43 @@ export function createRepositories(client: DatabaseClient): Repositories {
     async createAgent(input: AgentEditorInput): Promise<Agent> {
       const timestamp = new Date().toISOString()
       return client.db.insert(agents).values({ ...input, id: randomUUID(), isBuiltin: false, createdAt: timestamp, updatedAt: timestamp }).returning().get()
+    },
+
+    async createTemplateAgents(input) {
+      return client.db.transaction((tx) => {
+        if (!tx.select().from(channels).where(eq(channels.id, input.channelId)).get()) throw new Error('群聊不存在')
+        const activeRun = tx.select().from(taskRuns).where(and(eq(taskRuns.channelId, input.channelId), inArray(taskRuns.status, ['queued', 'running', 'cancelling', 'paused']))).get()
+        const activeTurn = tx.select({ id: agentTurns.id }).from(agentTurns).innerJoin(taskRuns, eq(taskRuns.id, agentTurns.taskRunId))
+          .where(and(eq(taskRuns.channelId, input.channelId), inArray(agentTurns.status, ['queued', 'running', 'waiting_approval']))).get()
+        const activeTool = tx.select({ id: toolExecutions.id }).from(toolExecutions).innerJoin(taskRuns, eq(taskRuns.id, toolExecutions.taskRunId))
+          .where(and(eq(taskRuns.channelId, input.channelId), or(inArray(toolExecutions.status, ['executing', 'waiting_approval']), eq(toolExecutions.processRecoveryRequired, true)))).get()
+        const approval = tx.select({ id: approvalRequests.id }).from(approvalRequests)
+          .innerJoin(toolExecutions, eq(toolExecutions.id, approvalRequests.toolExecutionId)).innerJoin(taskRuns, eq(taskRuns.id, toolExecutions.taskRunId))
+          .where(and(eq(taskRuns.channelId, input.channelId), or(inArray(approvalRequests.status, ['pending', 'approved']),
+            and(eq(approvalRequests.status, 'executing'), inArray(toolExecutions.status, ['executing', 'waiting_approval']))))).get()
+        const journal = tx.select({ id: overwritePublications.executionId }).from(overwritePublications)
+          .innerJoin(toolExecutions, eq(toolExecutions.id, overwritePublications.executionId)).innerJoin(taskRuns, eq(taskRuns.id, toolExecutions.taskRunId))
+          .where(and(eq(taskRuns.channelId, input.channelId), sql`${overwritePublications.state} NOT IN ('completed','recovered')`)).get()
+        if (activeRun || activeTurn || activeTool || approval || journal) throw new Error('请先结束当前任务并处理操作、审批或恢复记录，再导入模板')
+        if (!input.copies.length || input.copies.length > 5) throw new Error('模板角色无效')
+        const names = new Set(tx.select({ name: agents.name }).from(agents).all().map((agent) => agent.name))
+        const timestamp = new Date().toISOString()
+        const result: { agents: Agent[]; members: ChannelAgent[] } = { agents: [], members: [] }
+        for (const copy of input.copies) {
+          if (!tx.select().from(modelConfigs).where(eq(modelConfigs.id, copy.modelConfigId)).get()) throw new Error('模型配置不存在')
+          let name = copy.name
+          for (let number = 2; names.has(name); number++) name = `${copy.name} ${number}`
+          names.add(name)
+          const agent = tx.insert(agents).values({ id: randomUUID(), name, avatar: copy.avatar, title: copy.title,
+            systemPrompt: copy.systemPrompt, modelConfigId: copy.modelConfigId, defaultToolPermissions: {}, isBuiltin: false,
+            sourceTemplateId: input.templateId, createdAt: timestamp, updatedAt: timestamp }).returning().get()!
+          const member = tx.insert(channelAgents).values({ channelId: input.channelId, agentId: agent.id, isEnabled: true,
+            modelConfigOverrideId: null, toolPermissionsOverride: null, revision: randomUUID(), createdAt: timestamp, updatedAt: timestamp }).returning().get()!
+          result.agents.push(agent)
+          result.members.push(member)
+        }
+        return result
+      })
     },
 
     async updateAgent(id: string, input: AgentEditorInput): Promise<Agent | undefined> {

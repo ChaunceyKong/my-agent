@@ -129,7 +129,8 @@ it('upgrades populated v16 without invented provenance or releasing claimed proc
   const sqlite = new Database(':memory:')
   try {
     migrate(sqlite)
-    sqlite.exec(`ALTER TABLE model_configs DROP COLUMN fallback_config_id;
+    sqlite.exec(`ALTER TABLE agents DROP COLUMN source_template_id;
+      ALTER TABLE model_configs DROP COLUMN fallback_config_id;
       ALTER TABLE agent_turns DROP COLUMN configured_model_config_id;
       ALTER TABLE agent_turns DROP COLUMN actual_model_config_id;
       ALTER TABLE agent_turns DROP COLUMN configured_model_fingerprint;
@@ -157,7 +158,7 @@ it('upgrades populated v16 without invented provenance or releasing claimed proc
     insertApproval.run('ap', 'pending', 'pending'); insertApproval.run('ac', 'process', 'executing'); insertApproval.run('af', 'file', 'executing')
     sqlite.exec("INSERT INTO overwrite_publications VALUES ('file','temporary','backup',NULL,'cleanup_pending','now','now')")
     migrate(sqlite); migrate(sqlite)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(17)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(18)
     expect(sqlite.pragma('foreign_key_check')).toEqual([])
     expect(sqlite.prepare('SELECT encrypted_api_key,fallback_config_id FROM model_configs').get()).toEqual({ encrypted_api_key: 'ENCRYPTED_PRIVATE_KEY', fallback_config_id: null })
     expect(sqlite.prepare('SELECT configured_model_config_id,actual_model_config_id FROM agent_turns').get()).toEqual({ configured_model_config_id: null, actual_model_config_id: null })

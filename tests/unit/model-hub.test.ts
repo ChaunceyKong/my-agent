@@ -144,6 +144,7 @@ it('upgrades populated v15 model table without losing references, keys or consen
     migrate(sqlite)
     sqlite.pragma('foreign_keys = OFF')
     sqlite.exec(`DROP TABLE model_settings;
+      ALTER TABLE agents DROP COLUMN source_template_id;
       ALTER TABLE agent_turns DROP COLUMN configured_model_config_id;
       ALTER TABLE agent_turns DROP COLUMN actual_model_config_id;
       ALTER TABLE agent_turns DROP COLUMN configured_model_fingerprint;
@@ -168,7 +169,7 @@ it('upgrades populated v15 model table without losing references, keys or consen
     const before = tables.map((table) => sqlite.prepare(`SELECT * FROM ${table}`).all())
     migrate(sqlite); migrate(sqlite)
     expect(tables.map((table) => (sqlite.prepare(`SELECT * FROM ${table}`).all() as Record<string, unknown>[])
-      .map(({ fallback_config_id: _fallback, configured_model_config_id: _configured, ...row }) => row))).toEqual(before)
+      .map(({ fallback_config_id: _fallback, configured_model_config_id: _configured, source_template_id: _template, ...row }) => row))).toEqual(before)
     expect(sqlite.pragma('foreign_key_check')).toEqual([])
     expect(sqlite.pragma('foreign_keys', { simple: true })).toBe(1)
     sqlite.exec("INSERT INTO model_settings VALUES (1,'m')")

@@ -14,7 +14,7 @@ const client = createModelClient({ repositories: repo, consent: createCloudConse
   crypto: { isEncryptionAvailable: () => true, encryptString: (key) => Buffer.from(key), decryptString: (key) => key.toString() },
   taskRuns: { canAcceptChunk: async () => true, onCancelled: () => () => {} } })
 const response = (data: object) => new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } })
-afterEach(() => fetchImpl.mockReset())
+afterEach(() => { fetchImpl.mockReset(); vi.useRealTimers() })
 
 it('preserves encrypted key on blank edit, returns no key and clears external consents', async () => {
   const { project } = await repo.createProjectWithInitialChannel({ name: 'p', workspacePath: 'C:/test' })
@@ -25,6 +25,21 @@ it('preserves encrypted key on blank edit, returns no key and clears external co
   expect((await repo.getModelConfig(model.id))?.encryptedApiKey).toBe(Buffer.from('SECRET').toString('base64'))
   expect(await repo.hasCloudConsent(project.id, model.id)).toBe(false)
   expect(await repo.hasToolResultConsent(project.id, model.id, 1)).toBe(false)
+})
+
+it('changes the model snapshot for each edit even with unchanged values in the same millisecond', async () => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date('2026-10-01T00:00:00Z'))
+  const input = { providerPreset: 'openai' as const, modelName: 'test', apiKey: 'SECRET' }
+  const model = await client.saveModelConfig(input)
+  const original = await repo.getModelConfig(model.id)
+  await client.saveModelConfig({ ...input, id: model.id, apiKey: '' })
+  const firstEdit = await repo.getModelConfig(model.id)
+  await client.saveModelConfig({ ...input, id: model.id, apiKey: '' })
+  const secondEdit = await repo.getModelConfig(model.id)
+  expect(firstEdit?.updatedAt).toBe('2026-10-01T00:00:00.001Z')
+  expect(secondEdit?.updatedAt).toBe('2026-10-01T00:00:00.002Z')
+  expect(JSON.stringify(firstEdit)).not.toBe(JSON.stringify(original))
+  expect(JSON.stringify(secondEdit)).not.toBe(JSON.stringify(firstEdit))
 })
 
 it('uses global scheduler only without override and rejects referenced deletion', async () => {
@@ -76,6 +91,51 @@ it('sanitizes connection diagnostics without project context or provider secrets
   fetchImpl.mockRejectedValueOnce(new Error('SECRET provider stack'))
   expect(await client.testConnection(model.id)).toEqual({ ok: false, message: '模型连接失败，请检查服务、模型名称和凭证' })
   expect(JSON.parse(fetchImpl.mock.calls[0][1].body).messages).toEqual([{ role: 'user', content: 'Hi' }])
+})
+
+it.each([
+  ['valid', { choices: [{ message: { role: 'assistant', content: 'Hello' } }] }, true],
+  ['missing message', { choices: [{}] }, false],
+  ['error', { error: { message: 'private stack' } }, false],
+  ['error alongside choices', { error: { message: 'private stack' }, choices: [{ message: { role: 'assistant', content: 'Hello' } }] }, false],
+  ['invalid role', { choices: [{ message: { role: 'user', content: 'Hi' } }] }, false],
+  ['tool call', { choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'x' }] } }] }, false],
+])('tests actual Ollama chat and validates %s response', async (_name, data, ok) => {
+  const model = await client.saveModelConfig({ providerPreset: 'ollama', modelName: 'llama3', apiKey: '' })
+  fetchImpl.mockResolvedValueOnce(response({ capabilities: ['completion'] })).mockResolvedValueOnce(response(data))
+  expect((await client.testConnection(model.id)).ok).toBe(ok)
+  expect(fetchImpl.mock.calls[1][0]).toBe('http://127.0.0.1:11434/v1/chat/completions')
+  expect(JSON.parse(fetchImpl.mock.calls[1][1].body)).toEqual({ model: 'llama3', stream: false, max_tokens: 1, messages: [{ role: 'user', content: 'Hi' }] })
+  expect(fetchImpl.mock.calls[1][1].headers).not.toHaveProperty('Authorization')
+  expect(fetchImpl.mock.calls[1][1].redirect).toBe('error')
+})
+
+it('bounds Ollama connection response size and stops a stalled chat body after ten seconds', async () => {
+  const model = await client.saveModelConfig({ providerPreset: 'ollama', modelName: 'llama3', apiKey: '' })
+  fetchImpl.mockResolvedValueOnce(response({ capabilities: ['completion'] })).mockResolvedValueOnce(response({ padding: 'x'.repeat(16_385) }))
+  expect((await client.testConnection(model.id)).ok).toBe(false)
+  vi.useFakeTimers()
+  const cancel = vi.fn()
+  fetchImpl.mockResolvedValueOnce(response({ capabilities: ['completion'] })).mockResolvedValueOnce(new Response(new ReadableStream({ cancel }), { headers: { 'Content-Type': 'application/json' } }))
+  const pending = client.testConnection(model.id)
+  await vi.advanceTimersByTimeAsync(10_000)
+  expect((await pending).ok).toBe(false)
+  expect(cancel).toHaveBeenCalledOnce()
+  expect(fetchImpl.mock.calls.at(-1)![1].signal.aborted).toBe(true)
+})
+
+it.each([false, true])('negotiates completion-only Ollama tools; unsolicited call=%s', async (call) => {
+  const model = await client.saveModelConfig({ providerPreset: 'ollama', modelName: 'llama3', apiKey: '' })
+  fetchImpl.mockResolvedValueOnce(response({ capabilities: ['completion'] })).mockResolvedValueOnce(new Response(
+    call ? 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"x","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n'
+      : 'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\ndata: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } }))
+  const events: any[] = []
+  await client.streamChat({ projectId: 'local', modelConfigId: model.id, taskRunId: 'r', messages: [{ role: 'user', content: 'Hi' }],
+    tools: [{ type: 'function', function: { name: 'read_file', description: 'Read', parameters: { type: 'object' } } }] }, (event) => { events.push(event) })
+  const body = JSON.parse(fetchImpl.mock.calls[1][1].body)
+  expect(body).not.toHaveProperty('tools'); expect(body).not.toHaveProperty('tool_choice')
+  expect(body.messages.at(-1).content).toContain('no tool capability')
+  expect(events.map((event) => event.type)).toEqual(call ? ['error'] : ['delta', 'complete'])
 })
 
 it('upgrades populated v15 model table without losing references, keys or consents', () => {

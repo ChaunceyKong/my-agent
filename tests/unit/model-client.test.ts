@@ -363,7 +363,7 @@ describe('OpenAI-compatible streaming', () => {
   it('emits native tool calls only after a tool_calls terminal frame', async () => {
     const ids = await createProjectAndModel(); const events: StreamEvent[] = []
     fetchImpl.mockResolvedValue(streamResponse(['data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\\"path\\":\\"a.md\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n', 'data: [DONE]\n\n']))
-    await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [] }, (event) => { events.push(event) })
+    await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [], tools: [{ type: 'function', function: { name: 'read_file', description: 'Read', parameters: { type: 'object' } } }] }, (event) => { events.push(event) })
     expect(events).toContainEqual(expect.objectContaining({ type: 'tool_call', toolCall: expect.objectContaining({ id: 'call_1' }) }))
   })
 
@@ -372,14 +372,14 @@ describe('OpenAI-compatible streaming', () => {
     'data: {"choices":[{"delta":{"tool_calls":[{"index":-1,"id":"a","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n',
   ])('fails closed for incomplete or invalid tool-call streams', async (body) => {
     const ids = await createProjectAndModel(); const events: StreamEvent[] = []; fetchImpl.mockResolvedValue(streamResponse([body]))
-    await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [] }, (event) => { events.push(event) })
+    await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [], tools: [{ type: 'function', function: { name: 'read_file', description: 'Read', parameters: { type: 'object' } } }] }, (event) => { events.push(event) })
     expect(events).toEqual([expect.objectContaining({ type: 'error', content: '模型响应格式异常，请稍后重试' })])
   })
 
   it('rejects any fragment appended after the tool_calls terminal frame', async () => {
     const ids = await createProjectAndModel(); const events: StreamEvent[] = []
     fetchImpl.mockResolvedValue(streamResponse(['data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}\n\n', 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"evil"}}]}}]}\n\n', 'data: [DONE]\n\n']))
-    await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [] }, (event) => { events.push(event) })
+    await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [], tools: [{ type: 'function', function: { name: 'read_file', description: 'Read', parameters: { type: 'object' } } }] }, (event) => { events.push(event) })
     expect(events).toEqual([expect.objectContaining({ type: 'error', content: '模型响应格式异常，请稍后重试' })])
   })
 

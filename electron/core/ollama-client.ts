@@ -40,9 +40,10 @@ export async function discoverOllama(fetchImpl: typeof fetch, baseUrl: string, s
   })
 }
 
-export async function verifyOllama(fetchImpl: typeof fetch, baseUrl: string, name: string, tools: boolean, signal: AbortSignal): Promise<void> {
+export async function verifyOllama(fetchImpl: typeof fetch, baseUrl: string, name: string, tools: boolean, signal: AbortSignal): Promise<boolean> {
   localModel(name, {})
   const data = await json(fetchImpl, `${ollamaRoot(baseUrl)}/api/show`, signal, { model: name })
   localModel(name, data)
   if (!Array.isArray(data.capabilities) || !data.capabilities.includes('completion') || (tools && !data.capabilities.includes('tools'))) throw new Error(tools ? 'Ollama 模型不支持原生工具调用' : 'Ollama 模型不支持对话')
+  return data.capabilities.includes('tools')
 }

@@ -257,7 +257,7 @@ export interface Repositories {
   validateStartedTaskRun(input: StartTaskRunInput): Promise<void>
   getTaskRun(id: string): Promise<TaskRun | undefined>
   listTaskRuns(channelId: string): Promise<TaskRun[]>
-  transitionTaskRun(id: string, from: 'running', to: 'completed' | 'failed' | 'cancelled', metadata: Record<string, string>): Promise<TaskRun | undefined>
+  transitionTaskRun(id: string, from: 'running', to: 'completed' | 'failed' | 'cancelled', metadata: Record<string, string>, guard?: { generation: number; modelSnapshot?: string; requireNoEnabledMembers?: boolean }): Promise<TaskRun | undefined>
   recoverRunningTaskRuns(): Promise<number>
   appendTaskRunEvent(id: string, generation: number, eventType: TaskRunEventType, refs?: { agentId?: string; messageId?: string; toolExecutionId?: string; metadata?: EventMetadata }): Promise<TaskRunEvent>
   listTaskRunEvents(id: string): Promise<TaskRunEvent[]>
@@ -895,11 +895,15 @@ export function createRepositories(client: DatabaseClient): Repositories {
       from: 'running',
       to: 'completed' | 'failed' | 'cancelled',
       metadata: Record<string, string>,
+      guard?: { generation: number; modelSnapshot?: string; requireNoEnabledMembers?: boolean },
     ): Promise<TaskRun | undefined> {
       const timestamp = new Date().toISOString()
       return client.db.transaction((tx) => {
         const current = tx.select().from(taskRuns).where(eq(taskRuns.id, id)).get()
         if (!current || current.status !== from) return undefined
+        if (guard && (current.generation !== guard.generation
+          || (guard.modelSnapshot !== undefined && JSON.stringify(tx.select().from(modelConfigs).where(eq(modelConfigs.id, current.modelConfigId)).get()) !== guard.modelSnapshot)
+          || (guard.requireNoEnabledMembers && tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, current.channelId), eq(channelAgents.isEnabled, true))).get()))) return undefined
         const next = tx.update(taskRuns)
           .set({
             status: to,
@@ -1218,10 +1222,12 @@ export function createRepositories(client: DatabaseClient): Repositories {
     async updateModelConfig(id, input) {
       validateModelBudget(input)
       return client.db.transaction((tx) => {
-        if (!tx.select().from(modelConfigs).where(eq(modelConfigs.id, id)).get()) throw new Error('模型配置不存在')
+        const previous = tx.select().from(modelConfigs).where(eq(modelConfigs.id, id)).get()
+        if (!previous) throw new Error('模型配置不存在')
+        const updatedAt = new Date(Math.max(Date.now(), (Date.parse(previous.updatedAt) || 0) + 1)).toISOString()
         tx.delete(cloudConsents).where(eq(cloudConsents.modelConfigId, id)).run()
         tx.delete(toolResultConsents).where(eq(toolResultConsents.modelConfigId, id)).run()
-        return tx.update(modelConfigs).set({ ...input, updatedAt: new Date().toISOString() }).where(eq(modelConfigs.id, id)).returning().get()!
+        return tx.update(modelConfigs).set({ ...input, updatedAt }).where(eq(modelConfigs.id, id)).returning().get()!
       })
     },
     async removeModelConfig(id) {

@@ -71,7 +71,8 @@ export function createModelClient({
     return { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }
   }
   const verify = async (config: ModelConfigRecord, tools: boolean, signal: AbortSignal) => {
-    if (config.providerPreset === 'ollama') await verifyOllama(fetchImpl, config.baseUrl, config.modelName, tools, signal)
+    if (config.providerPreset === 'ollama') return await verifyOllama(fetchImpl, config.baseUrl, config.modelName, tools, signal)
+    return true
   }
   return {
     async saveModelConfig(input: SaveModelConfigInput): Promise<ModelConfigSummary> {
@@ -116,13 +117,13 @@ export function createModelClient({
       try {
         const config = await repositories.getModelConfig(id); if (!config) throw new Error('missing')
         await verify(config, false, controller.signal)
-        if (config.providerPreset !== 'ollama') {
-          const response = await fetchImpl(`${normalizeBaseUrl(config.baseUrl)}/chat/completions`, { method: 'POST', redirect: 'error', signal: controller.signal, headers: headers(config),
-            body: JSON.stringify({ model: config.modelName, stream: false, max_tokens: 1, messages: [{ role: 'user', content: 'Hi' }] }) })
-          if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error('invalid') }
-          const data: unknown = JSON.parse(await readBoundedJson(response.body, controller.signal))
-          if (!isRecord(data) || !Array.isArray(data.choices) || !data.choices.length) throw new Error('invalid')
-        }
+        controller.signal.throwIfAborted()
+        const response = await fetchImpl(`${normalizeBaseUrl(config.baseUrl)}/chat/completions`, { method: 'POST', redirect: 'error', signal: controller.signal, headers: headers(config),
+          body: JSON.stringify({ model: config.modelName, stream: false, max_tokens: 1, messages: [{ role: 'user', content: 'Hi' }] }) })
+        if (!response.ok || !response.body || response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') { await response.body?.cancel(); throw new Error('invalid') }
+        const data: unknown = JSON.parse(await readBoundedJson(response.body, controller.signal))
+        if (!isRecord(data) || data.error !== undefined || !Array.isArray(data.choices) || data.choices.length !== 1 || !isRecord(data.choices[0]) || !isRecord(data.choices[0].message)
+          || data.choices[0].message.role !== 'assistant' || typeof data.choices[0].message.content !== 'string' || data.choices[0].message.tool_calls !== undefined) throw new Error('invalid')
         return { ok: true, message: '模型连接正常' }
       } catch { return { ok: false, message: '模型连接失败，请检查服务、模型名称和凭证' } }
       finally { clearTimeout(timer) }
@@ -204,8 +205,12 @@ export function createModelClient({
         await consent.requireCloudConsent(input.projectId, input.modelConfigId)
         const modelConfig = await repositories.getModelConfig(input.modelConfigId)
         if (!modelConfig) throw new Error('Model configuration not found')
-        assertContextFits(input.messages, modelConfig, input.tools)
-        await verify(modelConfig, !!input.tools?.length, controller.signal)
+        const supportsTools = await verify(modelConfig, false, controller.signal)
+        const tools = supportsTools ? input.tools : undefined
+        const messages = !supportsTools && input.tools?.length
+          ? [...input.messages, { role: 'system' as const, content: 'This model has no tool capability. Answer in ordinary text only. Do not claim to have read files, run commands, or made changes. Explain when a requested action requires a tool-capable model.' }]
+          : input.messages
+        assertContextFits(messages, modelConfig, tools)
         await consent.requireCloudConsent(input.projectId, input.modelConfigId)
         if (!await taskRuns.canAcceptChunk(input.taskRunId)) return
         if (JSON.stringify(await repositories.getModelConfig(modelConfig.id)) !== JSON.stringify(modelConfig)) throw new Error('模型配置已变化')
@@ -219,8 +224,8 @@ export function createModelClient({
             redirect: 'error', headers: headers(modelConfig),
             body: JSON.stringify({
               model: modelConfig.modelName,
-              messages: input.messages,
-              ...(input.tools?.length ? { tools: input.tools, tool_choice: 'auto' } : {}),
+              messages,
+              ...(tools?.length ? { tools, tool_choice: 'auto' } : {}),
               stream: true,
               max_tokens: modelBudget(modelConfig).maxOutputTokens,
             }),
@@ -233,7 +238,12 @@ export function createModelClient({
             await response.body?.cancel()
             throw new ModelClientError('malformed')
           }
-          await consumeEventStream(response.body, input.taskRunId, taskRuns, onEvent, controller.signal)
+          const guardedRuns = { canAcceptChunk: async (id: string) => {
+            if (!await taskRuns.canAcceptChunk(id)) return false
+            if (JSON.stringify(await repositories.getModelConfig(modelConfig.id)) !== JSON.stringify(modelConfig)) throw new ModelClientError('provider')
+            return !canSend || await canSend()
+          } }
+          await consumeEventStream(response.body, input.taskRunId, guardedRuns, onEvent, controller.signal, tools?.map((tool) => tool.function.name) ?? [])
           if (timedOut) await emitIfAccepted(taskRuns, input.taskRunId, onEvent, { taskRunId: input.taskRunId, type: 'error', content: '模型调用超过 120 秒，请重试' })
         } catch (error) {
           if (controller.signal.aborted) {
@@ -285,6 +295,7 @@ async function consumeEventStream(
   taskRuns: { canAcceptChunk(id: string): Promise<boolean> },
   onEvent: (event: StreamEvent) => void | Promise<void>,
   signal: AbortSignal,
+  allowedTools: string[],
 ): Promise<void> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
@@ -349,6 +360,7 @@ async function consumeEventStream(
         const choice = parsed.choices[0]
         const calls = choice.delta.tool_calls
         if (calls !== undefined) for (const call of calls) {
+          if (!allowedTools.length) throw new ModelClientError('malformed')
           if (!isRecord(call) || !Number.isInteger(call.index) || (call.index as number) < 0 || !isRecord(call.function)
             || (call.id !== undefined && typeof call.id !== 'string') || (call.function.name !== undefined && typeof call.function.name !== 'string')
             || (call.function.arguments !== undefined && typeof call.function.arguments !== 'string')) throw new ModelClientError('malformed')
@@ -356,6 +368,7 @@ async function consumeEventStream(
           const prior = pendingToolCalls.get(index)
           if (prior && ((call.id && prior.id && call.id !== prior.id) || (call.function.name && prior.name && call.function.name !== prior.name))) throw new ModelClientError('malformed')
           pendingToolCalls.set(index, { index, id: call.id ?? prior?.id ?? '', name: (call.function.name ?? prior?.name ?? '') as any, arguments: (prior?.arguments ?? '') + (call.function.arguments ?? '') })
+          if (call.function.name && !allowedTools.includes(call.function.name)) throw new ModelClientError('malformed')
         }
         if (choice.finish_reason === 'tool_calls') toolCallsTerminal = true
         else if (choice.finish_reason !== null && pendingToolCalls.size) throw new ModelClientError('malformed')

@@ -41,6 +41,66 @@ afterEach(async () => { database.close(); await rm(directory, { recursive: true,
 const invoke = (name: IpcChannel, ...args: any[]) => handlers.get(name)!({ sender }, ...args)
 const send = () => invoke(IpcChannel.MessageSend, { channelId, modelConfigId, content: '你好' })
 
+it.each(['fetch', 'stream'])('rejects zero-Agent old model response after edit during %s', async (phase) => {
+  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: true })
+  let release!: (response?: Response) => void
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  const encoder = new TextEncoder()
+  if (phase === 'fetch') fetchImpl.mockImplementation(() => new Promise<Response>((resolve) => { release = resolve as typeof release }))
+  else fetchImpl.mockResolvedValue(new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value } }), { headers: { 'Content-Type': 'text/event-stream' } }))
+  const { taskRunId } = await send()
+  await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalled())
+  if (phase === 'stream') {
+    controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"before"}}]}\n\n'))
+    await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, expect.objectContaining({ type: 'delta' })))
+  }
+  await invoke(IpcChannel.ModelSave, { id: modelConfigId, providerPreset: 'deepseek', modelName: 'edited', apiKey: '' })
+  const late = 'data: {"choices":[{"delta":{"content":"old reply"}}]}\n\ndata: [DONE]\n\n'
+  if (phase === 'fetch') release(new Response(late, { headers: { 'Content-Type': 'text/event-stream' } }))
+  else { controller.enqueue(encoder.encode(late)); controller.close() }
+  await vi.waitFor(async () => expect((await repositories.getTaskRun(taskRunId))?.status).toBe('failed'))
+  expect((await repositories.listMessages(channelId)).filter((message) => message.role === 'agent')).toEqual([])
+  expect(sender.send.mock.calls.some(([, event]) => event.type === 'complete' || event.content === 'old reply')).toBe(false)
+})
+
+it.each(['model', 'member'])('rejects zero-Agent completion if %s changes at commit', async (change) => {
+  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: true })
+  const transition = repositories.transitionTaskRun.bind(repositories)
+  vi.spyOn(repositories, 'transitionTaskRun').mockImplementation(async (id, from, to, metadata, guard) => {
+    if (to === 'completed') {
+      if (change === 'model') await invoke(IpcChannel.ModelSave, { id: modelConfigId, providerPreset: 'deepseek', modelName: 'edited', apiKey: '' })
+      else {
+        const agent = await repositories.createAgent({ name: 'Alpha', avatar: null, title: '', systemPrompt: 'Prompt', modelConfigId, defaultToolPermissions: {} })
+        await repositories.saveChannelAgent({ channelId, agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+      }
+    }
+    return transition(id, from, to, metadata, guard)
+  })
+  fetchImpl.mockResolvedValue(new Response('data: {"choices":[{"delta":{"content":"old reply"}}]}\n\ndata: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } }))
+  const { taskRunId } = await send()
+  await vi.waitFor(async () => expect((await repositories.getTaskRun(taskRunId))?.status).toBe('failed'))
+  expect((await repositories.listMessages(channelId)).filter((message) => message.role === 'agent')).toEqual([])
+  expect(sender.send.mock.calls.some(([, event]) => event.type === 'complete')).toBe(false)
+})
+
+it('does not commit or fail a newer generation from an old zero-Agent completion', async () => {
+  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: true })
+  const transition = repositories.transitionTaskRun.bind(repositories)
+  let committed = false
+  vi.spyOn(repositories, 'transitionTaskRun').mockImplementation(async (id, from, to, metadata, guard) => {
+    if (to === 'completed') await repositories.advanceTaskRunGeneration(id)
+    const result = await transition(id, from, to, metadata, guard)
+    if (to === 'completed') committed = true
+    return result
+  })
+  fetchImpl.mockResolvedValue(new Response('data: {"choices":[{"delta":{"content":"old reply"}}]}\n\ndata: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } }))
+  const { taskRunId } = await send()
+  await vi.waitFor(() => expect(committed).toBe(true))
+  expect(await repositories.getTaskRun(taskRunId)).toMatchObject({ status: 'running', generation: 1 })
+  expect((await repositories.listMessages(channelId)).filter((message) => message.role === 'agent')).toEqual([])
+  expect(sender.send.mock.calls.some(([, event]) => event.type === 'complete' || event.type === 'error')).toBe(false)
+})
+
 it('requires pair-specific Main consent before creating a run or requesting the model', async () => {
   expect(await invoke(IpcChannel.CloudConsentHas, projectId, modelConfigId)).toBe(false)
   await expect(send()).rejects.toThrow()

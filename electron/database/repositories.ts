@@ -843,7 +843,8 @@ export function createRepositories(client: DatabaseClient): Repositories {
         if (!run || run.status !== 'running' || run.generation !== generation || run.currentTurnId) throw new Error('任务轮次不可开始')
         const trigger = tx.select().from(taskRunEvents).where(and(eq(taskRunEvents.taskRunId, taskRunId), eq(taskRunEvents.seq, triggerEventSeq))).get()
         const member = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.agentId, agentId))).get()
-        if (!trigger || !member?.isEnabled) throw new Error('Agent 未获得当前发言资格')
+        if (!trigger || trigger.generation !== run.generation || trigger.eventType !== 'speaker_decided'
+          || trigger.agentId !== agentId || !member?.isEnabled) throw new Error('Agent 未获得当前发言资格')
         if (tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval']))).get()) throw new Error('任务仍有未完成操作')
         const timestamp = new Date().toISOString()
         const turn: AgentTurn = { id: randomUUID(), taskRunId, ordinal: run.turnCount + 1, agentId,
@@ -895,7 +896,12 @@ export function createRepositories(client: DatabaseClient): Repositories {
     async listMessages(channelId: string): Promise<Message[]> {
       return client.db.select().from(messages)
         .where(eq(messages.channelId, channelId))
-        .orderBy(asc(messages.createdAt), asc(messages.id))
+        .orderBy(
+          sql`CASE WHEN ${messages.taskRunSeq} IS NOT NULL THEN (SELECT created_at FROM task_runs WHERE id = ${messages.taskRunId}) ELSE ${messages.createdAt} END`,
+          sql`CASE WHEN ${messages.taskRunSeq} IS NOT NULL THEN ${messages.taskRunId} ELSE ${messages.id} END`,
+          sql`CASE WHEN ${messages.taskRunSeq} IS NOT NULL THEN ${messages.taskRunSeq} ELSE 0 END`,
+          asc(messages.id),
+        )
         .all()
     },
 

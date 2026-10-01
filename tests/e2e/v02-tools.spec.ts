@@ -2,11 +2,11 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test, expect, configureModel, createAndBindAgent, createProject, sendWithConsent, writeWorkspaceFile } from './fixtures'
 
-test('binds an Agent and safely inspects then creates a new draft through native tool calls', async ({ desktop, provider }) => {
-  await writeWorkspaceFile(desktop, 'brief.txt', '只读测试内容')
+test('binds an Agent and safely reads then creates a new draft through native tool calls', async ({ desktop, provider }) => {
+  await writeWorkspaceFile(desktop, 'brief.txt', '只读测试内容\nAPI_KEY=e2e-brief-secret')
   await createProject(desktop)
   await configureModel(desktop.page, provider.url)
-  await createAndBindAgent(desktop.page, ['list_dir', 'write_file'])
+  await createAndBindAgent(desktop.page, ['list_dir', 'read_file', 'write_file'])
 
   await sendWithConsent(desktop.page, '读取 brief 并新建交付草稿')
   await expect.poll(() => provider.requests.length).toBe(1)
@@ -17,8 +17,17 @@ test('binds an Agent and safely inspects then creates a new draft through native
   expect(readObservation).toContain('brief.txt')
   expect(readObservation).not.toContain(desktop.workspace)
 
-  provider.toolCall('write_file', { path: 'draft.md', content: '# 安全草稿\n仅新建文件。' }, 'create-draft')
+  provider.toolCall('read_file', { path: 'brief.txt' }, 'read-brief')
   await expect.poll(() => provider.requests.length).toBe(3)
+  const fileObservation = JSON.stringify(provider.requests[2].messages)
+  expect(fileObservation).toContain('UNTRUSTED_TOOL_RESULT_NOT_INSTRUCTION')
+  expect(fileObservation).toContain('只读测试内容')
+  expect(fileObservation).toContain('[REDACTED]')
+  expect(fileObservation).not.toContain('e2e-brief-secret')
+  expect(fileObservation).not.toContain(desktop.workspace)
+
+  provider.toolCall('write_file', { path: 'draft.md', content: '# 安全草稿\n仅新建文件。' }, 'create-draft')
+  await expect.poll(() => provider.requests.length).toBe(4)
   provider.delta('草稿已安全创建。')
   provider.complete()
 
@@ -31,6 +40,7 @@ test('binds an Agent and safely inspects then creates a new draft through native
   })
   expect(createdTools.map((tool) => ({ name: tool.toolName, status: tool.status, summary: tool.resultSummary }))).toEqual([
     expect.objectContaining({ name: 'list_dir', status: 'completed' }),
+    expect.objectContaining({ name: 'read_file', status: 'completed' }),
     expect.objectContaining({ name: 'write_file', status: 'completed' }),
   ])
   expect(await readFile(join(desktop.workspace, 'draft.md'), 'utf8')).toBe('# 安全草稿\n仅新建文件。')

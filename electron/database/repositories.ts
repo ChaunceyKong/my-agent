@@ -190,7 +190,7 @@ function currentExecutionPolicy(tx: Transaction, run: TaskRun, execution: ToolEx
 
 function invalidateTools(tx: Transaction, run: TaskRun): void {
   const invalidated = tx.update(toolExecutions).set({ status: 'cancelled', resultSummary: '任务操作已失效', updatedAt: new Date().toISOString() })
-    .where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval']), sql`${toolExecutions.id} NOT IN (SELECT execution_id FROM overwrite_publications WHERE state = 'effect_claimed')`, sql`NOT (${toolExecutions.toolName} = 'run_process' AND ${toolExecutions.status} = 'executing' AND ${toolExecutions.id} IN (SELECT tool_execution_id FROM approval_requests WHERE status = 'executing'))`))
+    .where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval']), sql`${toolExecutions.id} NOT IN (SELECT execution_id FROM overwrite_publications WHERE state NOT IN ('completed','recovered'))`, sql`NOT (${toolExecutions.toolName} = 'run_process' AND ${toolExecutions.status} = 'executing' AND ${toolExecutions.id} IN (SELECT tool_execution_id FROM approval_requests WHERE status = 'executing'))`))
     .returning().all()
   for (const execution of invalidated) {
     tx.update(approvalRequests).set({ status: 'cancelled', decidedAt: new Date().toISOString() })
@@ -200,10 +200,10 @@ function invalidateTools(tx: Transaction, run: TaskRun): void {
 }
 
 function invalidateChangedToolPolicies(tx: Transaction, scope: SQL): void {
-  // A changed policy revokes future work; a claimed process remains unresolved until close or recovery acknowledgment.
+  // Revoke future work; claimed process and publication cleanup retain their durable barriers.
   const pending = tx.select({ execution: toolExecutions, run: taskRuns }).from(toolExecutions)
     .innerJoin(taskRuns, eq(taskRuns.id, toolExecutions.taskRunId))
-    .where(and(scope, inArray(toolExecutions.status, ['executing', 'waiting_approval']), sql`${toolExecutions.id} NOT IN (SELECT execution_id FROM overwrite_publications WHERE state = 'effect_claimed')`, sql`NOT (${toolExecutions.toolName} = 'run_process' AND ${toolExecutions.status} = 'executing' AND ${toolExecutions.id} IN (SELECT tool_execution_id FROM approval_requests WHERE status = 'executing'))`)).all()
+    .where(and(scope, inArray(toolExecutions.status, ['executing', 'waiting_approval']), sql`${toolExecutions.id} NOT IN (SELECT execution_id FROM overwrite_publications WHERE state NOT IN ('completed','recovered'))`, sql`NOT (${toolExecutions.toolName} = 'run_process' AND ${toolExecutions.status} = 'executing' AND ${toolExecutions.id} IN (SELECT tool_execution_id FROM approval_requests WHERE status = 'executing'))`)).all()
   for (const { execution, run } of pending) {
     if (currentExecutionPolicy(tx, run, execution) === execution.policySnapshotJson) continue
     const cancelled = tx.update(toolExecutions)

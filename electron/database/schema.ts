@@ -132,11 +132,11 @@ export const channelAgents = sqliteTable('channel_agents', {
   isEnabled: integer('is_enabled', { mode: 'boolean' }).notNull().default(false),
   modelConfigOverrideId: text('model_config_override_id').references(() => modelConfigs.id, { onDelete: 'restrict' }),
   toolPermissionsOverride: text('tool_permissions_override', { mode: 'json' }).$type<ToolPermissions>(),
+  revision: text('revision').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 }, (table) => [
   primaryKey({ columns: [table.channelId, table.agentId] }),
-  uniqueIndex('channel_agents_one_enabled_idx').on(table.channelId).where(sql`${table.isEnabled} = 1`),
 ])
 
 export const toolExecutions = sqliteTable('tool_executions', {
@@ -443,5 +443,13 @@ export function migrate(sqlite: Database.Database): void {
     } finally {
       sqlite.pragma('foreign_keys = ON')
     }
+  }
+
+  if (Number(sqlite.pragma('user_version', { simple: true })) < 12) {
+    sqlite.transaction(() => {
+      sqlite.exec("ALTER TABLE channel_agents ADD COLUMN revision TEXT NOT NULL DEFAULT ''")
+      sqlite.exec('DROP INDEX IF EXISTS channel_agents_one_enabled_idx')
+      sqlite.pragma('user_version = 12')
+    })()
   }
 }

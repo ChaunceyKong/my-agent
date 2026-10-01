@@ -29,7 +29,7 @@ it('migrates real v10 shaped rows, pauses duplicate running runs and keeps legac
       INSERT INTO messages VALUES ('old','c','r1','agent','AI','private reply','completed','now');
     `)
     migrate(sqlite)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(11)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(12)
     expect(sqlite.prepare('SELECT id,status,generation,pause_reason FROM task_runs ORDER BY id').all()).toEqual([
       { id: 'r1', status: 'paused', generation: 1, pause_reason: 'migration_duplicate_running' },
       { id: 'r2', status: 'paused', generation: 1, pause_reason: 'migration_duplicate_running' },
@@ -39,7 +39,7 @@ it('migrates real v10 shaped rows, pauses duplicate running runs and keeps legac
     expect(() => sqlite.exec("UPDATE task_runs SET status='running' WHERE id='r1'; UPDATE task_runs SET status='running' WHERE id='r2'")) .toThrow(/UNIQUE/)
     migrate(sqlite)
     expect(sqlite.prepare('SELECT count(*) AS n FROM audit_events').get()).toEqual({ n: 2 })
-    expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE name='channel_agents_one_enabled_idx'").get()).toBeTruthy()
+    expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE name='channel_agents_one_enabled_idx'").get()).toBeUndefined()
   } finally { sqlite.close() }
 })
 
@@ -70,7 +70,7 @@ it.each([3, 4])('upgrades original v%i schema with existing run and message thro
     sqlite.pragma(`user_version = ${version}`)
     migrate(sqlite)
     migrate(sqlite)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(11)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(12)
     expect(sqlite.prepare('SELECT id,generation,status FROM task_runs').get()).toEqual({ id: 'r', generation: 0, status: 'running' })
     expect(sqlite.prepare('SELECT id,agent_id,origin,content FROM messages').get()).toEqual({ id: 'msg', agent_id: null, origin: 'legacy', content: 'historical reply' })
     expect(sqlite.prepare('SELECT count(*) AS n FROM audit_events').get()).toEqual({ n: 0 })

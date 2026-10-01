@@ -189,7 +189,7 @@ it('binds an existing write to one immutable approval and writes only after expl
   await expect(tools.runApproved(approval.id)).rejects.toThrow('不可用')
 })
 
-it('completes the paused task after an explicit approved effect so the channel accepts another message', async () => {
+it('keeps the task active after an approved effect until CEO explicitly continues or ends it', async () => {
   const service = createApprovalService(repositories, () => now)
   const engine = createToolEngine(repositories, service)
   await writeFile(join(directory, 'next.md'), 'original')
@@ -197,9 +197,9 @@ it('completes the paused task after an explicit approved effect so the channel a
   const approval = (await repositories.getApprovalForToolExecution(execution.id))!
   await service.approve(approval.id, approval.requestHash)
   await createProcessToolService(repositories, createTaskRunService(repositories), () => now).runApproved(approval.id)
-  expect(await repositories.getTaskRun(context.taskRunId)).toMatchObject({ status: 'completed' })
+  expect(await repositories.getTaskRun(context.taskRunId)).toMatchObject({ status: 'running' })
   const finished = (await repositories.getTaskRun(context.taskRunId))!
-  await expect(repositories.createStartedTaskRun({ channelId: finished.channelId, modelConfigId: finished.modelConfigId, content: 'next message' })).resolves.toMatchObject({ status: 'running' })
+  await expect(repositories.createStartedTaskRun({ channelId: finished.channelId, modelConfigId: finished.modelConfigId, content: 'next message' })).rejects.toThrow('继续或结束')
 })
 
 it('does not overwrite after expiry, cancellation, policy revocation, or a stale target', async () => {
@@ -233,6 +233,7 @@ it('does not overwrite after expiry, cancellation, policy revocation, or a stale
   expect((await repositories.getToolExecution(stale.execution.id))!.status).toBe('failed')
 
   const afterStale = await repositories.getTaskRun(context.taskRunId)
+  await createTaskRunService(repositories).cancelTaskRun(afterStale!.id)
   const afterStaleRun = await repositories.createStartedTaskRun({ channelId: afterStale!.channelId, modelConfigId: afterStale!.modelConfigId, content: 'after stale' })
   context = { ...context, taskRunId: afterStaleRun.id, generation: afterStaleRun.generation }
   const revoked = await makeApproved('revoked')

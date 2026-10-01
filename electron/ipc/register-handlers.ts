@@ -7,6 +7,7 @@ import { createAgentService } from '../core/agent-service'
 import type { TaskRunService } from '../core/task-run-service'
 import type { ModelClient } from '../core/model-client'
 import type { createSingleAgentRunner } from '../core/single-agent-runner'
+import type { createSerialOrchestrator } from '../core/serial-orchestrator'
 import { validateWorkspaceRoot } from '../core/workspace-validator'
 import { listDirectory } from '../core/file-tools'
 import type { Repositories } from '../database/repositories'
@@ -29,9 +30,10 @@ export interface IpcHandlerDependencies {
   approvals?: ReturnType<typeof createApprovalService>
   processes?: ReturnType<typeof createProcessToolService>
   runner?: ReturnType<typeof createSingleAgentRunner>
+  orchestrator?: ReturnType<typeof createSerialOrchestrator>
 }
 
-export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, modelClient, approvals, processes, runner }: IpcHandlerDependencies): void {
+export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, modelClient, approvals, processes, runner, orchestrator }: IpcHandlerDependencies): void {
   const startingChannels = new Set<string>()
   const workspaceSelections = new Map<string, string>()
   const agents = createAgentService(repositories)
@@ -114,14 +116,18 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
     startingChannels.add(input.channelId)
     try {
       const channel = await repositories.getChannel(input.channelId)
-      const active = runner && channel && await runner.activeAgent(channel.id)
-      const selectedModelConfigId = active?.modelConfigId ?? input.modelConfigId
-      if (!channel || !await repositories.getModelConfig(selectedModelConfigId)) throw new Error('群聊或模型配置不存在')
-      if ((await repositories.listTaskRuns(channel.id)).some((run) => run.status === 'running')) throw new Error('当前群聊已有任务正在运行')
-      await modelClient.requireCloudConsent(channel.projectId, selectedModelConfigId)
-      const run = await taskRuns.startTaskRun(channel.id, selectedModelConfigId, input.content.trim())
+      if (!channel || !await repositories.getModelConfig(input.modelConfigId)) throw new Error('群聊或模型配置不存在')
+      const enabled = (await repositories.listChannelAgents(channel.id)).filter((member) => member.isEnabled)
+      if (!enabled.length && input.mentions?.length) throw new Error('群聊没有可提及的 Agent')
+      if (enabled.length > 1 && !input.mentions?.length) throw new Error('请先指派下一位 Agent')
+      if (enabled.length && !orchestrator) throw new Error('Agent 协作服务不可用')
+      if ((await repositories.listTaskRuns(channel.id)).some((run) => ['running', 'cancelling', 'paused'].includes(run.status))) throw new Error('当前群聊已有任务正在运行')
+      if (!enabled.length) await modelClient.requireCloudConsent(channel.projectId, input.modelConfigId)
+      const run = await taskRuns.startTaskRun(channel.id, input.modelConfigId, input.content, input.mentions)
       const sender = (event as { sender: StreamSender }).sender
-      if (active && runner) void runAgentLoop(run.id, channel.projectId, channel.id, active, sender, repositories, taskRuns, runner)
+      if (enabled.length && orchestrator) void orchestrator.run({ taskRunId: run.id, projectId: channel.projectId, channelId: channel.id,
+        onEvent: async (streamEvent) => { if (!sender.isDestroyed()) sender.send(IpcChannel.MessageStream, streamEvent) },
+      })
       else void streamReply(run.id, channel.projectId, input.modelConfigId, channel.id, sender, repositories, taskRuns, modelClient)
       return { taskRunId: run.id }
     } finally {
@@ -136,29 +142,6 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
 
 function projectSummary(project: { id: string; name: string; icon: string | null; createdAt: string; updatedAt: string }) {
   return { id: project.id, name: project.name, icon: project.icon, createdAt: project.createdAt, updatedAt: project.updatedAt }
-}
-
-async function runAgentLoop(
-  taskRunId: string, projectId: string, channelId: string, active: Awaited<ReturnType<NonNullable<IpcHandlerDependencies['runner']>['activeAgent']>>,
-  sender: StreamSender, repositories: Repositories, taskRuns: TaskRunService, runner: NonNullable<IpcHandlerDependencies['runner']>,
-): Promise<void> {
-  if (!active) return
-  const send = async (event: StreamEvent) => {
-    if (event.type === 'error') {
-      // A pending approval is a pause signal, not a model/provider failure; the
-      // run remains live solely for the immutable approval workflow.
-      if (!event.content?.includes('等待 CEO 审批')) {
-        const failed = await repositories.transitionTaskRun(taskRunId, 'running', 'failed', { errorMessage: event.content ?? '任务已停止' })
-        if (!failed) return
-      }
-    }
-    if (!sender.isDestroyed()) sender.send(IpcChannel.MessageStream, event)
-  }
-  try { await runner.run({ taskRunId, projectId, channelId, active, onEvent: send }) }
-  catch {
-    const failed = await repositories.transitionTaskRun(taskRunId, 'running', 'failed', { errorMessage: 'Agent 任务执行失败，请重试' }).catch(() => undefined)
-    if (failed && !sender.isDestroyed()) sender.send(IpcChannel.MessageStream, { taskRunId, type: 'error', content: 'Agent 任务执行失败，请重试' })
-  }
 }
 
 function requireApprovals(value: IpcHandlerDependencies['approvals']): NonNullable<IpcHandlerDependencies['approvals']> {

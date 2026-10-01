@@ -104,6 +104,8 @@ export interface ToolPolicySnapshot {
   version: 1
   workspacePath: string
   agentId: string
+  turnId: string | null
+  memberRevision: string
   defaultToolPermissions: ToolPermissions
   toolPermissionsOverride: ToolPermissions | null
   /** Main-generated immutable identity of the process registration, when relevant. */
@@ -214,6 +216,7 @@ export interface SaveChannelAgentInput {
 }
 
 export interface ChannelAgent extends SaveChannelAgentInput {
+  revision: string
   createdAt: string
   updatedAt: string
 }
@@ -239,7 +242,10 @@ export interface SendMessageInput {
   channelId: string
   content: string
   modelConfigId: string
+  mentions?: CeoMentionToken[]
 }
+
+export interface CeoMentionToken { agentId: string; start: number; end: number; text: string }
 
 export type MessageRole = 'ceo' | 'agent'
 export type MessageStatus = 'sent' | 'streaming' | 'completed' | 'failed'

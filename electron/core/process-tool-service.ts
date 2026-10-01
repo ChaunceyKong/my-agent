@@ -13,11 +13,11 @@ export function createProcessToolService(repositories: Repositories, taskRuns: T
       if (execution?.toolName === 'write_file' || execution?.toolName === 'replace_file_content') {
         try {
           const result = await overwrites.runApproved(approvalId)
-          if (result.status === 'completed' || result.status === 'failed') await finishRun(execution.taskRunId, result.resultSummary)
+          if (result.status === 'completed' || result.status === 'failed') await repositories.recordApprovedEffect(result.id)
           return result
         } catch (error) {
           const latest = await repositories.getToolExecution(execution.id)
-          if (latest?.status === 'completed' || latest?.status === 'failed') await finishRun(execution.taskRunId, latest.resultSummary)
+          if (latest?.status === 'completed' || latest?.status === 'failed') await repositories.recordApprovedEffect(latest.id)
           throw error
         }
       }
@@ -31,20 +31,15 @@ export function createProcessToolService(repositories: Repositories, taskRuns: T
         const result = await executeRegisteredProcess({ executable: claimed.executable, args: input.args, cwd: claimed.workspacePath, signal: controller.signal })
         const completed = await repositories.finishToolExecution(claimed.execution.id, () => ({ status: result.exitCode === 0 ? 'completed' : 'failed', riskLevel: 'high',
           resultSummary: result.exitCode === null ? '进程已取消' : `进程退出码 ${result.exitCode}${result.stderr ? '; stderr 已截断' : ''}` }))
-        if (completed.status === 'completed' || completed.status === 'failed') await finishRun(claimed.execution.taskRunId, completed.resultSummary)
+        if (completed.status === 'completed' || completed.status === 'failed') await repositories.recordApprovedEffect(completed.id)
         return completed
       } catch {
         if (!claimed) throw new Error('审批请求不可用')
         const failed = await repositories.finishToolExecution(claimed.execution.id, () => ({ status: 'failed', riskLevel: 'high', resultSummary: '受控进程执行失败' }))
-        if (failed.status === 'completed' || failed.status === 'failed') await finishRun(claimed.execution.taskRunId, failed.resultSummary)
+        if (failed.status === 'completed' || failed.status === 'failed') await repositories.recordApprovedEffect(failed.id)
         return failed
       } finally { unsubscribe() }
     },
   }
 
-  async function finishRun(taskRunId: string, result: string | null): Promise<void> {
-    // Explicit effects do not resume the model loop in v0.2. Close only a still-live
-    // run; cancellation and generation changes win without being overwritten.
-    await taskRuns.finishTaskRun(taskRunId, `已完成已批准操作：${result ?? '无结果'}。`).catch(() => undefined)
-  }
 }

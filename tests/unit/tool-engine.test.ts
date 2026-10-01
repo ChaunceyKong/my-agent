@@ -195,7 +195,6 @@ it('enforces permission intersection and disabled membership', async () => {
 
 it.each([
   ['executing', 'disable-reenable'], ['waiting_approval', 'disable-reenable'],
-  ['executing', 'switch-back'], ['waiting_approval', 'switch-back'],
   ['executing', 'remove-readd'], ['waiting_approval', 'remove-readd'],
   ['executing', 'agent-permissions'], ['waiting_approval', 'agent-permissions'],
   ['executing', 'channel-permissions'], ['waiting_approval', 'channel-permissions'],
@@ -208,10 +207,6 @@ it.each([
   }
   if (change === 'disable-reenable') {
     await repositories.saveChannelAgent({ ...member, isEnabled: false })
-    await repositories.saveChannelAgent(member)
-  } else if (change === 'switch-back') {
-    const other = await repositories.createAgent({ name: 'other', avatar: null, title: '', systemPrompt: '', modelConfigId: agent.modelConfigId, defaultToolPermissions: { write_file: true } })
-    await repositories.saveChannelAgent({ ...member, agentId: other.id })
     await repositories.saveChannelAgent(member)
   } else if (change === 'remove-readd') {
     await repositories.removeChannelAgent(channelId, agent.id)
@@ -353,7 +348,7 @@ it('preserves existing runs and generation on repeated migration', () => {
     migrate(sqlite)
     migrate(sqlite)
     expect(sqlite.prepare('SELECT id, generation, status FROM task_runs').get()).toEqual({ id: 'r', generation: 0, status: 'running' })
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(11)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(12)
   } finally { sqlite.close() }
 })
 

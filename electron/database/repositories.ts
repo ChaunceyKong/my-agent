@@ -10,6 +10,7 @@ import type {
   ApprovalRequestStatus,
   Channel,
   ChannelAgent,
+  CeoMentionToken,
   CreateChannelInput,
   CreateProjectInput,
   Message,
@@ -31,12 +32,13 @@ import type {
 import { hashToolRequest, toolAuditEvent } from '../core/audit-service'
 import { makeTaskRunEvent, type EventMetadata } from '../core/orchestrator-events'
 import type { AppDatabase, DatabaseClient } from './client'
-import { agentTurns, agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, messages, modelConfigs, overwritePublications, projects, registeredExecutables, taskRunEvents, taskRuns, toolExecutions } from './schema'
+import { agentTurns, agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, mentionQueue, messages, modelConfigs, overwritePublications, projects, registeredExecutables, taskRunEvents, taskRuns, toolExecutions } from './schema'
 
 export interface ToolContext {
   taskRunId: string
   generation: number
   agentId: string
+  turnId?: string
   messageId?: string
 }
 
@@ -53,6 +55,24 @@ function appendEvent(tx: Transaction, run: TaskRun, eventType: TaskRunEventType,
   })
   tx.insert(taskRunEvents).values(event).run()
   return event
+}
+
+function selectedTurn(tx: Transaction, run: TaskRun, agentId: string, triggerEventSeq: number): AgentTurn {
+  if (run.status !== 'running' || run.currentTurnId) throw new Error('任务轮次不可开始')
+  const trigger = tx.select().from(taskRunEvents).where(and(eq(taskRunEvents.taskRunId, run.id), eq(taskRunEvents.seq, triggerEventSeq))).get()
+  const member = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.agentId, agentId))).get()
+  if (!trigger || trigger.generation !== run.generation || trigger.eventType !== 'speaker_decided'
+    || trigger.agentId !== agentId || !member?.isEnabled) throw new Error('Agent 未获得当前发言资格')
+  if (tx.select({ id: agentTurns.id }).from(agentTurns)
+    .where(and(eq(agentTurns.taskRunId, run.id), eq(agentTurns.triggerEventSeq, triggerEventSeq))).get()) throw new Error('发言决策已被使用')
+  if (tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval']))).get()) throw new Error('任务仍有未完成操作')
+  const timestamp = new Date().toISOString()
+  const turn: AgentTurn = { id: randomUUID(), taskRunId: run.id, ordinal: run.turnCount + 1, agentId,
+    generation: run.generation, status: 'running', triggerEventSeq, messageId: null, startedAt: timestamp, finishedAt: null }
+  tx.insert(agentTurns).values(turn).run()
+  tx.update(taskRuns).set({ currentTurnId: turn.id, turnCount: turn.ordinal }).where(eq(taskRuns.id, run.id)).run()
+  appendEvent(tx, run, 'turn_started', { agentId, metadata: { ordinal: turn.ordinal } })
+  return turn
 }
 
 function sortedPermissions(value: ToolPermissions): ToolPermissions {
@@ -72,7 +92,7 @@ function currentPolicy(tx: Transaction, run: TaskRun, agentId: string, toolName:
   if (!agent || !member?.isEnabled || !project || agent.defaultToolPermissions[effectiveTool] !== true
     || (member.toolPermissionsOverride !== null && member.toolPermissionsOverride[effectiveTool] !== true)) return undefined
   const snapshot: ToolPolicySnapshot = {
-    version: 1, workspacePath: project.workspacePath, agentId,
+    version: 1, workspacePath: project.workspacePath, agentId, turnId: run.currentTurnId, memberRevision: member.revision,
     defaultToolPermissions: sortedPermissions(agent.defaultToolPermissions),
     toolPermissionsOverride: member.toolPermissionsOverride === null ? null : sortedPermissions(member.toolPermissionsOverride),
     registeredExecutable: null,
@@ -136,6 +156,7 @@ export interface StartTaskRunInput {
   channelId: string
   modelConfigId: string
   content: string
+  mentions?: CeoMentionToken[]
 }
 
 export interface SaveModelConfigRecordInput {
@@ -156,6 +177,7 @@ export interface Repositories {
   getToolExecution(id: string): Promise<ToolExecution | undefined>
   listToolExecutions(taskRunId: string): Promise<ToolExecution[]>
   finishToolExecution(id: string, outcome: () => ToolOutcome): Promise<ToolExecution>
+  recordApprovedEffect(executionId: string): Promise<void>
   createApprovalRequest(toolExecutionId: string, expiresAt: string): Promise<ApprovalRequest>
   createOverwriteApproval(toolExecutionId: string, expiresAt: string, targetIdentityJson: string): Promise<ApprovalRequest>
   getApprovalRequest(id: string): Promise<ApprovalRequest | undefined>
@@ -198,6 +220,10 @@ export interface Repositories {
   recoverRunningTaskRuns(): Promise<number>
   appendTaskRunEvent(id: string, generation: number, eventType: TaskRunEventType, refs?: { agentId?: string; messageId?: string; toolExecutionId?: string; metadata?: EventMetadata }): Promise<TaskRunEvent>
   listTaskRunEvents(id: string): Promise<TaskRunEvent[]>
+  startNextMentionTurn(taskRunId: string, generation: number): Promise<AgentTurn | undefined>
+  startSingleMemberTurn(taskRunId: string, generation: number): Promise<AgentTurn | undefined>
+  markAgentTurnWaiting(id: string, toolExecutionId: string): Promise<AgentTurn>
+  pauseTaskRun(id: string, reason: string): Promise<TaskRun>
   startAgentTurn(taskRunId: string, generation: number, agentId: string, triggerEventSeq: number): Promise<AgentTurn>
   completeAgentTurn(id: string, content: string): Promise<{ turn: AgentTurn; message: Message }>
   finishAgentTurn(id: string, status: 'failed' | 'cancelled'): Promise<AgentTurn>
@@ -219,6 +245,8 @@ export function createRepositories(client: DatabaseClient): Repositories {
       return client.db.transaction((tx) => {
         const run = tx.select().from(taskRuns).where(eq(taskRuns.id, context.taskRunId)).get()
         if (!run || run.status !== 'running' || run.generation !== context.generation) throw new Error('任务操作已失效')
+        if (context.turnId && (run.currentTurnId !== context.turnId || !tx.select().from(agentTurns)
+          .where(and(eq(agentTurns.id, context.turnId), eq(agentTurns.agentId, context.agentId), eq(agentTurns.status, 'running'))).get())) throw new Error('任务轮次已失效')
         const policySnapshotJson = policyForRequest(tx, run, context.agentId, request)
         if (!policySnapshotJson) throw new Error('工具未授权')
         if (context.messageId) {
@@ -268,6 +296,17 @@ export function createRepositories(client: DatabaseClient): Repositories {
           .where(eq(toolExecutions.id, id)).returning().get()!
         tx.insert(auditEvents).values(toolAuditEvent(run.channelId, next)).run()
         return next
+      })
+    },
+
+    async recordApprovedEffect(executionId) {
+      client.db.transaction((tx) => {
+        const execution = tx.select().from(toolExecutions).where(eq(toolExecutions.id, executionId)).get()
+        const run = execution && tx.select().from(taskRuns).where(eq(taskRuns.id, execution.taskRunId)).get()
+        if (!execution || !run || run.status !== 'running' || run.generation !== execution.generation
+          || !['completed', 'failed'].includes(execution.status)) return
+        if (tx.select().from(taskRunEvents).where(and(eq(taskRunEvents.taskRunId, run.id), eq(taskRunEvents.toolExecutionId, execution.id), eq(taskRunEvents.eventType, 'tool_decided'))).get()) return
+        appendEvent(tx, run, 'tool_decided', { agentId: execution.agentId, toolExecutionId: execution.id })
       })
     },
 
@@ -346,7 +385,10 @@ export function createRepositories(client: DatabaseClient): Repositories {
         if (status !== 'approved' && execution && run) {
           const cancelled = tx.update(toolExecutions).set({ status: 'cancelled', resultSummary: '审批未通过或已失效', updatedAt: now })
             .where(and(eq(toolExecutions.id, execution.id), eq(toolExecutions.status, 'waiting_approval'))).returning().get()
-          if (cancelled) tx.insert(auditEvents).values(toolAuditEvent(run.channelId, cancelled)).run()
+          if (cancelled) {
+            tx.insert(auditEvents).values(toolAuditEvent(run.channelId, cancelled)).run()
+            if (run.status === 'running' && run.generation === execution.generation) appendEvent(tx, run, 'tool_decided', { agentId: execution.agentId, toolExecutionId: execution.id })
+          }
         }
         return next
       })
@@ -615,12 +657,12 @@ export function createRepositories(client: DatabaseClient): Repositories {
     async saveChannelAgent(input: SaveChannelAgentInput): Promise<ChannelAgent> {
       const timestamp = new Date().toISOString()
       return client.db.transaction((tx) => {
-        if (input.isEnabled) {
-          tx.update(channelAgents).set({ isEnabled: false, updatedAt: timestamp })
-            .where(and(eq(channelAgents.channelId, input.channelId), eq(channelAgents.isEnabled, true))).run()
-        }
-        const member = tx.insert(channelAgents).values({ ...input, createdAt: timestamp, updatedAt: timestamp })
-          .onConflictDoUpdate({ target: [channelAgents.channelId, channelAgents.agentId], set: { ...input, updatedAt: timestamp } })
+        const previous = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, input.channelId), eq(channelAgents.agentId, input.agentId))).get()
+        if (previous && previous.isEnabled === input.isEnabled && previous.modelConfigOverrideId === input.modelConfigOverrideId
+          && JSON.stringify(previous.toolPermissionsOverride === null ? null : sortedPermissions(previous.toolPermissionsOverride))
+            === JSON.stringify(input.toolPermissionsOverride === null ? null : sortedPermissions(input.toolPermissionsOverride))) return previous
+        const member = tx.insert(channelAgents).values({ ...input, revision: randomUUID(), createdAt: timestamp, updatedAt: timestamp })
+          .onConflictDoUpdate({ target: [channelAgents.channelId, channelAgents.agentId], set: { ...input, revision: randomUUID(), updatedAt: timestamp } })
           .returning().get()
         invalidateChangedToolPolicies(tx, eq(taskRuns.channelId, input.channelId))
         return member
@@ -735,6 +777,22 @@ export function createRepositories(client: DatabaseClient): Repositories {
         if (tx.select().from(taskRuns).where(and(eq(taskRuns.channelId, input.channelId), inArray(taskRuns.status, ['running', 'cancelling', 'paused']))).get()) {
           throw new Error('请先继续或结束当前任务')
         }
+        const channel = tx.select().from(channels).where(eq(channels.id, input.channelId)).get()
+        if (!channel || !Array.isArray(input.mentions ?? []) || (input.mentions?.length ?? 0) > channel.maxTurns) throw new Error('Agent 提及无效')
+        const enabled = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, input.channelId), eq(channelAgents.isEnabled, true))).all()
+        const names = enabled.map((member) => tx.select().from(agents).where(eq(agents.id, member.agentId)).get()?.name)
+        const selected: string[] = []
+        let end = -1
+        for (const token of input.mentions ?? []) {
+          if (!token || typeof token.agentId !== 'string' || !Number.isSafeInteger(token.start) || !Number.isSafeInteger(token.end)
+            || token.start < end || token.start < 0 || token.end > input.content.length || token.end <= token.start
+            || typeof token.text !== 'string' || input.content.slice(token.start, token.end) !== token.text) throw new Error('Agent 提及无效')
+          const member = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, input.channelId), eq(channelAgents.agentId, token.agentId))).get()
+          const agent = tx.select().from(agents).where(eq(agents.id, token.agentId)).get()
+          if (!member?.isEnabled || !agent || token.text !== `@${agent.name}` || names.filter((name) => name === agent.name).length !== 1) throw new Error('Agent 提及无效')
+          if (!selected.includes(token.agentId)) selected.push(token.agentId)
+          end = token.end
+        }
         tx.insert(taskRuns).values(queuedRun).run()
         const runningRun = tx.update(taskRuns)
           .set({ status: 'running', startedAt: timestamp })
@@ -744,6 +802,10 @@ export function createRepositories(client: DatabaseClient): Repositories {
         if (!runningRun) throw new Error('TaskRun cannot transition from queued to running')
         tx.insert(messages).values(message).run()
         appendEvent(tx, runningRun, 'ceo_message', { messageId: message.id })
+        selected.forEach((agentId, position) => {
+          tx.insert(mentionQueue).values({ taskRunId: runningRun.id, position: position + 1, agentId, sourceMessageId: message.id, source: 'ceo', status: 'pending' }).run()
+          appendEvent(tx, runningRun, 'mention_queued', { agentId, messageId: message.id })
+        })
         tx.insert(auditEvents).values(auditEvent).run()
         return runningRun
       })
@@ -778,7 +840,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         tx.update(agentTurns).set({ status: 'cancelled', finishedAt: timestamp })
           .where(and(eq(agentTurns.taskRunId, id), inArray(agentTurns.status, ['queued', 'running', 'waiting_approval']))).run()
         invalidateTools(tx, next)
-        if (to === 'completed') {
+        if (to === 'completed' && metadata.result !== undefined) {
           const reply = tx.insert(messages).values({
             id: randomUUID(), channelId: next.channelId, taskRunId: next.id,
             role: 'agent', authorName: 'AI 助手', content: metadata.result ?? '',
@@ -786,6 +848,8 @@ export function createRepositories(client: DatabaseClient): Repositories {
             status: 'completed', createdAt: timestamp,
           }).returning().get()
           appendEvent(tx, next, 'task_completed', { messageId: reply.id, metadata: { reason: 'completed' } })
+        } else if (to === 'completed') {
+          appendEvent(tx, next, 'task_completed', { metadata: { reason: 'completed' } })
         } else {
           appendEvent(tx, next, to === 'failed' ? 'task_failed' : 'task_cancelled', { metadata: to === 'cancelled' ? { reason: 'cancelled' } : {} })
         }
@@ -837,26 +901,58 @@ export function createRepositories(client: DatabaseClient): Repositories {
     async listTaskRunEvents(id) {
       return client.db.select().from(taskRunEvents).where(eq(taskRunEvents.taskRunId, id)).orderBy(asc(taskRunEvents.seq)).all()
     },
-    async startAgentTurn(taskRunId, generation, agentId, triggerEventSeq) {
+    async startNextMentionTurn(taskRunId, generation) {
       return client.db.transaction((tx) => {
         const run = tx.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).get()
         if (!run || run.status !== 'running' || run.generation !== generation || run.currentTurnId) throw new Error('任务轮次不可开始')
-        const trigger = tx.select().from(taskRunEvents).where(and(eq(taskRunEvents.taskRunId, taskRunId), eq(taskRunEvents.seq, triggerEventSeq))).get()
-        const member = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.agentId, agentId))).get()
-        if (!trigger || trigger.generation !== run.generation || trigger.eventType !== 'speaker_decided'
-          || trigger.agentId !== agentId || !member?.isEnabled) throw new Error('Agent 未获得当前发言资格')
-        if (tx.select({ id: agentTurns.id }).from(agentTurns)
-          .where(and(eq(agentTurns.taskRunId, taskRunId), eq(agentTurns.triggerEventSeq, triggerEventSeq))).get()) {
-          throw new Error('发言决策已被使用')
-        }
-        if (tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval']))).get()) throw new Error('任务仍有未完成操作')
-        const timestamp = new Date().toISOString()
-        const turn: AgentTurn = { id: randomUUID(), taskRunId, ordinal: run.turnCount + 1, agentId,
-          generation, status: 'running', triggerEventSeq, messageId: null, startedAt: timestamp, finishedAt: null }
-        tx.insert(agentTurns).values(turn).run()
-        tx.update(taskRuns).set({ currentTurnId: turn.id, turnCount: turn.ordinal }).where(eq(taskRuns.id, taskRunId)).run()
-        appendEvent(tx, run, 'turn_started', { agentId, metadata: { ordinal: turn.ordinal } })
+        const next = tx.select().from(mentionQueue).where(and(eq(mentionQueue.taskRunId, taskRunId), eq(mentionQueue.status, 'pending')))
+          .orderBy(asc(mentionQueue.position)).limit(1).get()
+        if (!next) return undefined
+        const member = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.agentId, next.agentId))).get()
+        if (!member?.isEnabled) throw new Error('待指派 Agent 已停用')
+        const decision = appendEvent(tx, run, 'speaker_decided', { agentId: next.agentId, metadata: { reason: 'manual_selection' } })
+        const turn = selectedTurn(tx, run, next.agentId, decision.seq)
+        tx.update(mentionQueue).set({ status: 'consumed' }).where(and(eq(mentionQueue.taskRunId, taskRunId), eq(mentionQueue.position, next.position))).run()
+        appendEvent(tx, run, 'mention_consumed', { agentId: next.agentId, messageId: next.sourceMessageId })
         return turn
+      })
+    },
+    async startSingleMemberTurn(taskRunId, generation) {
+      return client.db.transaction((tx) => {
+        const run = tx.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).get()
+        if (!run || run.status !== 'running' || run.generation !== generation || run.currentTurnId || run.turnCount !== 0) throw new Error('任务轮次不可开始')
+        const enabled = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.isEnabled, true))).all()
+        if (enabled.length !== 1) return undefined
+        const decision = appendEvent(tx, run, 'speaker_decided', { agentId: enabled[0].agentId, metadata: { reason: 'manual_selection' } })
+        return selectedTurn(tx, run, enabled[0].agentId, decision.seq)
+      })
+    },
+    async markAgentTurnWaiting(id, toolExecutionId) {
+      return client.db.transaction((tx) => {
+        const turn = tx.select().from(agentTurns).where(eq(agentTurns.id, id)).get()
+        const run = turn && tx.select().from(taskRuns).where(eq(taskRuns.id, turn.taskRunId)).get()
+        if (!turn || !run || turn.status !== 'running' || run.status !== 'running' || run.currentTurnId !== id || run.generation !== turn.generation) throw new Error('任务轮次已失效')
+        const execution = tx.select().from(toolExecutions).where(and(eq(toolExecutions.id, toolExecutionId), eq(toolExecutions.taskRunId, run.id), eq(toolExecutions.agentId, turn.agentId), eq(toolExecutions.generation, turn.generation))).get()
+        if (!execution || !tx.select().from(approvalRequests).where(eq(approvalRequests.toolExecutionId, toolExecutionId)).get()) throw new Error('审批状态无效')
+        const waiting = tx.update(agentTurns).set({ status: 'waiting_approval' }).where(eq(agentTurns.id, id)).returning().get()!
+        appendEvent(tx, run, 'tool_waiting', { agentId: turn.agentId })
+        return waiting
+      })
+    },
+    async pauseTaskRun(id, reason) {
+      return client.db.transaction((tx) => {
+        const run = tx.select().from(taskRuns).where(eq(taskRuns.id, id)).get()
+        if (!run || run.status !== 'running' || run.currentTurnId) throw new Error('任务不可暂停')
+        const paused = tx.update(taskRuns).set({ status: 'paused', generation: run.generation + 1, pauseReason: reason }).where(eq(taskRuns.id, id)).returning().get()!
+        appendEvent(tx, paused, 'task_paused')
+        return paused
+      })
+    },
+    async startAgentTurn(taskRunId, generation, agentId, triggerEventSeq) {
+      return client.db.transaction((tx) => {
+        const run = tx.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).get()
+        if (!run || run.generation !== generation) throw new Error('任务轮次不可开始')
+        return selectedTurn(tx, run, agentId, triggerEventSeq)
       })
     },
     async completeAgentTurn(id, content) {

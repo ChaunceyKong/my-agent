@@ -52,14 +52,14 @@ it('rejects missing model configs on create, update and membership overrides wit
   expect(await service.listChannelAgents(channelId)).toEqual([])
 })
 
-it('enables one member at a time and supports disabled membership updates, removal and reference-safe deletion', async () => {
+it('enables multiple members and supports disabled membership updates, removal and reference-safe deletion', async () => {
   const first = await service.create(input())
   const second = await service.create({ ...input(), name: 'Second' })
   const member = (agentId: string, isEnabled: boolean) => ({ channelId, agentId, isEnabled, modelConfigOverrideId: null, toolPermissionsOverride: null })
   await service.saveChannelAgent(member(first.id, true))
   await service.saveChannelAgent(member(second.id, true))
   expect(await service.listChannelAgents(channelId)).toEqual(expect.arrayContaining([
-    expect.objectContaining({ agentId: first.id, isEnabled: false }),
+    expect.objectContaining({ agentId: first.id, isEnabled: true }),
     expect.objectContaining({ agentId: second.id, isEnabled: true }),
   ]))
   await service.saveChannelAgent({ ...member(first.id, false), toolPermissionsOverride: { read_file: false } })
@@ -147,7 +147,7 @@ it('exposes CRUD through named IPC with no prompt in summary responses or model 
   expect(await invoke(IpcChannel.AgentList)).toEqual([])
 })
 
-it('keeps the single-enabled member rule after idempotent migration', () => {
+it('keeps multiple enabled members after idempotent migration', () => {
   const sqlite = new Database(':memory:')
   try {
     migrate(sqlite)
@@ -158,9 +158,10 @@ it('keeps the single-enabled member rule after idempotent migration', () => {
     sqlite.exec("INSERT INTO model_configs VALUES ('m', 'openai', 'https://example.test', 'test', 'key', 'now', 'now');")
     const insert = sqlite.prepare('INSERT INTO agents VALUES (?, ?, NULL, ?, ?, ?, ?, 0, ?, ?)')
     for (const id of ['a', 'b']) insert.run(id, id, 'title', 'prompt', 'm', '{}', 'now', 'now')
-    sqlite.exec("INSERT INTO channel_agents VALUES ('c', 'a', 1, NULL, NULL, 'now', 'now');")
-    expect(() => sqlite.exec("INSERT INTO channel_agents VALUES ('c', 'b', 1, NULL, NULL, 'now', 'now');")).toThrow(/UNIQUE/)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(11)
+    sqlite.exec("INSERT INTO channel_agents (channel_id,agent_id,is_enabled,model_config_override_id,tool_permissions_override,created_at,updated_at) VALUES ('c', 'a', 1, NULL, NULL, 'now', 'now');")
+    sqlite.exec("INSERT INTO channel_agents (channel_id,agent_id,is_enabled,model_config_override_id,tool_permissions_override,created_at,updated_at) VALUES ('c', 'b', 1, NULL, NULL, 'now', 'now');")
+    expect(sqlite.prepare('SELECT count(*) AS n FROM channel_agents WHERE is_enabled=1').get()).toEqual({ n: 2 })
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(12)
   } finally {
     sqlite.close()
   }

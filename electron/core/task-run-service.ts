@@ -1,8 +1,8 @@
-import type { TaskRun } from '../../shared/types'
+import type { CeoMentionToken, TaskRun } from '../../shared/types'
 import type { Repositories } from '../database/repositories'
 
 export interface TaskRunService {
-  startTaskRun(channelId: string, modelConfigId: string, content: string): Promise<TaskRun>
+  startTaskRun(channelId: string, modelConfigId: string, content: string, mentions?: CeoMentionToken[]): Promise<TaskRun>
   cancelTaskRun(id: string): Promise<TaskRun>
   finishTaskRun(id: string, result: string): Promise<TaskRun>
   recoverInterruptedTaskRuns(): Promise<number>
@@ -14,10 +14,11 @@ export interface TaskRunService {
 export function createTaskRunService(repositories: Repositories): TaskRunService {
   const cancellationListeners = new Map<string, Set<() => void>>()
   return {
-    startTaskRun: (channelId, modelConfigId, content) => repositories.createStartedTaskRun({
+    startTaskRun: (channelId, modelConfigId, content, mentions) => repositories.createStartedTaskRun({
       channelId,
       modelConfigId,
       content,
+      mentions,
     }),
 
     async cancelTaskRun(id: string): Promise<TaskRun> {

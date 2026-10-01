@@ -9,6 +9,7 @@ import { createCloudConsentService } from './core/cloud-consent-service'
 import { createModelClient } from './core/model-client'
 import { createToolEngine } from './core/tool-engine'
 import { createSingleAgentRunner } from './core/single-agent-runner'
+import { createSerialOrchestrator } from './core/serial-orchestrator'
 import { openStartupDatabase } from './core/startup'
 import { createDatabase } from './database/client'
 import { createRepositories } from './database/repositories'
@@ -64,6 +65,7 @@ app.whenReady().then(async () => {
   })
   const tools = createToolEngine(repositories, approvals)
   const runner = createSingleAgentRunner({ repositories, modelClient, taskRuns, toolEngine: tools })
+  const orchestrator = createSerialOrchestrator({ repositories, modelClient, taskRuns, runner })
   registerHandlers({
     ipcMain,
     dialog: { showOpenDialog: (options) => dialog.showOpenDialog(options as OpenDialogOptions) },
@@ -73,6 +75,7 @@ app.whenReady().then(async () => {
     approvals,
     processes,
     runner,
+    orchestrator,
   })
   createWindow()
 

@@ -87,7 +87,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
     updateConversation(channelId, { loading: true, error: '' })
     try {
       const [messages, runs] = await Promise.all([api.messages.list(channelId), api.tasks.list(channelId)])
-      if (version === lifecycle) {
+      if (version === lifecycle && state.channels.some((channel) => channel.id === channelId)) {
         const buffered = loadingEvents.get(channelId) ?? []
         const completedReplies = new Set(messages.filter((message) => message.role === 'agent' && message.status === 'completed').map((message) => message.taskRunId))
         const completedEvents = new Set(buffered.filter((event) => event.type === 'complete').map((event) => event.taskRunId))
@@ -100,7 +100,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
         }
       }
     } catch {
-      if (version === lifecycle) updateConversation(channelId, { loading: false, error: '群聊记录加载失败，请重新选择群聊重试' })
+      if (version === lifecycle && state.channels.some((channel) => channel.id === channelId)) updateConversation(channelId, { loading: false, error: '群聊记录加载失败，请重新选择群聊重试' })
     } finally { loadingEvents.delete(channelId) }
   }
 
@@ -166,6 +166,24 @@ export function createWorkbenchStore(api: AgentTeamApi) {
       if (state.projectId !== projectId) return
       update({ channels: [...state.channels, channel] })
       await selectChannel(channel.id)
+    },
+    updateChannel: (channel: Channel) => update({ channels: state.channels.map((item) => item.id === channel.id ? channel : item) }),
+    async removeChannel(channelId: string) {
+      const projectId = state.projectId
+      const version = selection
+      await api.channels.remove({ channelId, confirmation: 'delete_channel_records' })
+      const conversations = { ...state.conversations }
+      delete conversations[channelId]
+      loadingEvents.delete(channelId)
+      const remaining = state.channels.filter((item) => item.id !== channelId)
+      update({ conversations, channels: remaining, consent: state.consent?.channelId === channelId ? null : state.consent,
+        channelId: state.channelId === channelId ? '' : state.channelId })
+      let channels = remaining
+      try { channels = await api.channels.list(projectId) }
+      catch { if (state.projectId === projectId && version === selection) update({ error: '群聊已删除，列表刷新失败，请重新加载工作台' }) }
+      if (state.projectId !== projectId || version !== selection) return
+      update({ channels })
+      if (!channels.some((item) => item.id === state.channelId) && channels[0]) await selectChannel(channels[0].id)
     },
     async saveModel(input: SaveModelConfigInput) {
       const model = await api.models.save(input)

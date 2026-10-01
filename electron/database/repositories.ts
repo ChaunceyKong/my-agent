@@ -11,6 +11,7 @@ import type {
   Channel,
   ChannelAgent,
   CeoMentionToken,
+  ConfigureChannelInput,
   CreateChannelInput,
   CreateProjectInput,
   Message,
@@ -252,6 +253,8 @@ export interface Repositories {
   listChannels(projectId: string): Promise<Channel[]>
   getChannel(id: string): Promise<Channel | undefined>
   setChannelScheduler(id: string, modelConfigId: string | null): Promise<Channel>
+  configureChannel(input: ConfigureChannelInput): Promise<Channel>
+  removeChannel(id: string): Promise<void>
   createChannel(input: CreateChannelInput): Promise<Channel>
   createStartedTaskRun(input: StartTaskRunInput): Promise<TaskRun>
   validateStartedTaskRun(input: StartTaskRunInput): Promise<void>
@@ -820,6 +823,37 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const channel = tx.select().from(channels).where(eq(channels.id, id)).get()
         if (!channel || (modelConfigId !== null && !tx.select().from(modelConfigs).where(eq(modelConfigs.id, modelConfigId)).get())) throw new Error('群聊或调度模型不存在')
         return tx.update(channels).set({ schedulerModelConfigId: modelConfigId, updatedAt: new Date().toISOString() }).where(eq(channels.id, id)).returning().get()!
+      })
+    },
+
+    async configureChannel(input) {
+      return client.db.transaction((tx) => {
+        if (!input || !['automatic', 'manual'].includes(input.speakerMode)
+          || !Number.isSafeInteger(input.maxTurns) || input.maxTurns < 1 || input.maxTurns > 100) throw new Error('群聊调度配置无效')
+        const channel = tx.select().from(channels).where(eq(channels.id, input.channelId)).get()
+        if (!channel || (input.schedulerModelConfigId !== null && !tx.select().from(modelConfigs).where(eq(modelConfigs.id, input.schedulerModelConfigId)).get())) throw new Error('群聊或调度模型不存在')
+        return tx.update(channels).set({ speakerMode: input.speakerMode, maxTurns: input.maxTurns,
+          schedulerModelConfigId: input.schedulerModelConfigId, updatedAt: new Date().toISOString() }).where(eq(channels.id, input.channelId)).returning().get()!
+      })
+    },
+
+    async removeChannel(id) {
+      client.db.transaction((tx) => {
+        if (!tx.select().from(channels).where(eq(channels.id, id)).get()) throw new Error('群聊不存在')
+        if (tx.select().from(taskRuns).where(and(eq(taskRuns.channelId, id), inArray(taskRuns.status, ['queued', 'running', 'cancelling', 'paused']))).get()
+          || tx.select({ id: agentTurns.id }).from(agentTurns).innerJoin(taskRuns, eq(taskRuns.id, agentTurns.taskRunId))
+            .where(and(eq(taskRuns.channelId, id), inArray(agentTurns.status, ['queued', 'running', 'waiting_approval']))).get()) throw new Error('群聊仍有未结束任务，请先处理或结束任务')
+        const activeTool = tx.select({ id: toolExecutions.id }).from(toolExecutions).innerJoin(taskRuns, eq(taskRuns.id, toolExecutions.taskRunId))
+          .where(and(eq(taskRuns.channelId, id), or(inArray(toolExecutions.status, ['executing', 'waiting_approval']), eq(toolExecutions.processRecoveryRequired, true)))).get()
+        const approval = tx.select({ id: approvalRequests.id }).from(approvalRequests)
+          .innerJoin(toolExecutions, eq(toolExecutions.id, approvalRequests.toolExecutionId)).innerJoin(taskRuns, eq(taskRuns.id, toolExecutions.taskRunId))
+          .where(and(eq(taskRuns.channelId, id), or(inArray(approvalRequests.status, ['pending', 'approved']),
+            and(eq(approvalRequests.status, 'executing'), inArray(toolExecutions.status, ['executing', 'waiting_approval']))))).get()
+        const journal = tx.select({ id: overwritePublications.executionId }).from(overwritePublications)
+          .innerJoin(toolExecutions, eq(toolExecutions.id, overwritePublications.executionId)).innerJoin(taskRuns, eq(taskRuns.id, toolExecutions.taskRunId))
+          .where(and(eq(taskRuns.channelId, id), inArray(overwritePublications.state, ['preparing', 'staged', 'publishing', 'effect_claimed', 'published', 'cleanup_pending', 'needs_recovery']))).get()
+        if (activeTool || approval || journal) throw new Error('群聊仍有操作、审批或恢复记录待处理')
+        tx.delete(channels).where(eq(channels.id, id)).run()
       })
     },
 

@@ -5,6 +5,8 @@ export enum IpcChannel {
   ChannelCreate = 'channel:create',
   ChannelList = 'channel:list',
   ChannelSetScheduler = 'channel:set-scheduler',
+  ChannelConfigure = 'channel:configure',
+  ChannelRemove = 'channel:remove',
   MessageSend = 'message:send',
   TaskRunCancel = 'task-run:cancel',
   TaskRunContinue = 'task-run:continue',

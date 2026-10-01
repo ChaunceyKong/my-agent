@@ -29,6 +29,13 @@ function summary(agent: Agent): AgentSummary {
   }
 }
 
+function avatar(value: unknown): string | null {
+  if (value === null) return null
+  const text = requireText(value, 'Agent 头像', true).trim()
+  if ([...text].length > 16 || /[\u0000-\u001f\u007f]/u.test(text)) throw new Error('Agent 头像请使用最多 16 个文字或 emoji')
+  return text || null
+}
+
 export function createAgentService(repositories: Repositories) {
   async function requireModel(id: string): Promise<void> {
     requireText(id, '模型配置')
@@ -51,7 +58,7 @@ export function createAgentService(repositories: Repositories) {
     if (!input || typeof input !== 'object') throw new Error('Agent 配置无效')
     const validated: AgentEditorInput = {
       name: requireText(input.name, 'Agent 名称').trim(),
-      avatar: input.avatar === null ? null : requireText(input.avatar, 'Agent 头像', true),
+      avatar: avatar(input.avatar),
       title: requireText(input.title, 'Agent 职位', true),
       systemPrompt: requireText(input.systemPrompt, '系统提示词', true),
       modelConfigId: requireText(input.modelConfigId, '模型配置'),

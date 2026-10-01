@@ -25,7 +25,7 @@ beforeEach(() => {
     workspace: { list: vi.fn().mockResolvedValue({ entries: [], summary: '', truncated: false, limits: {} }) },
     executables: { list: vi.fn().mockResolvedValue([]), save: vi.fn() },
     projects: { list: vi.fn().mockResolvedValue([project]), pickWorkspace: vi.fn().mockResolvedValue({ id: 'workspace-1', label: '已选择本地目录' }), create: vi.fn().mockResolvedValue(project) },
-    channels: { list: vi.fn().mockResolvedValue([channel]), create: vi.fn().mockResolvedValue({ ...channel, id: 'c2', name: '选题群' }), setScheduler: vi.fn() },
+    channels: { list: vi.fn().mockResolvedValue([channel]), create: vi.fn().mockResolvedValue({ ...channel, id: 'c2', name: '选题群' }), setScheduler: vi.fn(), configure: vi.fn(), remove: vi.fn() },
     models: { list: vi.fn().mockResolvedValue([model]), save: vi.fn().mockResolvedValue({ ...model, id: 'm2' }), remove: vi.fn(), test: vi.fn(), discover: vi.fn(), getDefaultScheduler: vi.fn().mockResolvedValue(null), setDefaultScheduler: vi.fn() },
     messages: { list: vi.fn().mockResolvedValue([]) },
     consent: { has: vi.fn().mockResolvedValue(true), grant: vi.fn().mockResolvedValue(undefined) },
@@ -213,6 +213,33 @@ it('creates and selects a channel within the current project', async () => {
   await userEvent.click(screen.getByRole('button', { name: '确认建群' }))
   expect(await screen.findByRole('heading', { name: '选题群' })).toBeVisible()
   expect(api.channels.create).toHaveBeenCalledWith({ projectId: 'p1', name: '选题群' })
+})
+
+it('deletes the confirmed Channel records and selects the refreshed fallback Channel', async () => {
+  const other = { ...channel, id: 'c2', name: '保留群聊' }
+  vi.mocked(api.channels.list).mockResolvedValue([channel, other])
+  vi.mocked(api.channels.remove).mockImplementation(async () => { vi.mocked(api.channels.list).mockResolvedValue([other]) })
+  render(<App />)
+  await screen.findByRole('heading', { name: channel.name })
+  await userEvent.click(screen.getByRole('button', { name: '删除当前群聊' }))
+  expect(await screen.findByRole('dialog', { name: '删除群聊' })).toHaveTextContent(channel.name)
+  expect(api.channels.remove).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('button', { name: '确认删除群聊' }))
+  expect(api.channels.remove).toHaveBeenCalledWith({ channelId: 'c1', confirmation: 'delete_channel_records' })
+  expect(await screen.findByRole('heading', { name: '保留群聊' })).toBeVisible()
+  expect(screen.queryByRole('button', { name: channel.name })).not.toBeInTheDocument()
+  expect(screen.queryByRole('dialog', { name: '删除群聊' })).not.toBeInTheDocument()
+})
+
+it('keeps the Channel selected when pending operations prevent deletion', async () => {
+  vi.mocked(api.channels.remove).mockRejectedValue(new Error('pending effect PRIVATE_DETAILS'))
+  render(<App />)
+  await screen.findByRole('heading', { name: channel.name })
+  await userEvent.click(screen.getByRole('button', { name: '删除当前群聊' }))
+  await userEvent.click(screen.getByRole('button', { name: '确认删除群聊' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('任务、审批和恢复操作')
+  expect(screen.queryByText(/PRIVATE_DETAILS/)).not.toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: channel.name })).toBeVisible()
 })
 
 it('does not replace the selected project with a stale channel-list response', async () => {

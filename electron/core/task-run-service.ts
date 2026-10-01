@@ -10,6 +10,7 @@ export interface TaskRunService {
   advanceGeneration(id: string): Promise<TaskRun>
   onCancelled(id: string, listener: () => void): () => void
   trackEffect<T>(id: string, effect: () => Promise<T>): Promise<T>
+  hasActiveEffects(id: string): boolean
   pauseTaskRun(id: string, reason: string, expectedGeneration?: number): Promise<TaskRun>
   resumeTaskRun(id: string, agentId?: string): Promise<TaskRun>
   acknowledgeProcessRecovery(id: string, executionId: string): Promise<void>
@@ -64,6 +65,7 @@ export function createTaskRunService(repositories: Repositories, cleanupTimeoutM
       active.add(pending); effects.set(id, active)
       try { return await pending } finally { active.delete(pending); if (!active.size) effects.delete(id) }
     },
+    hasActiveEffects: (id) => stopping.has(id) || !!effects.get(id)?.size,
 
     onCancelled(id, listener) {
       const listeners = cancellationListeners.get(id) ?? new Set<() => void>()

@@ -1,5 +1,5 @@
 import { IpcChannel } from '../../shared/ipc-channels'
-import type { AgentEditorInput, CreateChannelInput, CreateProjectInput, RegisteredExecutableInput, SaveChannelAgentInput, SaveModelConfigInput, SendMessageInput, StreamEvent } from '../../shared/types'
+import type { AgentEditorInput, ConfigureChannelInput, CreateChannelInput, CreateProjectInput, DeleteChannelInput, RegisteredExecutableInput, SaveChannelAgentInput, SaveModelConfigInput, SendMessageInput, StreamEvent } from '../../shared/types'
 import { buildAgentContext, ContextBudgetError } from '../core/context-manager'
 import type { createApprovalService } from '../core/approval-service'
 import type { createProcessToolService } from '../core/process-tool-service'
@@ -95,6 +95,19 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
   ipcMain.handle(IpcChannel.ChannelSetScheduler, (_event, channelId: unknown, modelConfigId: unknown) => {
     if (modelConfigId !== null && (typeof modelConfigId !== 'string' || !modelConfigId.trim())) throw new Error('调度模型配置无效')
     return repositories.setChannelScheduler(validId(channelId), modelConfigId)
+  })
+  ipcMain.handle(IpcChannel.ChannelConfigure, (_event, input: ConfigureChannelInput) => {
+    if (!input || typeof input !== 'object' || (input.schedulerModelConfigId !== null && (typeof input.schedulerModelConfigId !== 'string' || !input.schedulerModelConfigId.trim()))) throw new Error('群聊调度配置无效')
+    return repositories.configureChannel({ channelId: validId(input.channelId), speakerMode: input.speakerMode, maxTurns: input.maxTurns,
+      schedulerModelConfigId: input.schedulerModelConfigId === null ? null : validId(input.schedulerModelConfigId) })
+  })
+  ipcMain.handle(IpcChannel.ChannelRemove, async (_event, input: DeleteChannelInput) => {
+    if (!input || typeof input !== 'object' || input.confirmation !== 'delete_channel_records') throw new Error('请明确确认删除群聊记录')
+    const id = validId(input.channelId)
+    if (startingChannels.has(id)) throw new Error('群聊任务正在启动')
+    const runs = await repositories.listTaskRuns(id)
+    if (startingChannels.has(id) || runs.some((run) => taskRuns?.hasActiveEffects(run.id))) throw new Error('群聊操作仍在清理')
+    await repositories.removeChannel(id)
   })
   ipcMain.handle(IpcChannel.ModelList, () => {
     if (!modelClient) throw new Error('Model client is unavailable')

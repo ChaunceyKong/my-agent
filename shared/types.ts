@@ -44,6 +44,18 @@ export interface CreateChannelInput {
   icon?: string
 }
 
+export interface ConfigureChannelInput {
+  channelId: string
+  speakerMode: ChannelSpeakerMode
+  maxTurns: number
+  schedulerModelConfigId: string | null
+}
+
+export interface DeleteChannelInput {
+  channelId: string
+  confirmation: 'delete_channel_records'
+}
+
 export type ToolName = 'list_dir' | 'read_file' | 'search_files' | 'write_file' | 'replace_file_content' | 'run_process'
 // Missing permissions deny access. Channel overrides are intersected with Agent defaults.
 export type ToolPermissions = Partial<Record<ToolName, boolean>>
@@ -374,6 +386,8 @@ export interface AgentTeamApi {
     list(projectId: string): Promise<Channel[]>
     create(input: CreateChannelInput): Promise<Channel>
     setScheduler(channelId: string, modelConfigId: string | null): Promise<Channel>
+    configure(input: ConfigureChannelInput): Promise<Channel>
+    remove(input: DeleteChannelInput): Promise<void>
   }
   models: {
     list(): Promise<ModelConfigSummary[]>

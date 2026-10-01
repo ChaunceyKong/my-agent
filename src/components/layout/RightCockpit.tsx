@@ -6,7 +6,7 @@ import { ToolCard } from '../agent/ToolCard'
 import { ApprovalCard } from '../agent/ApprovalCard'
 import { WorkspaceTree } from '../agent/WorkspaceTree'
 
-export function RightCockpit({ project, channel, model, models, run }: { project?: ProjectSummary; channel?: Channel; model?: ModelConfigSummary; models: ModelConfigSummary[]; run?: TaskRun }) {
+export function RightCockpit({ project, channel, model, models, run, onChannelChanged }: { project?: ProjectSummary; channel?: Channel; model?: ModelConfigSummary; models: ModelConfigSummary[]; run?: TaskRun; onChannelChanged(channel: Channel): void }) {
   const [tab, setTab] = useState('members')
   const [tools, setTools] = useState<Awaited<ReturnType<AgentTeamApi['tools']['list']>>>([])
   const [approvals, setApprovals] = useState<Awaited<ReturnType<AgentTeamApi['approvals']['list']>>>([])
@@ -19,7 +19,7 @@ export function RightCockpit({ project, channel, model, models, run }: { project
     const next = tabs[(index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length][0]
     setTab(next); document.getElementById(`tab-${next}`)?.focus()
   }}>{label}</button>)}</div><div id="cockpit-content" role="tabpanel" aria-labelledby={`tab-${tab}`} className="cockpit-content">
-    {tab === 'members' && <AgentManager channel={channel} models={models} />}
+    {tab === 'members' && <AgentManager key={channel?.id} channel={channel} models={models} onChannelChanged={onChannelChanged} />}
     {tab === 'files' && <WorkspaceTree channel={channel} />}
     {tab === 'tools' && <><ToolCard items={tools} /><ApprovalCard items={approvals} onChanged={reload} /></>}
     {tab === 'context' && <><div className="metadata-card"><h3>当前项目与会话</h3><dl><dt>项目</dt><dd>{project?.name ?? '未选择'}</dd><dt>群聊</dt><dd>{channel?.name ?? '未选择'}</dd><dt>模型</dt><dd>{model?.modelName ?? '未配置'}</dd><dt>工作目录</dt><dd>已绑定本地目录</dd></dl></div><EmptyState title="上下文说明">同一项目下的群聊各自保留对话历史。自动摘要与交付成果提取尚未提供。</EmptyState></>}

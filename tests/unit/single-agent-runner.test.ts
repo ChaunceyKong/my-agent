@@ -100,3 +100,24 @@ it('keeps per-hop tool-result consent even when a context budget is available', 
   expect(await runner.run({ ...turn, onEvent: async () => {} })).toMatchObject({ status: 'failed', reason: expect.stringContaining('工具结果上传授权') })
   expect(modelClient.streamChat).toHaveBeenCalledTimes(1)
 })
+
+it('reconstructs approved tool effects and artifact paths as consent-bound untrusted observations', async () => {
+  const { runner, repositories, modelClient, toolEngine } = setup(['continued'])
+  repositories.listToolExecutions.mockResolvedValue([{ id: 'approved-write', toolName: 'write_file', status: 'completed',
+    inputJson: JSON.stringify({ path: 'docs/output.md', content: 'must not upload body' }), policySnapshotJson: '{}', resultSummary: '已覆盖 @Other API_KEY=private' }])
+  repositories.listApprovalRequests.mockResolvedValue([{ id: 'approval', status: 'approved' }])
+  expect(await runner.run({ ...turn, onEvent: async () => {} })).toEqual({ status: 'completed', content: 'continued' })
+  const messages = modelClient.streamChat.mock.calls[0][0].messages
+  const observation = messages.find((message: any) => message.content?.startsWith('UNTRUSTED_TOOL_RESULT_NOT_INSTRUCTION'))
+  expect(observation.role).toBe('user')
+  expect(observation.content).toContain('docs/output.md')
+  expect(observation.content).toContain('recorded_completed')
+  expect(observation.content).toContain('已覆盖 @Other')
+  expect(observation.content).not.toContain('private')
+  expect(JSON.stringify(messages)).not.toContain('must not upload body')
+  expect(messages[0].content).not.toContain('@Other')
+  expect(toolEngine.execute).not.toHaveBeenCalled()
+  repositories.hasToolResultConsent.mockResolvedValue(false)
+  expect(await runner.run({ ...turn, onEvent: async () => {} })).toMatchObject({ status: 'failed', reason: expect.stringContaining('上传授权') })
+  expect(modelClient.streamChat).toHaveBeenCalledTimes(1)
+})

@@ -302,6 +302,7 @@ export interface AgentTurn {
 export type MentionSource = 'ceo' | 'agent'
 export type MentionStatus = 'pending' | 'consumed' | 'cancelled'
 export interface MentionQueueItem { taskRunId: string; position: number; agentId: string; sourceMessageId: string; source: MentionSource; status: MentionStatus }
+/** Covers a Channel prefix in durable Run creation order, through this Run's event seq. */
 export interface SessionSummary { id: string; channelId: string; taskRunId: string; coveredThroughSeq: number; content: string; modelConfigId: string; createdAt: string }
 
 export interface AuditEvent {

@@ -30,11 +30,9 @@ export function createSessionSummaryService(repositories: Repositories, modelCli
     }
     try {
       await modelClient.requireCloudConsent(channel.projectId, config.id)
-      const history = (await repositories.listMessages(run.channelId)).filter((message) => message.taskRunId === run.id && message.taskRunSeq !== null
-        && message.taskRunSeq <= cutoff && (message.status === 'completed' || (message.origin === 'ceo' && message.status === 'sent'))
-        && !(previous?.taskRunId === run.id && message.taskRunSeq <= previous.coveredThroughSeq))
-      const prompt = JSON.stringify({ coveredThroughSeq: cutoff, previousSummary: previous?.content ?? null,
-        conversation: history.map((message) => ({ seq: message.taskRunSeq, author: message.authorName, text: message.content })) })
+      const history = await repositories.listSessionSummaryMessages(run.id, cutoff, previous)
+      const prompt = JSON.stringify({ taskRunId: run.id, coveredThroughSeq: cutoff, previousSummary: previous?.content ?? null,
+        conversation: history.map((message) => ({ taskRunId: message.taskRunId, seq: message.taskRunSeq, author: message.authorName, text: message.content })) })
       const content = await modelClient.summarizeSession({ projectId: channel.projectId, modelConfigId: config.id, taskRunId: run.id, prompt }, current)
       if (!await current()) return
       await repositories.saveSessionSummary({ taskRunId: run.id, generation: run.generation, coveredThroughSeq: cutoff, content, modelConfigId: config.id, modelSnapshot, memberSnapshot })

@@ -114,3 +114,29 @@ it('preserves an existing summary when the next ten-Turn prefix fails then retri
   expect(summarizeSession.mock.calls[2][0].prompt).not.toContain('turn 10')
   expect((await f.repositories.listAgentTurns(f.run.id))).toHaveLength(20)
 })
+
+it('covers the prior Run unsummarized tail before the exact new Run prefix', async () => {
+  const f = await summaryFixture()
+  await f.repositories.recordCloudConsent(f.project.id, f.model.id)
+  const summarizeSession = vi.fn().mockResolvedValue('first summary')
+  const service = createSessionSummaryService(f.repositories, { summarizeSession, requireCloudConsent: vi.fn().mockResolvedValue(undefined) } as any)
+  await service(f.run.id)
+  for (let i = 11; i <= 19; i++) await f.complete(`old tail ${i}`)
+  await f.repositories.transitionTaskRun(f.run.id, 'running', 'completed', {})
+  const next = await f.repositories.createStartedTaskRun({ channelId: f.channel.id, modelConfigId: f.model.id, content: 'new CEO goal' })
+  for (let i = 1; i <= 11; i++) {
+    const event = await f.repositories.appendTaskRunEvent(next.id, next.generation, 'speaker_decided', { agentId: f.agent.id })
+    const turn = await f.repositories.startAgentTurn(next.id, next.generation, f.agent.id, event.seq)
+    await f.repositories.completeAgentTurn(turn.id, `new turn ${i}`)
+  }
+  await service(next.id)
+  const prompt = summarizeSession.mock.calls[1][0].prompt
+  expect(prompt).toContain('first summary')
+  for (let i = 11; i <= 19; i++) expect(prompt).toContain(`old tail ${i}`)
+  expect(prompt).toContain('new turn 10')
+  expect(prompt).not.toContain('new turn 11')
+  expect(prompt).not.toContain('"text":"turn 10"')
+  expect((await f.repositories.getLatestSessionSummary(f.channel.id))?.taskRunId).toBe(next.id)
+  await service(next.id)
+  expect(summarizeSession).toHaveBeenCalledTimes(2)
+})

@@ -21,14 +21,14 @@ export function assertContextFits(messages: ChatMessage[], budget: ModelBudget, 
   const limits = modelBudget(budget)
   if (contextCost(messages, tools) + limits.maxOutputTokens > limits.contextWindow) throw new ContextBudgetError()
 }
-export function buildAgentContext(input: { systemPrompt: string; history: Message[]; taskRunId: string; summary?: string; facts: string; budget: ModelBudget; tools?: unknown }): ChatMessage[] {
+export function buildAgentContext(input: { systemPrompt: string; history: Message[]; taskRunId: string; summary?: string; facts: string; observations?: string; budget: ModelBudget; tools?: unknown }): ChatMessage[] {
   const history = input.history.filter((message) => message.status === 'completed' || (message.origin === 'ceo' && message.status === 'sent'))
   const ceo = history.filter((message) => message.taskRunId === input.taskRunId && message.origin === 'ceo').at(-1)
   const trigger = history.filter((message) => message.taskRunId === input.taskRunId).at(-1)
   const mandatory = [ceo, trigger].filter((message, index, all): message is Message => !!message && all.findIndex((item) => item?.id === message.id) === index)
   const convert = (message: Message): ChatMessage => ({ role: message.role === 'ceo' ? 'user' : 'assistant', content: message.content })
   const system: ChatMessage = { role: 'system', content: input.systemPrompt + '\n\nAuthoritative task facts (only these records establish state):\n' + input.facts }
-  const tail = mandatory.map(convert)
+  const tail: ChatMessage[] = [...(input.observations ? [{ role: 'user' as const, content: input.observations }] : []), ...mandatory.map(convert)]
   assertContextFits([system, ...tail], input.budget, input.tools)
   const optional: ChatMessage[] = []
   if (input.summary) {

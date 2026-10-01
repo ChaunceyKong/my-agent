@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { win32 } from 'node:path'
-import { and, asc, eq, inArray, sql, type SQL } from 'drizzle-orm'
+import { and, asc, eq, inArray, or, sql, type SQL } from 'drizzle-orm'
 import type {
   Agent,
   AgentEditorInput,
@@ -181,6 +181,7 @@ export interface ModelConfigRecord extends SaveModelConfigRecordInput {
 
 export interface Repositories {
   getLatestSessionSummary(channelId: string): Promise<SessionSummary | undefined>
+  listSessionSummaryMessages(taskRunId: string, coveredThroughSeq: number, previous?: SessionSummary): Promise<Message[]>
   saveSessionSummary(input: { taskRunId: string; generation: number; coveredThroughSeq: number; content: string; modelConfigId: string; modelSnapshot: string; memberSnapshot: string }): Promise<SessionSummary>
   createToolExecution(context: ToolContext, request: ToolRequest): Promise<ToolExecution>
   getToolExecution(id: string): Promise<ToolExecution | undefined>
@@ -254,6 +255,17 @@ export function createRepositories(client: DatabaseClient): Repositories {
   return {
     async getLatestSessionSummary(channelId) {
       return client.db.select().from(sessionSummaries).where(eq(sessionSummaries.channelId, channelId)).orderBy(sql`rowid DESC`).limit(1).get()
+    },
+    async listSessionSummaryMessages(taskRunId, coveredThroughSeq, previous) {
+      // A summary covers the Channel prefix ordered by durable Run rowid, then event seq.
+      // This includes the unsummarized tail of every older Run, not just the current Run.
+      return client.db.select().from(messages).where(and(
+        sql`${messages.channelId} = (SELECT channel_id FROM task_runs WHERE id = ${taskRunId})`,
+        sql`${messages.taskRunSeq} IS NOT NULL`,
+        or(eq(messages.status, 'completed'), and(eq(messages.origin, 'ceo'), eq(messages.status, 'sent'))),
+        sql`((SELECT rowid FROM task_runs WHERE id = ${messages.taskRunId}) < (SELECT rowid FROM task_runs WHERE id = ${taskRunId}) OR (${messages.taskRunId} = ${taskRunId} AND ${messages.taskRunSeq} <= ${coveredThroughSeq}))`,
+        previous ? sql`((SELECT rowid FROM task_runs WHERE id = ${messages.taskRunId}) > (SELECT rowid FROM task_runs WHERE id = ${previous.taskRunId}) OR (${messages.taskRunId} = ${previous.taskRunId} AND ${messages.taskRunSeq} > ${previous.coveredThroughSeq}))` : undefined,
+      )).orderBy(sql`(SELECT rowid FROM task_runs WHERE id = ${messages.taskRunId})`, asc(messages.taskRunSeq), asc(messages.id)).all()
     },
     async saveSessionSummary(input) {
       return client.db.transaction((tx) => {

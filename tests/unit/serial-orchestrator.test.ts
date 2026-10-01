@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { sql } from 'drizzle-orm'
 import { createDatabase, type DatabaseClient } from '../../electron/database/client'
 import { createRepositories, type Repositories } from '../../electron/database/repositories'
 import { createTaskRunService } from '../../electron/core/task-run-service'
@@ -16,6 +17,7 @@ import { IpcChannel } from '../../shared/ipc-channels'
 import type { Agent, StreamEvent } from '../../shared/types'
 import { parseAgentMentions } from '../../electron/core/mention-parser'
 import { parseSpeakerDecision } from '../../electron/core/speaker-selector'
+import { createCloudConsentService } from '../../electron/core/cloud-consent-service'
 
 let directory: string
 let database: DatabaseClient
@@ -42,6 +44,24 @@ beforeEach(async () => {
 afterEach(() => { database.close(); rmSync(directory, { recursive: true, force: true }) })
 
 const tokens = () => [{ agentId: first.id, start: 0, end: 6, text: '@Alpha' }, { agentId: second.id, start: 7, end: 12, text: '@Beta' }]
+it('pauses a scheduler whose configured context cannot fit input plus output reserve', async () => {
+  database.db.run(sql`UPDATE model_configs SET context_window = 2048, max_output_tokens = 512 WHERE id = ${modelConfigId}`)
+  await repositories.setChannelScheduler(channelId, modelConfigId)
+  await repositories.recordCloudConsent(projectId, modelConfigId)
+  const fetch = vi.fn()
+  const modelClient = createModelClient({ repositories, consent: createCloudConsentService(repositories), taskRuns,
+    crypto: { isEncryptionAvailable: () => true, encryptString: (value) => Buffer.from(value), decryptString: (value) => value.toString() }, fetch })
+  const runner = createSingleAgentRunner({ repositories, modelClient, taskRuns, toolEngine: createToolEngine(repositories, createApprovalService(repositories)) })
+  const orchestrator = createSerialOrchestrator({ repositories, modelClient, taskRuns, runner })
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, 'goal')
+  const decision = await repositories.appendTaskRunEvent(run.id, run.generation, 'speaker_decided', { agentId: first.id })
+  const turn = await repositories.startAgentTurn(run.id, run.generation, first.id, decision.seq)
+  await repositories.completeAgentTurn(turn.id, '文'.repeat(600))
+  await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused' })
+  expect(fetch).not.toHaveBeenCalled()
+  expect(await repositories.listAgentTurns(run.id)).toHaveLength(1)
+})
 function setup(reply: (system: string, emit: (event: StreamEvent) => Promise<void>) => Promise<void>) {
   const modelClient: any = { requireCloudConsent: vi.fn().mockResolvedValue(undefined), streamChat: vi.fn(async (input: any, emit: any) => reply(input.messages[0].content, emit)) }
   const engine = createToolEngine(repositories, createApprovalService(repositories))

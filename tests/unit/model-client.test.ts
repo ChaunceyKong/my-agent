@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { sql } from 'drizzle-orm'
 import { createCloudConsentService } from '../../electron/core/cloud-consent-service'
 import { createModelClient, type CryptoAdapter, type ModelClient } from '../../electron/core/model-client'
 import { createDatabase, type DatabaseClient } from '../../electron/database/client'
@@ -58,6 +59,16 @@ async function createProjectAndModel(): Promise<{ projectId: string; modelConfig
 }
 
 describe('scheduler request', () => {
+  it('reserves scheduler output tokens and rejects overflow before dispatch', async () => {
+    const { projectId } = await createProjectAndModel()
+    const model = await client.saveModelConfig({ providerPreset: 'openai', modelName: 'small', apiKey: 'secret', contextWindow: 2048, maxOutputTokens: 512 })
+    await client.recordCloudConsent(projectId, model.id)
+    await expect(client.selectSpeaker({ projectId, modelConfigId: model.id, taskRunId: 'run', prompt: '文'.repeat(500) }, async () => true)).rejects.toThrow('预算不足')
+    expect(fetchImpl).not.toHaveBeenCalled()
+    fetchImpl.mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: '{}' } }] }), { headers: { 'content-type': 'application/json' } }))
+    await client.selectSpeaker({ projectId, modelConfigId: model.id, taskRunId: 'run', prompt: '{}' }, async () => true)
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body).max_tokens).toBe(512)
+  })
   it('requires exact summary consent and bounds multilingual prompt and Provider response', async () => {
     const { projectId, modelConfigId } = await createProjectAndModel()
     const other = await client.saveModelConfig({ providerPreset: 'openai', modelName: 'other', apiKey: 'secret' })
@@ -85,6 +96,31 @@ describe('scheduler request', () => {
     fetchImpl.mockResolvedValue(new Response('x'.repeat(17_000), { headers: { 'content-type': 'application/json' } }))
     await expect(client.selectSpeaker({ projectId, modelConfigId, taskRunId: 'run', prompt: 'private context' }, async () => true)).rejects.toThrow('过长')
   })
+})
+
+it.each(['turn', 'model'])('rechecks %s after a delayed final cloud-consent check', async (changed) => {
+  const { projectId, modelConfigId } = await createProjectAndModel()
+  let release!: () => void
+  let entered!: () => void
+  const enteredGate = new Promise<void>((resolve) => { entered = resolve })
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const consent = createCloudConsentService(repositories)
+  const original = consent.requireCloudConsent
+  let checks = 0
+  consent.requireCloudConsent = async (...args) => {
+    await original(...args)
+    if (++checks === 2) { entered(); await gate }
+  }
+  const delayed = createModelClient({ repositories, consent, taskRuns: { canAcceptChunk, onCancelled: () => () => {} }, crypto: cryptoAdapter, fetch: fetchImpl })
+  let valid = true
+  const request = delayed.streamChat({ projectId, modelConfigId, taskRunId: 'run', messages: [{ role: 'user', content: 'private' }] }, vi.fn(), async () => valid)
+  const observed = request.catch((error) => error)
+  await enteredGate
+  if (changed === 'turn') valid = false
+  else database.db.run(sql`UPDATE model_configs SET model_name = 'changed' WHERE id = ${modelConfigId}`)
+  release()
+  await observed
+  expect(fetchImpl).not.toHaveBeenCalled()
 })
 
 function streamResponse(parts: string[]): Response {
@@ -224,7 +260,7 @@ describe('OpenAI-compatible streaming', () => {
       { taskRunId: 'run-1', type: 'delta', content: '好' },
       { taskRunId: 'run-1', type: 'complete' },
     ])
-    expect(canAcceptChunk).toHaveBeenCalledTimes(4)
+    expect(canAcceptChunk).toHaveBeenCalledTimes(5)
     expect(fetchImpl).toHaveBeenCalledWith('https://api.deepseek.com/chat/completions', expect.objectContaining({
       method: 'POST',
       headers: expect.objectContaining({ Authorization: 'Bearer secret' }),
@@ -253,6 +289,7 @@ describe('OpenAI-compatible streaming', () => {
     canAcceptChunk
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false)
     const emit = vi.fn()
 
@@ -270,7 +307,7 @@ describe('OpenAI-compatible streaming', () => {
     await client.streamChat({ ...ids, taskRunId: 'run-1', messages: [] }, emit)
 
     expect(emit).toHaveBeenCalledWith({ taskRunId: 'run-1', type: 'error', content: '模型网络请求失败，请稍后重试' })
-    expect(canAcceptChunk).toHaveBeenCalledTimes(2)
+    expect(canAcceptChunk).toHaveBeenCalledTimes(3)
   })
 
   it.each([
@@ -293,7 +330,7 @@ describe('OpenAI-compatible streaming', () => {
 
     expect(JSON.stringify(events)).not.toContain('secret')
     expect(events).toEqual([{ taskRunId: 'run-1', type: 'error', content: message }])
-    expect(canAcceptChunk).toHaveBeenCalledTimes(2)
+    expect(canAcceptChunk).toHaveBeenCalledTimes(3)
   })
 
   it.each(['\r', '\n', '\r\n'])('rejects a legacy stored API key containing %j before requesting', async (newline) => {

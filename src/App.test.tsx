@@ -25,7 +25,7 @@ beforeEach(() => {
     workspace: { list: vi.fn().mockResolvedValue({ entries: [], summary: '', truncated: false, limits: {} }) },
     executables: { list: vi.fn().mockResolvedValue([]), save: vi.fn() },
     projects: { list: vi.fn().mockResolvedValue([project]), pickWorkspace: vi.fn().mockResolvedValue({ id: 'workspace-1', label: '已选择本地目录' }), create: vi.fn().mockResolvedValue(project) },
-    channels: { list: vi.fn().mockResolvedValue([channel]), create: vi.fn().mockResolvedValue({ ...channel, id: 'c2', name: '选题群' }) },
+    channels: { list: vi.fn().mockResolvedValue([channel]), create: vi.fn().mockResolvedValue({ ...channel, id: 'c2', name: '选题群' }), setScheduler: vi.fn() },
     models: { list: vi.fn().mockResolvedValue([model]), save: vi.fn().mockResolvedValue({ ...model, id: 'm2' }) },
     messages: { list: vi.fn().mockResolvedValue([]) },
     consent: { has: vi.fn().mockResolvedValue(true), grant: vi.fn().mockResolvedValue(undefined) },

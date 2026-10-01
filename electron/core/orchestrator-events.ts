@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { TaskRunEvent, TaskRunEventType } from '../../shared/types'
 
 export type EventMetadata = {
-  reason?: 'restart_recovery' | 'migration_duplicate_running' | 'manual_selection' | 'cancelled' | 'completed'
+  reason?: 'restart_recovery' | 'migration_duplicate_running' | 'manual_selection' | 'automatic_selection' | 'automatic_complete' | 'cancelled' | 'completed'
   ordinal?: number
 }
 
@@ -10,7 +10,7 @@ export type EventMetadata = {
 export function makeTaskRunEvent(input: Omit<TaskRunEvent, 'id' | 'metadataJson' | 'createdAt'> & { metadata?: EventMetadata }): TaskRunEvent {
   const metadata = input.metadata ?? {}
   if (Object.keys(metadata).some((key) => !['reason', 'ordinal'].includes(key))) throw new Error('Invalid event metadata')
-  if (metadata.reason && !['restart_recovery', 'migration_duplicate_running', 'manual_selection', 'cancelled', 'completed'].includes(metadata.reason)) throw new Error('Invalid event reason')
+  if (metadata.reason && !['restart_recovery', 'migration_duplicate_running', 'manual_selection', 'automatic_selection', 'automatic_complete', 'cancelled', 'completed'].includes(metadata.reason)) throw new Error('Invalid event reason')
   if (metadata.ordinal !== undefined && (!Number.isSafeInteger(metadata.ordinal) || metadata.ordinal < 1)) throw new Error('Invalid event ordinal')
   const eventType: TaskRunEventType = input.eventType
   return {

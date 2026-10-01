@@ -366,6 +366,7 @@ export interface AgentTeamApi {
   channels: {
     list(projectId: string): Promise<Channel[]>
     create(input: CreateChannelInput): Promise<Channel>
+    setScheduler(channelId: string, modelConfigId: string | null): Promise<Channel>
   }
   models: {
     list(): Promise<ModelConfigSummary[]>

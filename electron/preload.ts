@@ -43,6 +43,7 @@ const api: AgentTeamApi = {
   channels: {
     list: (projectId: string) => ipcRenderer.invoke(IpcChannel.ChannelList, projectId),
     create: (input: CreateChannelInput) => ipcRenderer.invoke(IpcChannel.ChannelCreate, input),
+    setScheduler: (channelId, modelConfigId) => ipcRenderer.invoke(IpcChannel.ChannelSetScheduler, channelId, modelConfigId),
   },
   models: {
     list: () => ipcRenderer.invoke(IpcChannel.ModelList),

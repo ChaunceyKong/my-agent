@@ -14,6 +14,7 @@ import { createModelClient } from '../../electron/core/model-client'
 import { registerHandlers } from '../../electron/ipc/register-handlers'
 import { IpcChannel } from '../../shared/ipc-channels'
 import type { Agent, StreamEvent } from '../../shared/types'
+import { parseAgentMentions } from '../../electron/core/mention-parser'
 
 let directory: string
 let database: DatabaseClient
@@ -61,9 +62,9 @@ it('persists two enabled members and runs structured CEO mentions in textual ord
   expect((await repositories.listMessages(channelId)).map((message) => [message.agentId, message.content])).toEqual([
     [null, '@Alpha @Beta please collaborate'], [first.id, 'A finished'], [second.id, 'B finished'],
   ])
-  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'completed', turnCount: 2 })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused', turnCount: 2 })
   expect(modelClient.streamChat).toHaveBeenCalledTimes(2)
-  expect(events.at(-1)).toMatchObject({ type: 'complete' })
+  expect(events.at(-1)).toMatchObject({ type: 'error' })
 })
 
 it('rejects forged, disabled and overlapping mention tokens without creating a Run', async () => {
@@ -230,4 +231,100 @@ it('routes 0-to-1 membership changes during delayed send consent through the Age
   const { taskRunId } = await sending
   expect(orchestrator.run).toHaveBeenCalledWith(expect.objectContaining({ taskRunId }))
   expect(modelClient.streamChat).not.toHaveBeenCalled()
+})
+
+it('queues only exact, unique enabled names from a completed Agent message', async () => {
+  const duplicate = await repositories.createAgent({ name: 'Beta', avatar: null, title: '', systemPrompt: '', modelConfigId, defaultToolPermissions: {} })
+  const members = await repositories.listChannelAgents(channelId)
+  expect(parseAgentMentions('@Beta @Alpha @Unknown', first.id, members, await repositories.listAgents())).toEqual([second.id])
+  await repositories.saveChannelAgent({ channelId, agentId: duplicate.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  expect(parseAgentMentions('@Beta @Alpha @Unknown', first.id, await repositories.listChannelAgents(channelId), await repositories.listAgents())).toEqual([])
+  const { orchestrator } = setup(async (_system, emit) => {
+    await emit({ taskRunId: 'ignored', type: 'delta', content: 'Please ask @Beta and @Unknown; not @Alpha or @BetaX.' })
+    await emit({ taskRunId: 'ignored', type: 'complete' })
+  })
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, '@Alpha answer', [tokens()[0]])
+  await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
+  expect((await repositories.listTaskRunEvents(run.id)).filter((event) => event.eventType === 'mention_queued')).toHaveLength(1)
+  expect((await repositories.listAgentTurns(run.id)).map((turn) => turn.agentId)).toEqual([first.id])
+})
+
+it('serially follows a completed Agent handoff without parsing partial messages', async () => {
+  const { orchestrator, modelClient } = setup(async (system, emit) => {
+    await emit({ taskRunId: 'ignored', type: 'delta', content: system.includes('Prompt A') ? 'handoff @Beta' : 'done' })
+    await emit({ taskRunId: 'ignored', type: 'complete' })
+  })
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, '@Alpha begin', [tokens()[0]])
+  await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
+  expect((await repositories.listAgentTurns(run.id)).map((turn) => turn.agentId)).toEqual([first.id, second.id])
+  expect(modelClient.streamChat).toHaveBeenCalledTimes(2)
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused' })
+})
+
+it('uses a configured scheduler and validates each decision before starting a Turn', async () => {
+  await repositories.setChannelScheduler(channelId, modelConfigId)
+  const { orchestrator, modelClient } = setup(async (_system, emit) => {
+    await emit({ taskRunId: 'ignored', type: 'delta', content: 'finished' })
+    await emit({ taskRunId: 'ignored', type: 'complete' })
+  })
+  modelClient.selectSpeaker = vi.fn().mockResolvedValueOnce(JSON.stringify({ nextSpeaker: first.id, reason: 'Assign Alpha' }))
+    .mockResolvedValueOnce(JSON.stringify({ nextSpeaker: null, reason: 'Done' }))
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, 'Please collaborate')
+  await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
+  expect((await repositories.listAgentTurns(run.id)).map((turn) => turn.agentId)).toEqual([first.id])
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'completed' })
+  expect(modelClient.selectSpeaker).toHaveBeenCalledTimes(2)
+})
+
+it.each(['not-json', JSON.stringify({ nextSpeaker: 'unknown', reason: 'bad' }), JSON.stringify({ nextSpeaker: null, reason: '' })])('pauses invalid scheduler output: %s', async (decision) => {
+  await repositories.setChannelScheduler(channelId, modelConfigId)
+  const { orchestrator, modelClient } = setup(async () => {})
+  modelClient.selectSpeaker = vi.fn().mockResolvedValue(decision)
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, 'Choose')
+  await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused', turnCount: 0 })
+})
+
+it('fences a scheduler decision when membership changes during the model call', async () => {
+  await repositories.setChannelScheduler(channelId, modelConfigId)
+  const { orchestrator, modelClient } = setup(async () => {})
+  modelClient.selectSpeaker = vi.fn(async () => {
+    await repositories.saveChannelAgent({ channelId, agentId: first.id, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
+    await repositories.saveChannelAgent({ channelId, agentId: first.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+    return JSON.stringify({ nextSpeaker: first.id, reason: 'stale' })
+  })
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, 'Choose')
+  await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused', turnCount: 0 })
+  expect(await repositories.listAgentTurns(run.id)).toEqual([])
+})
+
+it('does not let a null scheduler decision discard pending CEO mentions', async () => {
+  await repositories.setChannelScheduler(channelId, modelConfigId)
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, '@Alpha begin', [tokens()[0]])
+  const members = await repositories.listChannelAgents(channelId)
+  await expect(repositories.commitSpeakerDecision({ taskRunId: run.id, generation: run.generation, modelConfigId,
+    memberRevisions: Object.fromEntries(members.map((member) => [member.agentId, member.revision])), nextSpeaker: null, reason: 'Done' })).rejects.toThrow('待处理')
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'running', turnCount: 0 })
+})
+
+it('bounds repeated Agent handoff suggestions at the Channel Turn limit', async () => {
+  const { orchestrator, modelClient } = setup(async (system, emit) => {
+    await emit({ taskRunId: 'ignored', type: 'delta', content: system.includes('Prompt A') ? '@Beta' : '@Alpha' })
+    await emit({ taskRunId: 'ignored', type: 'complete' })
+  })
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, '@Alpha begin', [tokens()[0]])
+  await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused', turnCount: 30 })
+  expect(modelClient.streamChat).toHaveBeenCalledTimes(30)
+})
+
+it('exposes only a validated named IPC setting for the Channel scheduler', async () => {
+  const handlers = new Map<string, (event: unknown, ...args: any[]) => unknown>()
+  registerHandlers({ ipcMain: { handle: (name, handler) => handlers.set(name, handler) }, dialog: { showOpenDialog: vi.fn() }, repositories })
+  const setScheduler = handlers.get(IpcChannel.ChannelSetScheduler)!
+  await expect(setScheduler(undefined, channelId, 'missing-model')).rejects.toThrow('不存在')
+  expect(() => setScheduler(undefined, channelId, { id: modelConfigId })).toThrow('无效')
+  await expect(setScheduler(undefined, channelId, modelConfigId)).resolves.toMatchObject({ schedulerModelConfigId: modelConfigId })
+  expect(await repositories.getChannel(channelId)).toMatchObject({ schedulerModelConfigId: modelConfigId })
 })

@@ -31,6 +31,7 @@ import type {
 } from '../../shared/types'
 import { hashToolRequest, toolAuditEvent } from '../core/audit-service'
 import { makeTaskRunEvent, type EventMetadata } from '../core/orchestrator-events'
+import { parseAgentMentions } from '../core/mention-parser'
 import type { AppDatabase, DatabaseClient } from './client'
 import { agentTurns, agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, mentionQueue, messages, modelConfigs, overwritePublications, projects, registeredExecutables, taskRunEvents, taskRuns, toolExecutions } from './schema'
 
@@ -59,6 +60,8 @@ function appendEvent(tx: Transaction, run: TaskRun, eventType: TaskRunEventType,
 
 function selectedTurn(tx: Transaction, run: TaskRun, agentId: string, triggerEventSeq: number): AgentTurn {
   if (run.status !== 'running' || run.currentTurnId) throw new Error('任务轮次不可开始')
+  const channel = tx.select().from(channels).where(eq(channels.id, run.channelId)).get()
+  if (!channel || run.turnCount >= channel.maxTurns) throw new Error('Agent 轮次已达到群聊上限')
   const trigger = tx.select().from(taskRunEvents).where(and(eq(taskRunEvents.taskRunId, run.id), eq(taskRunEvents.seq, triggerEventSeq))).get()
   const member = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.agentId, agentId))).get()
   if (!trigger || trigger.generation !== run.generation || trigger.eventType !== 'speaker_decided'
@@ -212,6 +215,7 @@ export interface Repositories {
   createProjectWithInitialChannel(input: CreateProjectInput): Promise<{ project: Project; channel: Channel }>
   listChannels(projectId: string): Promise<Channel[]>
   getChannel(id: string): Promise<Channel | undefined>
+  setChannelScheduler(id: string, modelConfigId: string | null): Promise<Channel>
   createChannel(input: CreateChannelInput): Promise<Channel>
   createStartedTaskRun(input: StartTaskRunInput): Promise<TaskRun>
   getTaskRun(id: string): Promise<TaskRun | undefined>
@@ -222,6 +226,7 @@ export interface Repositories {
   listTaskRunEvents(id: string): Promise<TaskRunEvent[]>
   startNextMentionTurn(taskRunId: string, generation: number): Promise<AgentTurn | undefined>
   startSingleMemberTurn(taskRunId: string, generation: number): Promise<AgentTurn | undefined>
+  commitSpeakerDecision(input: { taskRunId: string; generation: number; modelConfigId: string; memberRevisions: Record<string, string>; nextSpeaker: string | null; reason: string }): Promise<AgentTurn | null>
   markAgentTurnWaiting(id: string, toolExecutionId: string): Promise<AgentTurn>
   pauseTaskRun(id: string, reason: string): Promise<TaskRun>
   startAgentTurn(taskRunId: string, generation: number, agentId: string, triggerEventSeq: number): Promise<AgentTurn>
@@ -734,6 +739,14 @@ export function createRepositories(client: DatabaseClient): Repositories {
       return client.db.select().from(channels).where(eq(channels.id, id)).get()
     },
 
+    async setChannelScheduler(id, modelConfigId) {
+      return client.db.transaction((tx) => {
+        const channel = tx.select().from(channels).where(eq(channels.id, id)).get()
+        if (!channel || (modelConfigId !== null && !tx.select().from(modelConfigs).where(eq(modelConfigs.id, modelConfigId)).get())) throw new Error('群聊或调度模型不存在')
+        return tx.update(channels).set({ schedulerModelConfigId: modelConfigId, updatedAt: new Date().toISOString() }).where(eq(channels.id, id)).returning().get()!
+      })
+    },
+
     async listTaskRuns(channelId: string): Promise<TaskRun[]> {
       return client.db.select().from(taskRuns).where(eq(taskRuns.channelId, channelId))
         .orderBy(asc(taskRuns.createdAt), asc(taskRuns.id)).all()
@@ -927,6 +940,31 @@ export function createRepositories(client: DatabaseClient): Repositories {
         return selectedTurn(tx, run, enabled[0].agentId, decision.seq)
       })
     },
+    async commitSpeakerDecision(input) {
+      return client.db.transaction((tx) => {
+        const run = tx.select().from(taskRuns).where(eq(taskRuns.id, input.taskRunId)).get()
+        const channel = run && tx.select().from(channels).where(eq(channels.id, run.channelId)).get()
+        if (!run || run.status !== 'running' || run.generation !== input.generation || run.currentTurnId || channel?.speakerMode !== 'automatic'
+          || channel.schedulerModelConfigId !== input.modelConfigId) throw new Error('调度决策已失效')
+        const members = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.isEnabled, true))).all()
+        if (members.length !== Object.keys(input.memberRevisions).length || members.some((member) => input.memberRevisions[member.agentId] !== member.revision)) throw new Error('群聊成员已变化')
+        if (tx.select().from(mentionQueue).where(and(eq(mentionQueue.taskRunId, run.id), eq(mentionQueue.status, 'pending'))).get()
+          || tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.status, ['executing', 'waiting_approval']))).get()
+          || tx.select().from(approvalRequests).innerJoin(toolExecutions, eq(approvalRequests.toolExecutionId, toolExecutions.id))
+            .where(and(eq(toolExecutions.taskRunId, run.id), inArray(approvalRequests.status, ['pending', 'approved']))).get()) throw new Error('任务仍有待处理事项')
+        if (input.nextSpeaker === null) {
+          if (tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.toolName, ['write_file', 'replace_file_content', 'run_process']), eq(toolExecutions.status, 'completed'))).get()) throw new Error('任务有待验收产物')
+          // The model's free-form reason is untrusted; persist only a safe decision code.
+          appendEvent(tx, run, 'speaker_decided', { metadata: { reason: 'automatic_complete' } })
+          tx.update(taskRuns).set({ status: 'completed', finishedAt: new Date().toISOString() }).where(eq(taskRuns.id, run.id)).run()
+          appendEvent(tx, run, 'task_completed')
+          return null
+        }
+        if (!members.some((member) => member.agentId === input.nextSpeaker)) throw new Error('调度 Agent 已失效')
+        const decision = appendEvent(tx, run, 'speaker_decided', { agentId: input.nextSpeaker, metadata: { reason: 'automatic_selection' } })
+        return selectedTurn(tx, run, input.nextSpeaker, decision.seq)
+      })
+    },
     async markAgentTurnWaiting(id, toolExecutionId) {
       return client.db.transaction((tx) => {
         const turn = tx.select().from(agentTurns).where(eq(agentTurns.id, id)).get()
@@ -975,6 +1013,15 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const finished = tx.update(agentTurns).set({ status: 'completed', messageId: message.id, finishedAt: timestamp }).where(eq(agentTurns.id, id)).returning().get()!
         tx.update(taskRuns).set({ currentTurnId: null }).where(eq(taskRuns.id, run.id)).run()
         appendEvent(tx, run, 'turn_completed', { agentId: turn.agentId, messageId: message.id, metadata: { ordinal: turn.ordinal } })
+        const members = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.isEnabled, true))).all()
+        const allAgents = tx.select().from(agents).all()
+        const suggestions = parseAgentMentions(message.content, turn.agentId, members, allAgents)
+        const lastPosition = tx.select({ position: mentionQueue.position }).from(mentionQueue).where(eq(mentionQueue.taskRunId, run.id))
+          .orderBy(sql`${mentionQueue.position} DESC`).limit(1).get()?.position ?? 0
+        suggestions.forEach((agentId, index) => {
+          tx.insert(mentionQueue).values({ taskRunId: run.id, position: lastPosition + index + 1, agentId, sourceMessageId: message.id, source: 'agent', status: 'pending' }).run()
+          appendEvent(tx, run, 'mention_queued', { agentId, messageId: message.id })
+        })
         return { turn: finished, message }
       })
     },

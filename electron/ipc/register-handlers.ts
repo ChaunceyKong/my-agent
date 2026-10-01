@@ -91,6 +91,10 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
   })
   ipcMain.handle(IpcChannel.ChannelList, (_event, projectId: string) => repositories.listChannels(projectId))
   ipcMain.handle(IpcChannel.ChannelCreate, (_event, input: CreateChannelInput) => repositories.createChannel(input))
+  ipcMain.handle(IpcChannel.ChannelSetScheduler, (_event, channelId: unknown, modelConfigId: unknown) => {
+    if (modelConfigId !== null && (typeof modelConfigId !== 'string' || !modelConfigId.trim())) throw new Error('调度模型配置无效')
+    return repositories.setChannelScheduler(validId(channelId), modelConfigId)
+  })
   ipcMain.handle(IpcChannel.ModelList, () => {
     if (!modelClient) throw new Error('Model client is unavailable')
     return modelClient.listModelConfigs()
@@ -121,7 +125,7 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
       if (!(await repositories.listChannelAgents(channel.id)).some((member) => member.isEnabled)) await modelClient.requireCloudConsent(channel.projectId, input.modelConfigId)
       const enabled = (await repositories.listChannelAgents(channel.id)).filter((member) => member.isEnabled)
       if (!enabled.length && input.mentions?.length) throw new Error('群聊没有可提及的 Agent')
-      if (enabled.length > 1 && !input.mentions?.length) throw new Error('请先指派下一位 Agent')
+      if (enabled.length > 1 && !input.mentions?.length && (channel.speakerMode !== 'automatic' || !channel.schedulerModelConfigId)) throw new Error('请先指派下一位 Agent')
       if (enabled.length && !orchestrator) throw new Error('Agent 协作服务不可用')
       const run = await taskRuns.startTaskRun(channel.id, input.modelConfigId, input.content, input.mentions)
       const sender = (event as { sender: StreamSender }).sender

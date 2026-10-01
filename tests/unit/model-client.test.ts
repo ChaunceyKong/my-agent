@@ -57,6 +57,23 @@ async function createProjectAndModel(): Promise<{ projectId: string; modelConfig
   return { projectId: project.id, modelConfigId: model.id }
 }
 
+describe('scheduler request', () => {
+  it('does not send any scheduling context without exact Project/ModelConfig consent', async () => {
+    const { projectId, modelConfigId } = await createProjectAndModel()
+    const other = (await repositories.saveModelConfig({ providerPreset: 'openai', baseUrl: 'https://example.test', modelName: 'other', encryptedApiKey: 'secret' })).id
+    await expect(client.selectSpeaker({ projectId, modelConfigId: other, taskRunId: 'run', prompt: 'private context' }, async () => true)).rejects.toThrow('consent')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('rechecks the decision fence before sending and bounds Provider output', async () => {
+    const { projectId, modelConfigId } = await createProjectAndModel()
+    await expect(client.selectSpeaker({ projectId, modelConfigId, taskRunId: 'run', prompt: 'private context' }, async () => false)).rejects.toThrow('失效')
+    expect(fetchImpl).not.toHaveBeenCalled()
+    fetchImpl.mockResolvedValue(new Response('x'.repeat(17_000), { headers: { 'content-type': 'application/json' } }))
+    await expect(client.selectSpeaker({ projectId, modelConfigId, taskRunId: 'run', prompt: 'private context' }, async () => true)).rejects.toThrow('过长')
+  })
+})
+
 function streamResponse(parts: string[]): Response {
   const encoder = new TextEncoder()
   return new Response(new ReadableStream({

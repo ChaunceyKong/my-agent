@@ -4,6 +4,7 @@ export enum IpcChannel {
   ProjectPickWorkspace = 'project:pick-workspace',
   ChannelCreate = 'channel:create',
   ChannelList = 'channel:list',
+  ChannelSetScheduler = 'channel:set-scheduler',
   MessageSend = 'message:send',
   TaskRunCancel = 'task-run:cancel',
   ModelSave = 'model:save',

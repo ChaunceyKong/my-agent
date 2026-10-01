@@ -32,6 +32,7 @@ beforeEach(async () => {
   const created = await repo.createProjectWithInitialChannel({ name: 'p', workspacePath: directory })
   channelId = created.channel.id; projectId = created.project.id
   modelConfigId = (await repo.saveModelConfig({ providerPreset: 'openai', baseUrl: 'https://example.test', modelName: 'test', encryptedApiKey: 'key' })).id
+  await repo.recordCloudConsent(projectId, modelConfigId)
   agent = await repo.createAgent({ name: 'Alpha', avatar: null, title: '', systemPrompt: 'A', modelConfigId, defaultToolPermissions: { run_process: true, write_file: true } })
   await repo.saveChannelAgent({ channelId, agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
 })

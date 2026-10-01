@@ -306,7 +306,7 @@ export interface TaskRun {
   createdAt: string
 }
 
-export type TaskRunEventType = 'ceo_message' | 'mention_queued' | 'mention_consumed' | 'speaker_decided' | 'turn_started' | 'turn_completed' | 'turn_failed' | 'turn_cancelled' | 'tool_waiting' | 'tool_decided' | 'summary_created' | 'generation_advanced' | 'task_paused' | 'task_resumed' | 'task_cancelling' | 'task_cancelled' | 'task_completed' | 'task_failed'
+export type TaskRunEventType = 'ceo_message' | 'mention_queued' | 'mention_consumed' | 'speaker_decided' | 'turn_started' | 'turn_completed' | 'turn_failed' | 'turn_cancelled' | 'tool_waiting' | 'tool_decided' | 'summary_created' | 'generation_advanced' | 'task_paused' | 'task_resumed' | 'task_cancelling' | 'task_cancelled' | 'task_completed' | 'task_failed' | 'model_attempt' | 'model_switched'
 export interface TaskRunEvent {
   id: string; taskRunId: string; seq: number; generation: number; eventType: TaskRunEventType
   agentId: string | null; messageId: string | null; toolExecutionId: string | null
@@ -343,6 +343,7 @@ export interface StreamEvent {
   type: 'delta' | 'tool_call' | 'complete' | 'error'
   content?: string
   toolCall?: NativeToolCall
+  interventionRequired?: boolean
 }
 
 /** Durable UI snapshot. Event metadata, prompts and tool inputs never cross this boundary. */
@@ -372,6 +373,10 @@ export interface StreamChatInput {
   taskRunId: string
   messages: ChatMessage[]
   tools?: NativeToolDefinition[]
+  /** Main-owned continuation state, never accepted from Renderer. */
+  pinnedModelConfigId?: string
+  disableRetry?: boolean
+  hasToolObservations?: boolean
 }
 
 export interface AgentTeamApi {

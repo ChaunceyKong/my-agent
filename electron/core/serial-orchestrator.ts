@@ -1,10 +1,11 @@
 import type { StreamEvent } from '../../shared/types'
 import type { Repositories } from '../database/repositories'
-import type { ModelClient } from './model-client'
+import { ModelInterventionError, type ModelClient } from './model-client'
 import type { createSingleAgentRunner } from './single-agent-runner'
 import type { TaskRunService } from './task-run-service'
 import { parseSpeakerDecision, speakerSelectionPrompt } from './speaker-selector'
 import { createSessionSummaryService } from './session-summary-service'
+import { captureModelRoute } from './model-route'
 
 export function loopPauseReason(speakers: string[]): string | undefined {
   const last = speakers.slice(-3)
@@ -20,7 +21,7 @@ export function createSerialOrchestrator(deps: {
   taskRuns: TaskRunService
   runner: ReturnType<typeof createSingleAgentRunner>
 }) {
-  const summarize = createSessionSummaryService(deps.repositories, deps.modelClient)
+  const summarize = createSessionSummaryService(deps.repositories, deps.modelClient, deps.taskRuns)
   return {
     async run(input: { taskRunId: string; projectId: string; channelId: string; onEvent(event: StreamEvent): Promise<void> }): Promise<void> {
       const send = input.onEvent
@@ -50,6 +51,11 @@ export function createSerialOrchestrator(deps: {
             if (members.length > 1 && channel.speakerMode === 'automatic' && scheduler) {
               const agents = await deps.repositories.listAgents()
               const memberRevisions = Object.fromEntries(members.map((member) => [member.agentId, member.revision]))
+              const route = await captureModelRoute(deps.repositories, scheduler)
+              if (!route.configured) throw new Error('调度模型配置不存在')
+              const configuredModelSnapshot = JSON.stringify(route.configured)
+              let actualModelConfigId = scheduler
+              let modelSnapshot = configuredModelSnapshot
               const current = async () => {
                 const latest = await deps.repositories.getTaskRun(run.id)
                 const currentChannel = await deps.repositories.getChannel(run.channelId)
@@ -57,29 +63,31 @@ export function createSerialOrchestrator(deps: {
                 return latest?.status === 'running' && latest.generation === run.generation && !latest.currentTurnId
                   && await deps.repositories.getEffectiveScheduler(run.channelId) === scheduler && currentChannel?.speakerMode === 'automatic'
                   && currentMembers.length === members.length && currentMembers.every((member) => memberRevisions[member.agentId] === member.revision)
+                  && await route.current() && JSON.stringify(await deps.repositories.getModelConfig(actualModelConfigId)) === modelSnapshot
               }
               try {
-                const configuredModelSnapshot = JSON.stringify(await deps.repositories.getModelConfig(scheduler))
-                let actualModelConfigId = scheduler
-                let modelSnapshot = configuredModelSnapshot
                 const messages = (await deps.repositories.listMessages(run.channelId)).filter((message) => message.taskRunId === run.id)
                 const goal = messages.filter((message) => message.origin === 'ceo' && ['sent', 'completed'].includes(message.status)).at(-1)
                 if (!goal) throw new Error('任务目标不存在')
                 const latestAgent = messages.filter((message) => message.origin === 'agent' && message.status === 'completed').at(-1)
                 const raw = await deps.modelClient.selectSpeaker({ projectId: input.projectId, modelConfigId: scheduler,
                   taskRunId: run.id, prompt: speakerSelectionPrompt(members, agents, goal.content, latestAgent?.content ?? '') }, current, async (selection) => {
+                  if (!await current() || !route.includes(selection)) throw new Error('调度模型绑定已失效')
                   actualModelConfigId = selection.actualModelConfigId
                   modelSnapshot = selection.modelSnapshot
                 })
+                if (!await current() || !await deps.repositories.hasCloudConsent(input.projectId, actualModelConfigId)) throw new Error('调度模型绑定已失效')
                 const decision = parseSpeakerDecision(raw, members, agents)
                 turn = await deps.repositories.commitSpeakerDecision({ taskRunId: run.id, generation: run.generation,
-                  configuredModelConfigId: scheduler, configuredModelSnapshot, modelConfigId: actualModelConfigId, modelSnapshot, memberRevisions, ...decision }) ?? undefined
+                  configuredModelConfigId: scheduler, configuredModelSnapshot, modelConfigId: actualModelConfigId, modelSnapshot,
+                  modelRouteSnapshot: route.snapshot, memberRevisions, ...decision }) ?? undefined
                 if (!turn) { await send({ taskRunId: run.id, type: 'complete' }); return }
-              } catch {
+              } catch (error) {
                 const latest = await deps.repositories.getTaskRun(run.id)
                 if (latest?.status !== 'running' || latest.generation !== run.generation || latest.currentTurnId) return
-                await deps.repositories.pauseTaskRun(run.id, '自动调度不可用，请 CEO 指派下一位 Agent')
-                await send({ taskRunId: run.id, type: 'error', content: '自动调度不可用，请 CEO 指派下一位 Agent。' })
+                const reason = error instanceof ModelInterventionError ? error.message : '自动调度不可用，请 CEO 指派下一位 Agent。'
+                await deps.taskRuns.pauseTaskRun(run.id, reason, run.generation)
+                await send({ taskRunId: run.id, type: 'error', content: reason })
                 return
               }
             } else if (members.length > 1) {
@@ -101,6 +109,7 @@ export function createSerialOrchestrator(deps: {
             await send({ taskRunId: run.id, type: 'error', content: 'Agent 模型未获得外发授权，等待 CEO 处理。' })
             return
           }
+          const modelRouteSnapshot = JSON.stringify(await deps.repositories.getModelFallbackChain(active.modelConfigId))
           let timer: ReturnType<typeof setTimeout> | undefined
           const timeout = new Promise<{ status: 'paused'; reason: string }>((resolve) => {
             timer = setTimeout(() => resolve({ status: 'paused', reason: 'Agent 调用超过 120 秒，等待 CEO 处理' }), 120_000)
@@ -136,7 +145,8 @@ export function createSerialOrchestrator(deps: {
             await send({ taskRunId: run.id, type: 'error', content: outcome.reason })
             return
           }
-          await deps.repositories.completeAgentTurn(turn.id, outcome.content)
+          const hasToolObservations = (await deps.repositories.listToolExecutions(run.id)).some((execution) => execution.resultSummary !== null)
+          await deps.repositories.completeAgentTurn(turn.id, outcome.content, { modelRouteSnapshot, hasToolObservations })
           await summarize(run.id)
         }
       } catch {

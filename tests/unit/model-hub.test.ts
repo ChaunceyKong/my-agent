@@ -83,7 +83,7 @@ it('revalidates local metadata every request, never sends key and fences after a
   expect(fetchImpl).toHaveBeenCalledTimes(3)
   fetchImpl.mockResolvedValueOnce(response({ capabilities: ['completion'] }))
   await expect(client.selectSpeaker({ projectId: 'local', modelConfigId: local.id, taskRunId: 'r', prompt: 'private' }, async () => false)).rejects.toThrow('失效')
-  expect(fetchImpl).toHaveBeenCalledTimes(4)
+  expect(fetchImpl).toHaveBeenCalledTimes(3)
 })
 
 it('sanitizes connection diagnostics without project context or provider secrets', async () => {

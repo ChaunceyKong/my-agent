@@ -18,7 +18,7 @@ export function makeTaskRunEvent(input: Omit<TaskRunEvent, 'id' | 'metadataJson'
   if (metadata.reason && !['restart_recovery', 'migration_duplicate_running', 'manual_selection', 'automatic_selection', 'automatic_complete', 'cancelled', 'completed'].includes(metadata.reason)) throw new Error('Invalid event reason')
   if (metadata.ordinal !== undefined && (!Number.isSafeInteger(metadata.ordinal) || metadata.ordinal < 1)) throw new Error('Invalid event ordinal')
   const eventType: TaskRunEventType = input.eventType
-  if (input.displayReason !== undefined && (eventType !== 'speaker_decided' || input.displayReason.length < 1
+  if (input.displayReason !== undefined && (!['speaker_decided', 'model_attempt', 'model_switched'].includes(eventType) || input.displayReason.length < 1
     || input.displayReason.length > 200 || input.displayReason.trim() !== input.displayReason
     || /[\p{Cc}\p{Cf}]/u.test(input.displayReason))) throw new Error('Invalid display reason')
   return {

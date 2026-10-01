@@ -1,4 +1,8 @@
 /** Local Ollama only: remote proxy models cannot use the local consent exemption. */
+export class OllamaTransportError extends Error {
+  constructor() { super('Ollama 网络响应中断') }
+}
+
 export function ollamaRoot(baseUrl: string): string {
   const url = new URL(baseUrl)
   if (url.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
@@ -21,7 +25,7 @@ async function json(fetchImpl: typeof fetch, url: string, signal: AbortSignal, b
   signal.addEventListener('abort', abort, { once: true })
   try {
     while (true) {
-      signal.throwIfAborted(); const { done, value } = await reader.read(); if (done) break
+      signal.throwIfAborted(); const { done, value } = await reader.read().catch(() => { signal.throwIfAborted(); throw new OllamaTransportError() }); if (done) break
       size += value.byteLength; if (size > 262144) throw new Error('Ollama 响应过长'); chunks.push(value)
     }
     signal.throwIfAborted()

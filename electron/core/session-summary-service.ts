@@ -1,8 +1,10 @@
 import type { Repositories } from '../database/repositories'
-import type { ModelClient } from './model-client'
+import { ModelClientError, ModelInterventionError, type ModelClient } from './model-client'
+import { captureModelRoute } from './model-route'
+import type { TaskRunService } from './task-run-service'
 
 /** Summaries cover a completed prefix only; they are never a source of state or routing. */
-export function createSessionSummaryService(repositories: Repositories, modelClient: ModelClient) {
+export function createSessionSummaryService(repositories: Repositories, modelClient: ModelClient, taskRuns: Pick<TaskRunService, 'pauseTaskRun'>) {
   return async (taskRunId: string): Promise<void> => {
     const run = await repositories.getTaskRun(taskRunId)
     if (!run || run.status !== 'running' || run.currentTurnId) return
@@ -15,7 +17,8 @@ export function createSessionSummaryService(repositories: Repositories, modelCli
     if (!channel) return
     const scheduler = await repositories.getEffectiveScheduler(channel.id)
     if (!scheduler) return
-    const config = await repositories.getModelConfig(scheduler)
+    const route = await captureModelRoute(repositories, scheduler)
+    const config = route.configured
     if (!config) return
     const snapshotMembers = async () => {
       const members = (await repositories.listChannelAgents(run.channelId)).filter((member) => member.isEnabled).sort((a, b) => a.agentId.localeCompare(b.agentId))
@@ -29,7 +32,7 @@ export function createSessionSummaryService(repositories: Repositories, modelCli
       const latest = await repositories.getTaskRun(run.id)
       const currentChannel = await repositories.getChannel(run.channelId)
       return latest?.status === 'running' && latest.generation === run.generation && !latest.currentTurnId
-        && !!currentChannel && await repositories.getEffectiveScheduler(channel.id) === config.id && JSON.stringify(await repositories.getModelConfig(config.id)) === modelSnapshot
+        && !!currentChannel && await repositories.getEffectiveScheduler(channel.id) === config.id && await route.current()
         && await snapshotMembers() === memberSnapshot && await repositories.hasCloudConsent(channel.projectId, config.id)
         && JSON.stringify(await repositories.getModelConfig(actualModelConfigId)) === actualModelSnapshot
         && await repositories.hasCloudConsent(channel.projectId, actualModelConfigId)
@@ -40,13 +43,19 @@ export function createSessionSummaryService(repositories: Repositories, modelCli
       const prompt = JSON.stringify({ taskRunId: run.id, coveredThroughSeq: cutoff, previousSummary: previous?.content ?? null,
         conversation: history.map((message) => ({ taskRunId: message.taskRunId, seq: message.taskRunSeq, author: message.authorName, text: message.content })) })
       const content = await modelClient.summarizeSession({ projectId: channel.projectId, modelConfigId: config.id, taskRunId: run.id, prompt }, current, async (selection) => {
+        if (!await current() || !route.includes(selection)) throw new Error('摘要模型绑定已失效')
         actualModelConfigId = selection.actualModelConfigId
         actualModelSnapshot = selection.modelSnapshot
       })
       if (!await current()) return
       await repositories.saveSessionSummary({ taskRunId: run.id, generation: run.generation, coveredThroughSeq: cutoff, content,
-        configuredModelConfigId: config.id, configuredModelSnapshot: modelSnapshot, modelConfigId: actualModelConfigId, modelSnapshot: actualModelSnapshot, memberSnapshot })
-    } catch {
+        configuredModelConfigId: config.id, configuredModelSnapshot: modelSnapshot, modelConfigId: actualModelConfigId,
+        modelSnapshot: actualModelSnapshot, modelRouteSnapshot: route.snapshot, memberSnapshot })
+    } catch (error) {
+      if (error instanceof ModelInterventionError || error instanceof ModelClientError && (error.interventionRequired || error.category === 'deadline' || error.category === 'ollama')) {
+        const latest = await repositories.getTaskRun(run.id)
+        if (latest?.status === 'running' && latest.generation === run.generation && !latest.currentTurnId) await taskRuns.pauseTaskRun(run.id, error.message, run.generation)
+      }
       // A failed attempt preserves the old summary. A later completed Turn retries the same prefix.
     }
   }

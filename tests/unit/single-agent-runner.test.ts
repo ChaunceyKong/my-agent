@@ -7,6 +7,8 @@ function setup(responses: Array<string | ReturnType<typeof call>>, execution: { 
   let index = 0
   const repositories: any = { getTaskRun: vi.fn().mockResolvedValue({ id: 'r', status: 'running', generation: 0, currentTurnId: 't' }), listMessages: vi.fn().mockResolvedValue([]), listChannelAgents: vi.fn().mockResolvedValue([{ channelId: 'c', agentId: 'a', isEnabled: true, modelConfigOverrideId: null, revision: 'v1' }]), getAgent: vi.fn().mockResolvedValue(agent), hasToolResultConsent: vi.fn().mockResolvedValue(true) }
   repositories.getModelConfig = vi.fn().mockResolvedValue({ id: 'm', contextWindow: 32768, maxOutputTokens: 1024 })
+  repositories.getModelFallbackChain = vi.fn(async () => [await repositories.getModelConfig('m')])
+  repositories.hasCloudConsent = vi.fn().mockResolvedValue(true)
   repositories.getLatestSessionSummary = vi.fn().mockResolvedValue(undefined)
   repositories.listToolExecutions = vi.fn().mockResolvedValue([])
   repositories.listApprovalRequests = vi.fn().mockResolvedValue([])
@@ -105,7 +107,7 @@ it('pauses before another model hop when sanitized tool data exceeds the total c
 it('keeps per-hop tool-result consent even when a context budget is available', async () => {
   const { runner, modelClient, repositories } = setup([call(), 'must not send'])
   repositories.hasToolResultConsent.mockResolvedValue(false)
-  expect(await runner.run({ ...turn, onEvent: async () => {} })).toMatchObject({ status: 'failed', reason: expect.stringContaining('工具结果上传授权') })
+  expect(await runner.run({ ...turn, onEvent: async () => {} })).toMatchObject({ status: 'paused', reason: expect.stringContaining('工具结果上传授权') })
   expect(modelClient.streamChat).toHaveBeenCalledTimes(1)
 })
 
@@ -126,6 +128,6 @@ it('reconstructs approved tool effects and artifact paths as consent-bound untru
   expect(messages[0].content).not.toContain('@Other')
   expect(toolEngine.execute).not.toHaveBeenCalled()
   repositories.hasToolResultConsent.mockResolvedValue(false)
-  expect(await runner.run({ ...turn, onEvent: async () => {} })).toMatchObject({ status: 'failed', reason: expect.stringContaining('上传授权') })
+  expect(await runner.run({ ...turn, onEvent: async () => {} })).toMatchObject({ status: 'paused', reason: expect.stringContaining('上传授权') })
   expect(modelClient.streamChat).toHaveBeenCalledTimes(1)
 })

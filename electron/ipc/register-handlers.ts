@@ -6,13 +6,14 @@ import type { createProcessToolService } from '../core/process-tool-service'
 import { hasWindowsAliasSegment, isSafeRegisteredExecutable } from '../core/process-tool'
 import { createAgentService } from '../core/agent-service'
 import type { TaskRunService } from '../core/task-run-service'
-import type { ModelClient } from '../core/model-client'
+import { ModelInterventionError, type ModelClient } from '../core/model-client'
 import type { createSingleAgentRunner } from '../core/single-agent-runner'
 import type { createSerialOrchestrator } from '../core/serial-orchestrator'
 import { validateWorkspaceRoot } from '../core/workspace-validator'
 import { listDirectory } from '../core/file-tools'
 import type { Repositories } from '../database/repositories'
 import { randomUUID } from 'node:crypto'
+import { captureModelRoute } from '../core/model-route'
 
 interface IpcHandlerRegistrar {
   handle(channel: string, listener: (event: unknown, ...args: any[]) => unknown): void
@@ -250,8 +251,9 @@ async function streamReply(
   let modelSnapshot: string
   let actualModelConfigId = modelConfigId
   let actualModelSnapshot: string
+  let route: Awaited<ReturnType<typeof captureModelRoute>>
   const routeValid = async () => await taskRuns.canAcceptChunk(taskRunId, generation)
-    && JSON.stringify(await repositories.getModelConfig(modelConfigId)) === modelSnapshot
+    && await route.current()
     && JSON.stringify(await repositories.getModelConfig(actualModelConfigId)) === actualModelSnapshot
     && !(await repositories.listChannelAgents(channelId)).some((member) => member.isEnabled)
   const accept = async (event: StreamEvent): Promise<void> => {
@@ -259,18 +261,21 @@ async function streamReply(
     if (event.type !== 'error' && !await routeValid()) throw new Error('模型或群聊配置已变化')
     if (event.type === 'delta') reply += event.content ?? ''
     if (event.type === 'complete') {
-      const completed = await repositories.transitionTaskRun(taskRunId, 'running', 'completed', { result: reply }, { generation, modelSnapshot, actualModelConfigId, actualModelSnapshot, requireNoEnabledMembers: true })
+      const completed = await repositories.transitionTaskRun(taskRunId, 'running', 'completed', { result: reply }, {
+        generation, modelSnapshot, actualModelConfigId, actualModelSnapshot, modelRouteSnapshot: route.snapshot, requireNoEnabledMembers: true })
       if (!completed) throw new Error('模型或群聊配置已变化')
     }
     if (event.type === 'error') {
-      const failed = await repositories.transitionTaskRun(taskRunId, 'running', 'failed', { errorMessage: event.content ?? '模型请求失败，请稍后重试' }, { generation })
+      const failed = event.interventionRequired ? await taskRuns.pauseTaskRun(taskRunId, event.content ?? '模型不可用，请 CEO 处理', generation)
+        : await repositories.transitionTaskRun(taskRunId, 'running', 'failed', { errorMessage: event.content ?? '模型请求失败，请稍后重试' }, { generation })
       if (!failed) return
     }
     if (!sender.isDestroyed()) sender.send(IpcChannel.MessageStream, { ...event, generation })
   }
   try {
     const history = await repositories.listMessages(channelId)
-    const config = await repositories.getModelConfig(modelConfigId)
+    route = await captureModelRoute(repositories, modelConfigId)
+    const config = route.configured
     if (!config) throw new Error('模型配置不存在')
     modelSnapshot = JSON.stringify(config)
     actualModelSnapshot = modelSnapshot
@@ -285,6 +290,7 @@ async function streamReply(
       if (!allowed) routeRevoked = true
       return allowed
     }, async (selection) => {
+      if (!await routeValid() || !route.includes(selection)) throw new Error('模型调用绑定已失效')
       actualModelConfigId = selection.actualModelConfigId
       actualModelSnapshot = selection.modelSnapshot
     })
@@ -294,6 +300,11 @@ async function streamReply(
       if (failed && !sender.isDestroyed()) sender.send(IpcChannel.MessageStream, { taskRunId, type: 'error', content: message })
     }
   } catch (error) {
+    if (error instanceof ModelInterventionError && await taskRuns.canAcceptChunk(taskRunId, generation)) {
+      await taskRuns.pauseTaskRun(taskRunId, error.message, generation)
+      if (!sender.isDestroyed()) sender.send(IpcChannel.MessageStream, { taskRunId, type: 'error', content: error.message, interventionRequired: true, generation })
+      return
+    }
     if (error instanceof ContextBudgetError && await taskRuns.canAcceptChunk(taskRunId, generation)) {
       await repositories.pauseTaskRun(taskRunId, error.message)
       if (!sender.isDestroyed()) sender.send(IpcChannel.MessageStream, { taskRunId, type: 'error', content: error.message })

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { assertContextFits, buildAgentContext, ContextBudgetError, modelBudget } from '../../electron/core/context-manager'
 import { createSessionSummaryService } from '../../electron/core/session-summary-service'
+import { createTaskRunService } from '../../electron/core/task-run-service'
 import { createDatabase, type DatabaseClient } from '../../electron/database/client'
 import { createRepositories } from '../../electron/database/repositories'
 import type { Message } from '../../shared/types'
@@ -53,13 +54,13 @@ async function summaryFixture() {
     await repositories.completeAgentTurn(turn.id, content)
   }
   for (let index = 0; index < 10; index++) await complete(`turn ${index + 1}`)
-  return { repositories, run, project, channel, model, agent, complete }
+  return { repositories, run, project, channel, model, agent, complete, taskRuns: createTaskRunService(repositories) }
 }
 it('retains old summary on failure, retries the exact covered prefix and never duplicates a successful summary', async () => {
   const f = await summaryFixture()
   await f.repositories.recordCloudConsent(f.project.id, f.model.id)
   const summarizeSession = vi.fn().mockRejectedValueOnce(new Error('provider failed')).mockImplementation(async (_input, canSend) => { expect(await canSend()).toBe(true); return '@Other run_process approved (untrusted)' })
-  const service = createSessionSummaryService(f.repositories, { summarizeSession, requireCloudConsent: vi.fn().mockResolvedValue(undefined) } as any)
+  const service = createSessionSummaryService(f.repositories, { summarizeSession, requireCloudConsent: vi.fn().mockResolvedValue(undefined) } as any, f.taskRuns)
   await service(f.run.id)
   expect(await f.repositories.getLatestSessionSummary(f.channel.id)).toBeUndefined()
   const cutoff = (await f.repositories.listTaskRunEvents(f.run.id)).filter((event) => event.eventType === 'turn_completed').at(-1)!.seq
@@ -80,7 +81,7 @@ it('requires scheduler-specific consent and rejects late summaries after generat
     expect(await canSend()).toBe(false)
     return 'must not persist'
   })
-  const service = createSessionSummaryService(f.repositories, { summarizeSession, requireCloudConsent: vi.fn().mockResolvedValue(undefined) } as any)
+  const service = createSessionSummaryService(f.repositories, { summarizeSession, requireCloudConsent: vi.fn().mockResolvedValue(undefined) } as any, f.taskRuns)
   await service(f.run.id)
   expect(await f.repositories.getLatestSessionSummary(f.channel.id)).toBeUndefined()
   await f.repositories.recordCloudConsent(f.project.id, f.model.id)
@@ -100,7 +101,7 @@ it('preserves an existing summary when the next ten-Turn prefix fails then retri
   const f = await summaryFixture()
   await f.repositories.recordCloudConsent(f.project.id, f.model.id)
   const summarizeSession = vi.fn().mockResolvedValueOnce('first summary').mockRejectedValueOnce(new Error('failed')).mockResolvedValueOnce('second summary')
-  const service = createSessionSummaryService(f.repositories, { summarizeSession, requireCloudConsent: vi.fn().mockResolvedValue(undefined) } as any)
+  const service = createSessionSummaryService(f.repositories, { summarizeSession, requireCloudConsent: vi.fn().mockResolvedValue(undefined) } as any, f.taskRuns)
   await service(f.run.id)
   const first = await f.repositories.getLatestSessionSummary(f.channel.id)
   for (let i = 0; i < 10; i++) await f.complete(`new turn ${i}`)
@@ -119,7 +120,7 @@ it('covers the prior Run unsummarized tail before the exact new Run prefix', asy
   const f = await summaryFixture()
   await f.repositories.recordCloudConsent(f.project.id, f.model.id)
   const summarizeSession = vi.fn().mockResolvedValue('first summary')
-  const service = createSessionSummaryService(f.repositories, { summarizeSession, requireCloudConsent: vi.fn().mockResolvedValue(undefined) } as any)
+  const service = createSessionSummaryService(f.repositories, { summarizeSession, requireCloudConsent: vi.fn().mockResolvedValue(undefined) } as any, f.taskRuns)
   await service(f.run.id)
   for (let i = 11; i <= 19; i++) await f.complete(`old tail ${i}`)
   await f.repositories.transitionTaskRun(f.run.id, 'running', 'completed', {})

@@ -261,7 +261,7 @@ export interface ModelConfigRecord extends SaveModelConfigRecordInput {
 
 export interface Repositories {
   getModelFallbackChain(id: string): Promise<ModelConfigRecord[]>
-  bindAgentTurnModel(input: { turnId: string; configuredModelSnapshot: string; actualModelSnapshot: string; memberRevision: string; hasToolObservations?: boolean }): Promise<AgentTurn>
+  bindAgentTurnModel(input: { turnId: string; configuredModelSnapshot: string; actualModelSnapshot: string; memberRevision: string; hasToolObservations?: boolean; modelRouteSnapshot?: string }): Promise<AgentTurn>
   beginTaskRunCancellation(id: string, expectedGeneration?: number): Promise<TaskRun>
   settleTaskRunCancellation(id: string, effectsSettled: boolean, pauseReason?: string): Promise<TaskRun>
   resumeTaskRun(id: string, agentId?: string): Promise<TaskRun>
@@ -269,7 +269,7 @@ export interface Repositories {
   acknowledgeProcessRecovery(taskRunId: string, executionId: string): Promise<void>
   getLatestSessionSummary(channelId: string): Promise<SessionSummary | undefined>
   listSessionSummaryMessages(taskRunId: string, coveredThroughSeq: number, previous?: SessionSummary): Promise<Message[]>
-  saveSessionSummary(input: { taskRunId: string; generation: number; coveredThroughSeq: number; content: string; modelConfigId: string; modelSnapshot: string; memberSnapshot: string; configuredModelConfigId?: string; configuredModelSnapshot?: string }): Promise<SessionSummary>
+  saveSessionSummary(input: { taskRunId: string; generation: number; coveredThroughSeq: number; content: string; modelConfigId: string; modelSnapshot: string; memberSnapshot: string; configuredModelConfigId?: string; configuredModelSnapshot?: string; modelRouteSnapshot?: string }): Promise<SessionSummary>
   createToolExecution(context: ToolContext, request: ToolRequest): Promise<ToolExecution>
   getToolExecution(id: string): Promise<ToolExecution | undefined>
   listToolExecutions(taskRunId: string): Promise<ToolExecution[]>
@@ -317,17 +317,17 @@ export interface Repositories {
   validateStartedTaskRun(input: StartTaskRunInput): Promise<void>
   getTaskRun(id: string): Promise<TaskRun | undefined>
   listTaskRuns(channelId: string): Promise<TaskRun[]>
-  transitionTaskRun(id: string, from: 'running', to: 'completed' | 'failed' | 'cancelled', metadata: Record<string, string>, guard?: { generation: number; modelSnapshot?: string; actualModelConfigId?: string; actualModelSnapshot?: string; requireNoEnabledMembers?: boolean }): Promise<TaskRun | undefined>
+  transitionTaskRun(id: string, from: 'running', to: 'completed' | 'failed' | 'cancelled', metadata: Record<string, string>, guard?: { generation: number; modelSnapshot?: string; actualModelConfigId?: string; actualModelSnapshot?: string; requireNoEnabledMembers?: boolean; modelRouteSnapshot?: string }): Promise<TaskRun | undefined>
   recoverRunningTaskRuns(): Promise<number>
-  appendTaskRunEvent(id: string, generation: number, eventType: TaskRunEventType, refs?: { agentId?: string; messageId?: string; toolExecutionId?: string; metadata?: EventMetadata }): Promise<TaskRunEvent>
+  appendTaskRunEvent(id: string, generation: number, eventType: TaskRunEventType, refs?: { agentId?: string; messageId?: string; toolExecutionId?: string; metadata?: EventMetadata; displayReason?: string }): Promise<TaskRunEvent>
   listTaskRunEvents(id: string): Promise<TaskRunEvent[]>
   startNextMentionTurn(taskRunId: string, generation: number): Promise<AgentTurn | undefined>
   startSingleMemberTurn(taskRunId: string, generation: number): Promise<AgentTurn | undefined>
-  commitSpeakerDecision(input: { taskRunId: string; generation: number; modelConfigId: string; configuredModelConfigId?: string; configuredModelSnapshot?: string; modelSnapshot?: string; memberRevisions: Record<string, string>; nextSpeaker: string | null; reason: string }): Promise<AgentTurn | null>
+  commitSpeakerDecision(input: { taskRunId: string; generation: number; modelConfigId: string; configuredModelConfigId?: string; configuredModelSnapshot?: string; modelSnapshot?: string; memberRevisions: Record<string, string>; nextSpeaker: string | null; reason: string; modelRouteSnapshot?: string }): Promise<AgentTurn | null>
   markAgentTurnWaiting(id: string, toolExecutionId: string): Promise<AgentTurn>
   pauseTaskRun(id: string, reason: string): Promise<TaskRun>
   startAgentTurn(taskRunId: string, generation: number, agentId: string, triggerEventSeq: number): Promise<AgentTurn>
-  completeAgentTurn(id: string, content: string): Promise<{ turn: AgentTurn; message: Message }>
+  completeAgentTurn(id: string, content: string, guard?: { modelRouteSnapshot: string; hasToolObservations?: boolean }): Promise<{ turn: AgentTurn; message: Message }>
   finishAgentTurn(id: string, status: 'failed' | 'cancelled'): Promise<AgentTurn>
   listAgentTurns(taskRunId: string): Promise<AgentTurn[]>
   getChannelTaskSnapshot(channelId: string): Promise<ChannelTaskSnapshot>
@@ -363,6 +363,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
           || !member?.isEnabled || member.revision !== input.memberRevision || turn.memberRevision !== input.memberRevision || !agent || (member.modelConfigOverrideId ?? agent.modelConfigId) !== configured?.id
           || !configured || !actual || !channel || JSON.stringify(configured) !== input.configuredModelSnapshot
           || turn.configuredModelFingerprint !== modelFingerprint(configured)
+          || (input.modelRouteSnapshot !== undefined && JSON.stringify(fallbackPath(tx.select().from(modelConfigs).all(), configured.id)) !== input.modelRouteSnapshot)
           || (actual.providerPreset !== 'ollama' && !tx.select().from(cloudConsents).where(and(eq(cloudConsents.projectId, channel.projectId), eq(cloudConsents.modelConfigId, actual.id))).get())
           || (input.hasToolObservations && actual.providerPreset !== 'ollama' && !tx.select().from(toolResultConsents).where(and(eq(toolResultConsents.projectId, channel.projectId), eq(toolResultConsents.modelConfigId, actual.id), eq(toolResultConsents.scopeVersion, 1))).get())) throw new Error('模型调用绑定已失效或未授权')
         if (turn.actualModelConfigId !== actual.id && tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), sql`json_extract(${toolExecutions.policySnapshotJson}, '$.turnId') = ${turn.id}`)).get()) throw new Error('工具执行后的模型不可切换')
@@ -395,6 +396,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         if (!run || run.status !== 'running' || run.generation !== input.generation || run.currentTurnId || !channel || schedulerId(tx, channel.schedulerModelConfigId) !== configuredId
           || !configured || !fallbackPath(tx.select().from(modelConfigs).all(), configuredId).some((candidate) => candidate.id === input.modelConfigId)
           || (input.configuredModelSnapshot !== undefined && JSON.stringify(configured) !== input.configuredModelSnapshot)
+          || (input.modelRouteSnapshot !== undefined && JSON.stringify(fallbackPath(tx.select().from(modelConfigs).all(), configuredId)) !== input.modelRouteSnapshot)
           || JSON.stringify(config) !== input.modelSnapshot || JSON.stringify(identities) !== input.memberSnapshot
           || (config?.providerPreset !== 'ollama' && !tx.select().from(cloudConsents).where(and(eq(cloudConsents.projectId, channel.projectId), eq(cloudConsents.modelConfigId, input.modelConfigId))).get())) throw new Error('摘要状态已失效')
         const cutoff = tx.select().from(taskRunEvents).where(and(eq(taskRunEvents.taskRunId, run.id), eq(taskRunEvents.seq, input.coveredThroughSeq), eq(taskRunEvents.eventType, 'turn_completed'))).get()
@@ -1011,13 +1013,14 @@ export function createRepositories(client: DatabaseClient): Repositories {
       from: 'running',
       to: 'completed' | 'failed' | 'cancelled',
       metadata: Record<string, string>,
-      guard?: { generation: number; modelSnapshot?: string; actualModelConfigId?: string; actualModelSnapshot?: string; requireNoEnabledMembers?: boolean },
+      guard?: { generation: number; modelSnapshot?: string; actualModelConfigId?: string; actualModelSnapshot?: string; requireNoEnabledMembers?: boolean; modelRouteSnapshot?: string },
     ): Promise<TaskRun | undefined> {
       const timestamp = new Date().toISOString()
       return client.db.transaction((tx) => {
         const current = tx.select().from(taskRuns).where(eq(taskRuns.id, id)).get()
         if (!current || current.status !== from) return undefined
         if (guard && (current.generation !== guard.generation
+          || (guard.modelRouteSnapshot !== undefined && JSON.stringify(fallbackPath(tx.select().from(modelConfigs).all(), current.modelConfigId)) !== guard.modelRouteSnapshot)
           || (guard.modelSnapshot !== undefined && JSON.stringify(tx.select().from(modelConfigs).where(eq(modelConfigs.id, current.modelConfigId)).get()) !== guard.modelSnapshot)
           || (guard.requireNoEnabledMembers && tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, current.channelId), eq(channelAgents.isEnabled, true))).get()))) return undefined
         if (guard?.actualModelConfigId !== undefined) {
@@ -1230,6 +1233,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
           || schedulerId(tx, channel.schedulerModelConfigId) !== configuredId || !configured || !actual
           || !fallbackPath(tx.select().from(modelConfigs).all(), configuredId).some((config) => config.id === actual.id)
           || (input.configuredModelSnapshot !== undefined && JSON.stringify(configured) !== input.configuredModelSnapshot)
+          || (input.modelRouteSnapshot !== undefined && JSON.stringify(fallbackPath(tx.select().from(modelConfigs).all(), configuredId)) !== input.modelRouteSnapshot)
           || (input.modelSnapshot !== undefined && JSON.stringify(actual) !== input.modelSnapshot)
           || (input.modelSnapshot !== undefined && actual.providerPreset !== 'ollama' && !tx.select().from(cloudConsents).where(and(eq(cloudConsents.projectId, channel.projectId), eq(cloudConsents.modelConfigId, actual.id))).get())) throw new Error('调度决策已失效')
         const members = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.isEnabled, true))).all()
@@ -1278,7 +1282,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         return selectedTurn(tx, run, agentId, triggerEventSeq)
       })
     },
-    async completeAgentTurn(id, content) {
+    async completeAgentTurn(id, content, guard) {
       return client.db.transaction((tx) => {
         const turn = tx.select().from(agentTurns).where(eq(agentTurns.id, id)).get()
         const run = turn && tx.select().from(taskRuns).where(eq(taskRuns.id, turn.taskRunId)).get()
@@ -1293,6 +1297,10 @@ export function createRepositories(client: DatabaseClient): Repositories {
         if (!configured || !actual || (member.modelConfigOverrideId ?? agent.modelConfigId) !== configured.id
           || modelFingerprint(configured) !== turn.configuredModelFingerprint || modelFingerprint(actual) !== turn.actualModelFingerprint
           || !fallbackPath(tx.select().from(modelConfigs).all(), configured.id).some((config) => config.id === actual.id)) throw new Error('Agent 模型绑定已失效')
+        const channel = tx.select().from(channels).where(eq(channels.id, run.channelId)).get()!
+        if (guard && (JSON.stringify(fallbackPath(tx.select().from(modelConfigs).all(), configured.id)) !== guard.modelRouteSnapshot
+          || (actual.providerPreset !== 'ollama' && !tx.select().from(cloudConsents).where(and(eq(cloudConsents.projectId, channel.projectId), eq(cloudConsents.modelConfigId, actual.id))).get())
+          || (guard.hasToolObservations && actual.providerPreset !== 'ollama' && !tx.select().from(toolResultConsents).where(and(eq(toolResultConsents.projectId, channel.projectId), eq(toolResultConsents.modelConfigId, actual.id), eq(toolResultConsents.scopeVersion, 1))).get()))) throw new Error('Agent 模型授权或绑定已失效')
         const last = tx.select({ seq: taskRunEvents.seq }).from(taskRunEvents)
           .where(eq(taskRunEvents.taskRunId, run.id)).orderBy(sql`${taskRunEvents.seq} DESC`).limit(1).get()
         const timestamp = new Date().toISOString()

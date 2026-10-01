@@ -210,12 +210,13 @@ it('rejects duplicate channel sends and suppresses stream events after cancellat
   expect(await repositories.listMessages(channelId)).toHaveLength(1)
 })
 
-it('persists model failure with sanitized errors', async () => {
+it('pauses after exhausted network retries with sanitized errors', async () => {
   await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: true })
   fetchImpl.mockRejectedValue(new Error('PRIVATE_KEY'))
   const { taskRunId } = await send()
   await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, expect.objectContaining({ taskRunId, type: 'error' })))
-  expect(await repositories.getTaskRun(taskRunId)).toMatchObject({ status: 'failed' })
+  expect(await repositories.getTaskRun(taskRunId)).toMatchObject({ status: 'paused' })
+  expect(fetchImpl).toHaveBeenCalledTimes(2)
   expect(JSON.stringify(sender.send.mock.calls)).not.toContain('PRIVATE_KEY')
 })
 

@@ -56,6 +56,7 @@ test('enforces consent and restores the full durable reply after a mid-stream re
   })
   expect(beforeConsent).toEqual({ rejected: true, messages: [], runs: [] })
   expect(provider.requests).toHaveLength(0)
+  await page.getByRole('dialog', { name: '云端模型授权' }).getByRole('checkbox').check()
   await page.getByRole('button', { name: '同意并发送', exact: true }).click()
   await expect.poll(() => provider.requests.length).toBe(1)
   provider.delta('重载前的完整前缀。')
@@ -74,7 +75,8 @@ test('enforces consent and restores the full durable reply after a mid-stream re
   await desktop.page.getByLabel('消息内容', { exact: true }).fill('第二轮对话')
   await desktop.page.getByRole('button', { name: '发送消息', exact: true }).click()
   await expect.poll(() => provider.requests.length).toBe(2)
-  expect(provider.requests[1].messages).toEqual([
+  // v0.3 prepends bounded context/facts as system data; conversation order is unchanged.
+  expect(provider.requests[1].messages.filter((message) => message.role !== 'system')).toEqual([
     { role: 'user', content: '请测试持久化' },
     { role: 'assistant', content: '重载前的完整前缀。重载后的后缀。' },
     { role: 'user', content: '第二轮对话' },

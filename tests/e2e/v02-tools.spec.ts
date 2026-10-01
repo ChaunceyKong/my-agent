@@ -109,11 +109,18 @@ test('keeps an existing file unchanged until an overwrite approval is explicitly
   expect(postExecution[0]).toMatchObject({ toolName: 'write_file', status: 'completed' })
   expect(provider.requests).toHaveLength(1)
 
-  // Explicit effects terminate the paused run instead of trapping the channel.
+  // Approval completion is a barrier, not an automatic speaker/run transition.
   await desktop.page.reload()
+  await expect(desktop.page.getByRole('button', { name: '继续当前任务', exact: true })).toBeEnabled()
+  expect(provider.requests).toHaveLength(1)
+  await desktop.page.getByRole('button', { name: '继续当前任务', exact: true }).click()
+  await expect.poll(() => provider.requests.length).toBe(2)
+  provider.delta('已核验上次操作，未重复执行工具。')
+  provider.complete()
+  await expect(desktop.page.getByText('已完成', { exact: true })).toBeVisible()
   await desktop.page.getByLabel('消息内容', { exact: true }).fill('继续下一项任务')
   await desktop.page.getByRole('button', { name: '发送消息', exact: true }).click()
-  await expect.poll(() => provider.requests.length).toBe(2)
+  await expect.poll(() => provider.requests.length).toBe(3)
   provider.delta('下一项任务已开始。')
   provider.complete()
   await expect(desktop.page.getByText('下一项任务已开始。', { exact: true })).toBeVisible()

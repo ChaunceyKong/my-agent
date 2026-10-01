@@ -388,6 +388,10 @@ export interface AgentTeamApi {
     list(channelId: string): Promise<TaskRun[]>
     send(input: SendMessageInput): Promise<{ taskRunId: string }>
     cancel(taskRunId: string): Promise<void>
+    continue(taskRunId: string): Promise<{ taskRunId: string }>
+    assign(taskRunId: string, agentId: string): Promise<{ taskRunId: string }>
+    terminate(taskRunId: string): Promise<void>
+    interrupt(taskRunId: string, input: SendMessageInput): Promise<{ taskRunId: string }>
   }
   events: {
     onStream(listener: (event: StreamEvent) => void): () => void

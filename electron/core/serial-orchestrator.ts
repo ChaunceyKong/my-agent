@@ -6,6 +6,13 @@ import type { TaskRunService } from './task-run-service'
 import { parseSpeakerDecision, speakerSelectionPrompt } from './speaker-selector'
 import { createSessionSummaryService } from './session-summary-service'
 
+export function loopPauseReason(speakers: string[]): string | undefined {
+  const last = speakers.slice(-3)
+  if (last.length === 3 && last.every((id) => id === last[0])) return '同一 Agent 连续发言 3 轮，等待 CEO 处理'
+  const cycle = speakers.slice(-12)
+  if (cycle.length === 12 && cycle[0] !== cycle[1] && cycle.every((id, index) => id === cycle[index % 2])) return 'Agent 交替循环达到 3 次，等待 CEO 处理'
+}
+
 /** One durable Turn at a time; every model decision is rechecked at commit. */
 export function createSerialOrchestrator(deps: {
   repositories: Repositories
@@ -17,19 +24,25 @@ export function createSerialOrchestrator(deps: {
   return {
     async run(input: { taskRunId: string; projectId: string; channelId: string; onEvent(event: StreamEvent): Promise<void> }): Promise<void> {
       const send = input.onEvent
+      const generation = (await deps.repositories.getTaskRun(input.taskRunId))?.generation
       try {
         while (true) {
           const run = await deps.repositories.getTaskRun(input.taskRunId)
-          if (!run || run.status !== 'running') return
+          if (!run || run.status !== 'running' || run.generation !== generation) return
           const channel = await deps.repositories.getChannel(run.channelId)
           if (!channel) throw new Error('群聊不存在')
           if (channel.id !== input.channelId || channel.projectId !== input.projectId) throw new Error('任务归属不一致')
-          if (run.turnCount >= channel.maxTurns) {
-            await deps.repositories.pauseTaskRun(run.id, 'Agent 轮次已达到群聊上限')
-            await send({ taskRunId: run.id, type: 'error', content: 'Agent 轮次已达到群聊上限，等待 CEO 处理。' })
+          const turns = await deps.repositories.listAgentTurns(run.id)
+          const loopReason = loopPauseReason(turns.filter((item) => item.generation === run.generation && item.status === 'completed').map((item) => item.agentId))
+          if (!run.currentTurnId && (run.turnCount >= channel.maxTurns || loopReason)) {
+            const reason = loopReason ?? 'Agent 轮次已达到群聊上限'
+            await deps.repositories.pauseTaskRun(run.id, reason)
+            await send({ taskRunId: run.id, type: 'error', content: reason })
             return
           }
-          let turn = await deps.repositories.startNextMentionTurn(run.id, run.generation)
+          let turn = run.currentTurnId ? turns.find((item) => item.id === run.currentTurnId && item.status === 'running' && item.generation === run.generation)
+            : await deps.repositories.startNextMentionTurn(run.id, run.generation)
+          if (run.currentTurnId && !turn) return
           if (!turn && run.turnCount === 0) turn = await deps.repositories.startSingleMemberTurn(run.id, run.generation)
           if (!turn) {
             const members = (await deps.repositories.listChannelAgents(run.channelId)).filter((item) => item.isEnabled)
@@ -78,12 +91,16 @@ export function createSerialOrchestrator(deps: {
             await send({ taskRunId: run.id, type: 'error', content: 'Agent 模型未获得外发授权，等待 CEO 处理。' })
             return
           }
-          const outcome = await deps.runner.run({ ...input, turnId: turn.id, generation: turn.generation, active,
+          let timer: ReturnType<typeof setTimeout> | undefined
+          const timeout = new Promise<{ status: 'paused'; reason: string }>((resolve) => {
+            timer = setTimeout(() => resolve({ status: 'paused', reason: 'Agent 调用超过 120 秒，等待 CEO 处理' }), 120_000)
+          })
+          const outcome = await Promise.race([deps.runner.run({ ...input, turnId: turn.id, generation: turn.generation, active,
             onEvent: async (event) => {
               const latest = await deps.repositories.getTaskRun(run.id)
               if (latest?.status === 'running' && latest.generation === turn.generation && latest.currentTurnId === turn.id) await send(event)
             },
-          })
+          }), timeout]).finally(() => clearTimeout(timer))
           if (outcome.status === 'stale') {
             const latest = await deps.repositories.getTaskRun(run.id)
             if (latest?.status === 'running' && latest.generation === turn.generation && latest.currentTurnId === turn.id) {
@@ -105,8 +122,7 @@ export function createSerialOrchestrator(deps: {
             return
           }
           if (outcome.status === 'paused') {
-            await deps.repositories.finishAgentTurn(turn.id, 'failed')
-            await deps.repositories.pauseTaskRun(run.id, outcome.reason)
+            await deps.taskRuns.pauseTaskRun(run.id, outcome.reason, turn.generation)
             await send({ taskRunId: run.id, type: 'error', content: outcome.reason })
             return
           }
@@ -115,7 +131,7 @@ export function createSerialOrchestrator(deps: {
         }
       } catch {
         const run = await deps.repositories.getTaskRun(input.taskRunId)
-        if (run?.status !== 'running') return
+        if (run?.status !== 'running' || run.generation !== generation) return
         const failed = await deps.repositories.transitionTaskRun(run.id, 'running', 'failed', { errorMessage: 'Agent 任务执行失败，请重试' }).catch(() => undefined)
         if (failed) await send({ taskRunId: run.id, type: 'error', content: 'Agent 任务执行失败，请重试' })
       }

@@ -135,7 +135,16 @@ export function createSingleAgentRunner(deps: {
         messages.push({ role: 'assistant', content: null, tool_calls: [call] })
         let outcome
         try {
-          outcome = await deps.toolEngine.execute({ taskRunId: current.id, generation: input.generation, turnId: input.turnId, agentId: input.active.agent.id }, request)
+          let timer: ReturnType<typeof setTimeout> | undefined
+          try {
+            outcome = await Promise.race([
+              deps.taskRuns.trackEffect(current.id, () => deps.toolEngine.execute({ taskRunId: current.id, generation: input.generation, turnId: input.turnId, agentId: input.active.agent.id }, request)),
+              new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('tool_timeout')), 60_000) }),
+            ])
+          } catch (error) {
+            if (error instanceof Error && error.message === 'tool_timeout') return { status: 'paused', reason: '工具调用超时，等待安全清理。' }
+            throw error
+          } finally { clearTimeout(timer) }
         } catch {
           return { status: 'failed', reason: '工具请求被安全策略拒绝。' }
         }

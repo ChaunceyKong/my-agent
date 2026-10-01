@@ -11,7 +11,7 @@ function setup(responses: Array<string | ReturnType<typeof call>>, execution: { 
   repositories.listToolExecutions = vi.fn().mockResolvedValue([])
   repositories.listApprovalRequests = vi.fn().mockResolvedValue([])
   const modelClient: any = { streamChat: vi.fn(async (_input: any, emit: any) => { const response = responses[index++]; if (typeof response === 'string') await emit({ taskRunId: 'r', type: 'delta', content: response }); else await emit({ taskRunId: 'r', type: 'tool_call', toolCall: { ...response, index: 0 } }); await emit({ taskRunId: 'r', type: 'complete' }) }) }
-  const taskRuns: any = { canAcceptChunk: vi.fn().mockResolvedValue(true), finishTaskRun: vi.fn().mockResolvedValue({}) }
+  const taskRuns: any = { canAcceptChunk: vi.fn().mockResolvedValue(true), finishTaskRun: vi.fn().mockResolvedValue({}), trackEffect: async (_id: string, effect: () => Promise<unknown>) => effect() }
   const toolEngine: any = { execute: vi.fn().mockResolvedValue({ execution: { id: 'e', ...execution }, result }) }
   return { runner: createSingleAgentRunner({ repositories, modelClient, taskRuns, toolEngine }), repositories, modelClient, taskRuns, toolEngine }
 }

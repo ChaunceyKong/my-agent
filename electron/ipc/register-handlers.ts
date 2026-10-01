@@ -114,7 +114,7 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
     await repositories.recordCloudConsent(projectId, modelConfigId)
     await repositories.recordToolResultConsent(projectId, modelConfigId, 1)
   })
-  ipcMain.handle(IpcChannel.MessageSend, async (event, input: SendMessageInput) => {
+  const sendMessage = async (event: unknown, input: SendMessageInput, interruptedId?: string) => {
     if (!taskRuns || !modelClient) throw new Error('模型服务不可用')
     if (!input || typeof input.content !== 'string' || !input.content.trim()) throw new Error('消息不能为空')
     if (startingChannels.has(input.channelId)) throw new Error('当前群聊已有任务正在运行')
@@ -122,11 +122,17 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
     try {
       const channel = await repositories.getChannel(input.channelId)
       if (!channel || !await repositories.getModelConfig(input.modelConfigId)) throw new Error('群聊或模型配置不存在')
-      if ((await repositories.listTaskRuns(channel.id)).some((run) => ['running', 'cancelling', 'paused'].includes(run.status))) throw new Error('当前群聊已有任务正在运行')
       if (!(await repositories.listChannelAgents(channel.id)).some((member) => member.isEnabled)) await modelClient.requireCloudConsent(channel.projectId, input.modelConfigId)
       const enabled = (await repositories.listChannelAgents(channel.id)).filter((member) => member.isEnabled)
       if (!enabled.length && input.mentions?.length) throw new Error('群聊没有可提及的 Agent')
       if (enabled.length && !orchestrator) throw new Error('Agent 协作服务不可用')
+      await repositories.validateStartedTaskRun(input)
+      if (interruptedId) {
+        const old = await repositories.getTaskRun(interruptedId)
+        if (!old || old.channelId !== channel.id || !['running', 'paused'].includes(old.status)) throw new Error('插话目标已失效')
+        if ((await taskRuns.cancelTaskRun(old.id)).status !== 'cancelled') throw new Error('旧任务效果仍需清理，请先处理恢复状态')
+      }
+      if ((await repositories.listTaskRuns(channel.id)).some((run) => ['running', 'cancelling', 'paused'].includes(run.status))) throw new Error('当前群聊已有任务正在运行')
       const run = await taskRuns.startTaskRun(channel.id, input.modelConfigId, input.content, input.mentions)
       const sender = (event as { sender: StreamSender }).sender
       if (enabled.length && orchestrator) void orchestrator.run({ taskRunId: run.id, projectId: channel.projectId, channelId: channel.id,
@@ -137,6 +143,33 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
     } finally {
       startingChannels.delete(input.channelId)
     }
+  }
+  ipcMain.handle(IpcChannel.MessageSend, sendMessage)
+  ipcMain.handle(IpcChannel.TaskRunInterrupt, (event, id: unknown, input: SendMessageInput) => sendMessage(event, input, validId(id)))
+  const resume = async (event: unknown, id: unknown, agentId?: string) => {
+    if (!taskRuns || !modelClient) throw new Error('模型服务不可用')
+    const old = await repositories.getTaskRun(validId(id))
+    if (!old || startingChannels.has(old.channelId)) throw new Error('任务不可继续')
+    startingChannels.add(old.channelId)
+    try {
+      const channel = await repositories.getChannel(old.channelId)
+      if (!channel) throw new Error('群聊不存在')
+      const members = (await repositories.listChannelAgents(channel.id)).filter((member) => member.isEnabled)
+      if (members.length && !orchestrator) throw new Error('Agent 协作服务不可用')
+      if (!members.length) await modelClient.requireCloudConsent(channel.projectId, old.modelConfigId)
+      const run = await taskRuns.resumeTaskRun(old.id, agentId)
+      const sender = (event as { sender: StreamSender }).sender
+      if (members.length && orchestrator) void orchestrator.run({ taskRunId: run.id, projectId: channel.projectId, channelId: channel.id,
+        onEvent: async (streamEvent) => { if (!sender.isDestroyed()) sender.send(IpcChannel.MessageStream, streamEvent) } })
+      else void streamReply(run.id, channel.projectId, run.modelConfigId, channel.id, sender, repositories, taskRuns, modelClient)
+      return { taskRunId: run.id }
+    } finally { startingChannels.delete(old.channelId) }
+  }
+  ipcMain.handle(IpcChannel.TaskRunContinue, (event, id: unknown) => resume(event, id))
+  ipcMain.handle(IpcChannel.TaskRunAssign, (event, id: unknown, agentId: unknown) => resume(event, id, validId(agentId)))
+  ipcMain.handle(IpcChannel.TaskRunTerminate, async (_event, id: unknown) => {
+    if (!taskRuns) throw new Error('模型服务不可用')
+    if ((await taskRuns.cancelTaskRun(validId(id))).status !== 'cancelled') throw new Error('任务效果仍需清理')
   })
   ipcMain.handle(IpcChannel.TaskRunCancel, async (_event, taskRunId: string) => {
     if (!taskRuns) throw new Error('TaskRun service is unavailable')
@@ -185,8 +218,10 @@ async function streamReply(
   sender: StreamSender, repositories: Repositories, taskRuns: TaskRunService, modelClient: ModelClient,
 ): Promise<void> {
   let reply = ''
+  const generation = (await repositories.getTaskRun(taskRunId))?.generation
+  if (generation === undefined) return
   const accept = async (event: StreamEvent): Promise<void> => {
-    if (!await taskRuns.canAcceptChunk(taskRunId)) return
+    if (!await taskRuns.canAcceptChunk(taskRunId, generation)) return
     if (event.type === 'delta') reply += event.content ?? ''
     if (event.type === 'complete') await taskRuns.finishTaskRun(taskRunId, reply)
     if (event.type === 'error') {
@@ -206,18 +241,18 @@ async function streamReply(
     await modelClient.streamChat({ projectId, modelConfigId, taskRunId,
       messages,
     }, accept, async () => {
-      const allowed = await taskRuns.canAcceptChunk(taskRunId)
+      const allowed = await taskRuns.canAcceptChunk(taskRunId, generation)
         && !(await repositories.listChannelAgents(channelId)).some((member) => member.isEnabled)
       if (!allowed) routeRevoked = true
       return allowed
     })
-    if (routeRevoked && await taskRuns.canAcceptChunk(taskRunId)) {
+    if (routeRevoked && await taskRuns.canAcceptChunk(taskRunId, generation)) {
       const message = '群聊 Agent 配置已变化，请重新发起任务'
       const failed = await repositories.transitionTaskRun(taskRunId, 'running', 'failed', { errorMessage: message })
       if (failed && !sender.isDestroyed()) sender.send(IpcChannel.MessageStream, { taskRunId, type: 'error', content: message })
     }
   } catch (error) {
-    if (error instanceof ContextBudgetError && await taskRuns.canAcceptChunk(taskRunId)) {
+    if (error instanceof ContextBudgetError && await taskRuns.canAcceptChunk(taskRunId, generation)) {
       await repositories.pauseTaskRun(taskRunId, error.message)
       if (!sender.isDestroyed()) sender.send(IpcChannel.MessageStream, { taskRunId, type: 'error', content: error.message })
       return

@@ -153,6 +153,8 @@ export function createModelClient({
 
     async streamChat(input: StreamChatInput, onEvent: (event: StreamEvent) => void | Promise<void>, canSend?: () => Promise<boolean>): Promise<void> {
       const controller = new AbortController()
+      let timedOut = false
+      const timer = setTimeout(() => { timedOut = true; controller.abort() }, 120_000)
       const unsubscribe = taskRuns.onCancelled(input.taskRunId, () => controller.abort())
       try {
         if (!await taskRuns.canAcceptChunk(input.taskRunId)) return
@@ -193,8 +195,12 @@ export function createModelClient({
             throw new ModelClientError('malformed')
           }
           await consumeEventStream(response.body, input.taskRunId, taskRuns, onEvent, controller.signal)
+          if (timedOut) await emitIfAccepted(taskRuns, input.taskRunId, onEvent, { taskRunId: input.taskRunId, type: 'error', content: '模型调用超过 120 秒，请重试' })
         } catch (error) {
-          if (controller.signal.aborted) return
+          if (controller.signal.aborted) {
+            if (timedOut) await emitIfAccepted(taskRuns, input.taskRunId, onEvent, { taskRunId: input.taskRunId, type: 'error', content: '模型调用超过 120 秒，请重试' })
+            return
+          }
           await emitIfAccepted(taskRuns, input.taskRunId, onEvent, {
             taskRunId: input.taskRunId,
             type: 'error',
@@ -204,6 +210,7 @@ export function createModelClient({
           })
         }
       } finally {
+        clearTimeout(timer)
         unsubscribe()
       }
     },

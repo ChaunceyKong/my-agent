@@ -9,10 +9,33 @@ export interface TaskRunService {
   canAcceptChunk(id: string, generation?: number): Promise<boolean>
   advanceGeneration(id: string): Promise<TaskRun>
   onCancelled(id: string, listener: () => void): () => void
+  trackEffect<T>(id: string, effect: () => Promise<T>): Promise<T>
+  pauseTaskRun(id: string, reason: string, expectedGeneration?: number): Promise<TaskRun>
+  resumeTaskRun(id: string, agentId?: string): Promise<TaskRun>
 }
 
-export function createTaskRunService(repositories: Repositories): TaskRunService {
+export function createTaskRunService(repositories: Repositories, cleanupTimeoutMs = 5_000): TaskRunService {
   const cancellationListeners = new Map<string, Set<() => void>>()
+  const effects = new Map<string, Set<Promise<unknown>>>()
+  const stopping = new Map<string, Promise<TaskRun>>()
+  async function stop(id: string, reason?: string, expectedGeneration?: number): Promise<TaskRun> {
+    const pending = stopping.get(id)
+    if (pending) return pending
+    const operation = (async () => {
+      await repositories.beginTaskRunCancellation(id, expectedGeneration)
+      for (const listener of cancellationListeners.get(id) ?? []) listener()
+      cancellationListeners.delete(id)
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const settled = await Promise.race([
+        Promise.allSettled([...(effects.get(id) ?? [])]).then(() => true),
+        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), cleanupTimeoutMs) }),
+      ])
+      clearTimeout(timer)
+      return repositories.settleTaskRunCancellation(id, settled, reason)
+    })()
+    stopping.set(id, operation)
+    try { return await operation } finally { stopping.delete(id) }
+  }
   return {
     startTaskRun: (channelId, modelConfigId, content, mentions) => repositories.createStartedTaskRun({
       channelId,
@@ -22,10 +45,19 @@ export function createTaskRunService(repositories: Repositories): TaskRunService
     }),
 
     async cancelTaskRun(id: string): Promise<TaskRun> {
-      const run = await transition(repositories, id, 'cancelled', {})
-      for (const listener of cancellationListeners.get(id) ?? []) listener()
-      cancellationListeners.delete(id)
-      return run
+      return stop(id)
+    },
+    pauseTaskRun: (id, reason, expectedGeneration) => stop(id, reason, expectedGeneration),
+    async resumeTaskRun(id, agentId) {
+      if (stopping.has(id) || effects.get(id)?.size) throw new Error('任务效果仍在清理')
+      return repositories.resumeTaskRun(id, agentId)
+    },
+    async trackEffect(id, effect) {
+      // Register before invoking the effect so cancellation cannot overlook an in-flight claim.
+      const pending = Promise.resolve().then(effect)
+      const active = effects.get(id) ?? new Set<Promise<unknown>>()
+      active.add(pending); effects.set(id, active)
+      try { return await pending } finally { active.delete(pending); if (!active.size) effects.delete(id) }
     },
 
     onCancelled(id, listener) {

@@ -3,7 +3,7 @@ import { IpcChannel } from '../../shared/ipc-channels'
 it('defines exactly the named IPC channels', () => {
   expect(Object.values(IpcChannel)).toEqual([
     'project:create', 'project:list', 'project:pick-workspace', 'channel:create', 'channel:list', 'channel:set-scheduler',
-    'message:send', 'task-run:cancel', 'model:save', 'model:list',
+    'message:send', 'task-run:cancel', 'task-run:continue', 'task-run:assign', 'task-run:terminate', 'task-run:interrupt', 'model:save', 'model:list',
     'message:stream', 'message:list', 'task-run:list', 'cloud-consent:has', 'cloud-consent:grant',
     'agent:list', 'agent:get', 'agent:create', 'agent:update', 'agent:remove',
     'channel-agent:list', 'channel-agent:save', 'channel-agent:remove',

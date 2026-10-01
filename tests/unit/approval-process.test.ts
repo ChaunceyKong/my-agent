@@ -75,8 +75,13 @@ it('kills a running process when the task cancellation signal aborts', async () 
   const child = Object.assign(new EventEmitter(), { stderr: new EventEmitter(), kill: vi.fn(), once: EventEmitter.prototype.once })
   const result = executeRegisteredProcess({ executable: { id: 'echo', absolutePath: 'C:\\tool.exe', isEnabled: true, argumentPolicyJson: '["ok"]', createdAt: '', updatedAt: '' }, args: ['ok'], cwd: 'C:\\work', signal: controller.signal, spawnProcess: vi.fn(() => child) as any })
   controller.abort()
-  await expect(result).resolves.toMatchObject({ exitCode: null, stderr: 'cancelled' })
+  let settled = false
+  void result.then(() => { settled = true })
+  await Promise.resolve()
+  expect(settled).toBe(false)
   expect(child.kill).toHaveBeenCalledOnce()
+  child.emit('close', null)
+  await expect(result).resolves.toMatchObject({ exitCode: null })
 })
 
 it('rejects wildcard and dangerous Node, Python and Git argument policies', async () => {
@@ -233,11 +238,14 @@ it('does not overwrite after expiry, cancellation, policy revocation, or a stale
   expect((await repositories.getToolExecution(stale.execution.id))!.status).toBe('failed')
 
   const afterStale = await repositories.getTaskRun(context.taskRunId)
-  await createTaskRunService(repositories).cancelTaskRun(afterStale!.id)
-  const afterStaleRun = await repositories.createStartedTaskRun({ channelId: afterStale!.channelId, modelConfigId: afterStale!.modelConfigId, content: 'after stale' })
+  expect(await createTaskRunService(repositories).cancelTaskRun(afterStale!.id)).toMatchObject({ status: 'paused', pauseReason: 'effect_cleanup_pending' })
+  await expect(repositories.createStartedTaskRun({ channelId: afterStale!.channelId, modelConfigId: afterStale!.modelConfigId, content: 'after stale' })).rejects.toThrow('继续或结束')
+  const isolated = await repositories.createChannel({ projectId: (await repositories.getChannel(afterStale!.channelId))!.projectId, name: 'revocation' })
+  await repositories.saveChannelAgent({ channelId: isolated.id, agentId: context.agentId, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  const afterStaleRun = await repositories.createStartedTaskRun({ channelId: isolated.id, modelConfigId: afterStale!.modelConfigId, content: 'revocation' })
   context = { ...context, taskRunId: afterStaleRun.id, generation: afterStaleRun.generation }
   const revoked = await makeApproved('revoked')
-  await repositories.saveChannelAgent({ channelId: next.channelId, agentId: context.agentId, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  await repositories.saveChannelAgent({ channelId: isolated.id, agentId: context.agentId, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
   await expect(tools.runApproved(revoked.approval.id)).rejects.toThrow('不可用')
   expect(await readFile(revoked.path, 'utf8')).toBe('original')
 })

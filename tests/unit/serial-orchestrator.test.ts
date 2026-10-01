@@ -379,15 +379,15 @@ it('does not let a null scheduler decision discard pending CEO mentions', async 
   expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'running', turnCount: 0 })
 })
 
-it('bounds repeated Agent handoff suggestions at the Channel Turn limit', async () => {
+it('pauses repeated Agent handoff suggestions after three alternating cycles', async () => {
   const { orchestrator, modelClient } = setup(async (system, emit) => {
     await emit({ taskRunId: 'ignored', type: 'delta', content: system.includes('Prompt A') ? '@Beta' : '@Alpha' })
     await emit({ taskRunId: 'ignored', type: 'complete' })
   })
   const run = await taskRuns.startTaskRun(channelId, modelConfigId, '@Alpha begin', [tokens()[0]])
   await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
-  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused', turnCount: 30 })
-  expect(modelClient.streamChat).toHaveBeenCalledTimes(30)
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused', turnCount: 12, pauseReason: 'Agent 交替循环达到 3 次，等待 CEO 处理' })
+  expect(modelClient.streamChat).toHaveBeenCalledTimes(12)
 })
 
 it('exposes only a validated named IPC setting for the Channel scheduler', async () => {

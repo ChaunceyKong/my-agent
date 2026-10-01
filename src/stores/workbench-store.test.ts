@@ -114,6 +114,27 @@ it('does not spin refreshes while a future Turn still has no binding', async () 
   expect(context.api.tasks.snapshot).toHaveBeenCalledTimes(3); expect(context.store.getSnapshot().conversations[first.id].previews).toEqual([])
 })
 
+it('binds an unknown Run first delta to its durable channel after navigation during the send response', async () => {
+  const context = flow(); const { api, store } = context; await loaded(store)
+  const sent = deferred<{ taskRunId: string }>(); vi.mocked(api.tasks.send).mockReturnValueOnce(sent.promise)
+  store.setDraft('c1 request'); const sending = store.send(); await vi.waitFor(() => expect(api.tasks.send).toHaveBeenCalled())
+  await store.selectChannel(second.id)
+  // The request is already dispatched in Main, but no Run id has reached Renderer yet.
+  context.emit({ taskRunId: 'created', type: 'delta', generation: 1, content: 'c1第一片' })
+  await store.refreshChannel(second.id)
+  expect(store.getSnapshot().conversations[second.id].previews).toEqual([])
+  context.get().runs = [{ ...runFixture('running'), id: 'created' }]
+  sent.resolve({ taskRunId: 'created' }); await sending
+  expect(store.getSnapshot().conversations[second.id].previews).toEqual([])
+  expect(store.getSnapshot().conversations[first.id].previews[0].content).toBe('c1第一片')
+  await store.selectChannel(first.id)
+  context.emit({ taskRunId: 'created', type: 'delta', generation: 1, content: '第二片' })
+  expect(store.getSnapshot().conversations[first.id].previews[0].content).toBe('c1第一片第二片')
+  context.get().runs[0].status = 'completed'; await store.refreshChannel(first.id)
+  context.emit({ taskRunId: 'created', type: 'delta', generation: 1, content: '完成后迟到' })
+  expect(store.getSnapshot().conversations[first.id].previews).toEqual([])
+})
+
 it.each([true, false])('invalidates an old draft after c1 to c2 to c1 navigation during delayed consent (%s)', async (granted) => {
   const { api, store } = flow(); await loaded(store)
   const consent = deferred<boolean>(); vi.mocked(api.consent.has).mockReturnValueOnce(consent.promise)

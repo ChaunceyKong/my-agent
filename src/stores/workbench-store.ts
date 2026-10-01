@@ -24,7 +24,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
   let selection = 0; let lifecycle = 0; let channelRevision = 0; let pendingAction: Action | null = null
   let navigation = 0; let operation = 0; let dispatching = false
   const refreshing = new Map<string, { again: boolean; promise: Promise<void> }>()
-  const buffered: Array<{ channelId: string; event: StreamEvent }> = []
+  const buffered: Array<{ channelId: string | null; event: StreamEvent }> = []
   const previewBindings = new Map<string, { generation: number; step: number }>()
   const update = (next: Partial<WorkbenchState>) => { state = { ...state, ...next }; listeners.forEach((listener) => listener()) }
   const conversation = (id: string) => state.conversations[id] ?? emptyConversation
@@ -93,8 +93,9 @@ export function createWorkbenchStore(api: AgentTeamApi) {
             mentions: current.mentions.filter((token) => snapshot.members.some((member) => member.agentId === token.agentId && member.isEnabled)),
             error: snapshot.runs.at(-1)?.status === 'failed' ? snapshot.runs.at(-1)?.errorMessage ?? '模型请求失败，请重试' : current.error })
           if (readRevision === channelRevision) update({ channels: state.channels.map((item) => item.id === channelId && snapshot.channel.updatedAt >= item.updatedAt && JSON.stringify(item) !== JSON.stringify(snapshot.channel) ? snapshot.channel : item) })
-          const pending = buffered.filter((item) => item.channelId === channelId)
+          const pending = buffered.filter((item) => item.channelId === channelId || (item.channelId === null && snapshot.runs.some((run) => run.id === item.event.taskRunId)))
           for (const item of pending) {
+            item.channelId = channelId
             const result = disposition(channelId, item.event)
             if (result !== 'unbound') { buffered.splice(buffered.indexOf(item), 1); if (result === 'ready') delta(channelId, item.event) }
             else if (!retriedUnbound) { retriedUnbound = true; refresh.again = true }
@@ -106,13 +107,13 @@ export function createWorkbenchStore(api: AgentTeamApi) {
   }
   function onStream(event: StreamEvent) {
     const entry = Object.entries(state.conversations).find(([, current]) => current.runs.some((run) => run.id === event.taskRunId))
-    const channelId = entry?.[0] ?? state.channelId
-    if (event.type === 'delta' && disposition(channelId, event) === 'stale') return
-    if (event.type === 'delta' && !delta(channelId, event)) {
+    const channelId = entry?.[0] ?? null
+    if (event.type === 'delta' && (!Number.isSafeInteger(event.generation) || (channelId && disposition(channelId, event) === 'stale'))) return
+    if (event.type === 'delta' && (!channelId || !delta(channelId, event))) {
       if (buffered.length === 256) buffered.shift()
       buffered.push({ channelId, event })
     }
-    if (event.type !== 'tool_call') void refreshChannel(channelId)
+    if (event.type !== 'tool_call') void refreshChannel(channelId ?? state.channelId)
   }
   async function selectChannel(channelId: string) {
     if (!state.channels.some((channel) => channel.id === channelId)) return

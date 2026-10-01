@@ -83,6 +83,32 @@ function flow(initialRun?: TaskRun) {
 }
 async function loaded(store: ReturnType<typeof createWorkbenchStore>) { await vi.waitFor(() => expect(store.getSnapshot().conversations[first.id]?.loaded).toBe(true)) }
 
+it.each(['send', 'interrupt', 'continue', 'assign'] as const)('uses the selected model for new %s input and the existing Run model for continuation', async (kind) => {
+  const { api, store } = flow(kind === 'send' ? undefined : runFixture(kind === 'interrupt' ? 'running' : 'paused'))
+  await loaded(store); store.setModel('selected-model'); store.setDraft('new goal')
+  if (kind === 'assign') await store.assign('a2')
+  else await store[kind]()
+  expect(api.consent.has).toHaveBeenCalledWith('p', kind === 'send' || kind === 'interrupt' ? 'selected-model' : 'model')
+  if (kind === 'send') expect(api.tasks.send).toHaveBeenCalledWith(expect.objectContaining({ modelConfigId: 'selected-model', content: 'new goal' }))
+  else if (kind === 'interrupt') expect(api.tasks.interrupt).toHaveBeenCalledWith('run', expect.objectContaining({ modelConfigId: 'selected-model', content: 'new goal' }))
+  else if (kind === 'continue') expect(api.tasks.continue).toHaveBeenCalledWith('run')
+  else expect(api.tasks.assign).toHaveBeenCalledWith('run', 'a2')
+})
+
+it('invalidates an interrupted action when model selection changes during delayed consent, then authorizes the new model', async () => {
+  const { api, store } = flow(runFixture('running')); await loaded(store)
+  store.setModel('selected-model'); store.setDraft('replacement goal')
+  const consent = deferred<boolean>(); vi.mocked(api.consent.has).mockReturnValueOnce(consent.promise)
+  const interrupting = store.interrupt()
+  await vi.waitFor(() => expect(api.consent.has).toHaveBeenCalledWith('p', 'selected-model'))
+  store.setModel('new-model'); consent.resolve(false); await interrupting
+  expect(api.tasks.interrupt).not.toHaveBeenCalled(); expect(store.getSnapshot().consent).toBeNull()
+  expect(store.getSnapshot().conversations[first.id].draft).toBe('replacement goal')
+  await store.interrupt()
+  expect(api.consent.has).toHaveBeenLastCalledWith('p', 'new-model')
+  expect(api.tasks.interrupt).toHaveBeenCalledWith('run', expect.objectContaining({ modelConfigId: 'new-model', content: 'replacement goal' }))
+})
+
 it('retains a new Turn first delta through an older delayed snapshot, then drains in arrival order once bound', async () => {
   const started = runFixture('running'); started.currentTurnId = 'turn1'
   const context = flow(started); const { api, store } = context

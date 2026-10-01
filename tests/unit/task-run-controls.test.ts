@@ -129,7 +129,39 @@ it('requires a restart marker before manual process recovery and can resume afte
   expect(await repo.getApprovalRequest(approval.id)).toMatchObject({ status: 'cancelled' })
 })
 
-it('keeps a spawned process error unresolved through cancellation until late close', async () => {
+it.each(['disable', 'member_revision', 'default_permissions', 'registration', 'remove_member'])('preserves claimed process recovery after %s changes policy', async (change) => {
+  const run = await start(); const turn = (await repo.startSingleMemberTurn(run.id, run.generation))!
+  await repo.saveRegisteredExecutable({ id: 'echo', absolutePath: 'C:\\tool.exe', isEnabled: true, argumentPolicyJson: '[]' })
+  const approvals = createApprovalService(repo)
+  const execution = (await createToolEngine(repo, approvals).execute({ taskRunId: run.id, generation: run.generation, turnId: turn.id, agentId: agent.id }, { toolName: 'run_process', input: { executableId: 'echo', args: [] } })).execution
+  const approval = (await repo.getApprovalForToolExecution(execution.id))!
+  await approvals.approve(approval.id, approval.requestHash)
+  await repo.claimApprovedProcess(approval.id, new Date().toISOString())
+  if (change === 'disable' || change === 'member_revision') {
+    await repo.saveChannelAgent({ channelId, agentId: agent.id, isEnabled: change !== 'disable', modelConfigOverrideId: change === 'member_revision' ? modelConfigId : null, toolPermissionsOverride: null })
+  } else if (change === 'default_permissions') {
+    await repo.updateAgent(agent.id, { name: agent.name, avatar: agent.avatar, title: agent.title, systemPrompt: agent.systemPrompt, modelConfigId, defaultToolPermissions: {} })
+  } else if (change === 'registration') {
+    await repo.saveRegisteredExecutable({ id: 'echo', absolutePath: 'C:\\replacement.exe', isEnabled: true, argumentPolicyJson: '[]' })
+  } else await repo.removeChannelAgent(channelId, agent.id)
+  expect(await repo.getToolExecution(execution.id)).toMatchObject({ status: 'executing', processRecoveryRequired: false })
+  expect(await repo.getApprovalRequest(approval.id)).toMatchObject({ status: 'executing' })
+  db.close(); db = createDatabase({ filePath: join(directory, 'test.sqlite') }); repo = createRepositories(db); tasks = createTaskRunService(repo, 10)
+  expect(await tasks.recoverInterruptedTaskRuns()).toBe(1)
+  expect(await repo.getToolExecution(execution.id)).toMatchObject({ status: 'executing', processRecoveryRequired: true })
+  expect(await repo.getApprovalRequest(approval.id)).toMatchObject({ status: 'executing' })
+  await expect(tasks.resumeTaskRun(run.id, agent.id)).rejects.toThrow('未完成')
+  expect((await repo.getChannelTaskSnapshot(channelId)).resumeAllowed[run.id]).toBe(false)
+  await expect(ipc().invoke(IpcChannel.TaskRunTerminate, run.id)).rejects.toThrow('清理')
+  expect(await repo.getTaskRun(run.id)).toMatchObject({ status: 'paused', pauseReason: 'effect_cleanup_pending' })
+  await expect(start()).rejects.toThrow('继续或结束')
+  await tasks.acknowledgeProcessRecovery(run.id, execution.id)
+  expect(await repo.getToolExecution(execution.id)).toMatchObject({ status: 'cancelled', processRecoveryRequired: false })
+  expect(await tasks.cancelTaskRun(run.id)).toMatchObject({ status: 'cancelled' })
+  expect(await start()).toMatchObject({ status: 'running' })
+})
+
+it('keeps a spawned process error unresolved through policy change and cancellation until late close', async () => {
   vi.useFakeTimers()
   const run = await start(); const turn = (await repo.startSingleMemberTurn(run.id, run.generation))!
   await repo.saveRegisteredExecutable({ id: 'echo', absolutePath: 'C:\\tool.exe', isEnabled: true, argumentPolicyJson: '[]' })
@@ -142,6 +174,9 @@ it('keeps a spawned process error unresolved through cancellation until late clo
   vi.spyOn(processTools, 'executeRegisteredProcess').mockImplementation((options) => execute({ ...options, spawnProcess: vi.fn(() => child) as any }))
   const pending = createProcessToolService(repo, tasks).runApproved(approval.id)
   await vi.advanceTimersByTimeAsync(0)
+  await repo.saveChannelAgent({ channelId, agentId: agent.id, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  expect(await repo.getToolExecution(execution.id)).toMatchObject({ status: 'executing' })
+  expect(await repo.getApprovalRequest(approval.id)).toMatchObject({ status: 'executing' })
   const cancellation = tasks.cancelTaskRun(run.id)
   await vi.advanceTimersByTimeAsync(11)
   expect(await cancellation).toMatchObject({ status: 'paused', pauseReason: 'effect_cleanup_pending' })

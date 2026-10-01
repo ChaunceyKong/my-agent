@@ -17,14 +17,13 @@ export function parseSpeakerDecision(raw: string, members: ChannelAgent[], agent
   return { nextSpeaker: record.nextSpeaker as string | null, reason }
 }
 
-export function speakerSelectionPrompt(members: ChannelAgent[], agents: Agent[], latestMessage: string): string {
+export function speakerSelectionPrompt(members: ChannelAgent[], agents: Agent[], currentCeoGoal: string, latestAgentMessage: string): string {
   if (members.length > 100) throw new Error('调度成员过多')
   const roster = members.filter((member) => member.isEnabled).map((member) => {
     const agent = agents.find((item) => item.id === member.agentId)
     return agent && { id: agent.id, name: agent.name.slice(0, 80), title: agent.title.slice(0, 120) }
   }).filter(Boolean)
-  const input = latestMessage.slice(0, 3000)
-  const prompt = JSON.stringify({ members: roster, latestCompletedMessage: input })
+  const prompt = JSON.stringify({ members: roster, currentCeoGoal, latestCompletedAgentMessage: latestAgentMessage.slice(0, 3000) })
   if (Buffer.byteLength(prompt, 'utf8') > 12_000) throw new Error('调度上下文过长')
   return prompt
 }

@@ -159,7 +159,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
       if (agent) add(member.modelConfigOverrideId ?? agent.modelConfigId, `Agent ${agent.name}：角色提示、当前输入、完成的历史与摘要、任务状态、获准的脱敏工具结果`)
     }
     if (current.schedulerModelConfigId && enabled.length) {
-      if (channel?.speakerMode === 'automatic' && enabled.length > 1) add(current.schedulerModelConfigId, '自动选人：已启用成员 ID、名称、角色、最近完成消息（最多 3000 字）')
+      if (channel?.speakerMode === 'automatic' && enabled.length > 1) add(current.schedulerModelConfigId, '自动选人：已启用成员 ID、名称、角色、完整当前 CEO 目标、最近完成的 Agent 消息（最多 3000 字）')
       add(current.schedulerModelConfigId, '每 10 个完成轮次的摘要：此前摘要与已完成的会话前缀，不含原始工具输入')
     }
     for (const [modelConfigId, purposes] of requirements) {
@@ -180,7 +180,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
     if (kind === 'interrupt' && (run?.status !== 'running' || !current.draft.trim())) return
     if ((kind === 'continue' || kind === 'assign') && (!run || !current.resumeAllowed[run.id])) return
     invalidateAction()
-    const action: Action = { kind, agentId, runId: run?.id, generation: run?.generation, navigation, operation, projectId: state.projectId, channelId: state.channelId, modelConfigId: run?.modelConfigId ?? state.modelId, content: current.draft, mentions: current.mentions }
+    const action: Action = { kind, agentId, runId: run?.id, generation: run?.generation, navigation, operation, projectId: state.projectId, channelId: state.channelId, modelConfigId: kind === 'send' || kind === 'interrupt' ? state.modelId : run!.modelConfigId, content: current.draft, mentions: current.mentions }
     update({ sending: true })
     try { await refreshChannel(); if (currentAction(action)) await authorize(action); else finishAction(action) }
     catch { if (action.operation === operation) patch(action.channelId, { error: '授权状态读取失败，请重试' }); finishAction(action) }

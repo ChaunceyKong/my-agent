@@ -148,9 +148,10 @@ function invalidateTools(tx: Transaction, run: TaskRun): void {
 }
 
 function invalidateChangedToolPolicies(tx: Transaction, scope: SQL): void {
+  // A changed policy revokes future work; a claimed process remains unresolved until close or recovery acknowledgment.
   const pending = tx.select({ execution: toolExecutions, run: taskRuns }).from(toolExecutions)
     .innerJoin(taskRuns, eq(taskRuns.id, toolExecutions.taskRunId))
-    .where(and(scope, inArray(toolExecutions.status, ['executing', 'waiting_approval']), sql`${toolExecutions.id} NOT IN (SELECT execution_id FROM overwrite_publications WHERE state = 'effect_claimed')`)).all()
+    .where(and(scope, inArray(toolExecutions.status, ['executing', 'waiting_approval']), sql`${toolExecutions.id} NOT IN (SELECT execution_id FROM overwrite_publications WHERE state = 'effect_claimed')`, sql`NOT (${toolExecutions.toolName} = 'run_process' AND ${toolExecutions.status} = 'executing' AND ${toolExecutions.id} IN (SELECT tool_execution_id FROM approval_requests WHERE status = 'executing'))`)).all()
   for (const { execution, run } of pending) {
     if (currentExecutionPolicy(tx, run, execution) === execution.policySnapshotJson) continue
     const cancelled = tx.update(toolExecutions)

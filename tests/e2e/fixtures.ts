@@ -12,7 +12,7 @@ export interface Desktop {
   restart(): Promise<void>
 }
 
-interface RequestBody { model: string; messages: Array<{ role: string; content: string | null }>; stream: boolean }
+interface RequestBody { model: string; messages: Array<{ role: string; content: string | null }>; stream: boolean; max_tokens: number }
 export interface Provider {
   url: string
   requests: RequestBody[]

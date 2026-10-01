@@ -16,7 +16,7 @@ import { registerHandlers } from '../../electron/ipc/register-handlers'
 import { IpcChannel } from '../../shared/ipc-channels'
 import type { Agent, StreamEvent } from '../../shared/types'
 import { parseAgentMentions } from '../../electron/core/mention-parser'
-import { parseSpeakerDecision } from '../../electron/core/speaker-selector'
+import { parseSpeakerDecision, speakerSelectionPrompt } from '../../electron/core/speaker-selector'
 import { createCloudConsentService } from '../../electron/core/cloud-consent-service'
 
 let directory: string
@@ -44,7 +44,7 @@ beforeEach(async () => {
 afterEach(() => { database.close(); rmSync(directory, { recursive: true, force: true }) })
 
 const tokens = () => [{ agentId: first.id, start: 0, end: 6, text: '@Alpha' }, { agentId: second.id, start: 7, end: 12, text: '@Beta' }]
-it('pauses a scheduler whose configured context cannot fit input plus output reserve', async () => {
+it.each(['current_goal', 'latest_agent'])('pauses a scheduler whose configured context cannot fit %s plus output reserve', async (requiredInput) => {
   database.db.run(sql`UPDATE model_configs SET context_window = 2048, max_output_tokens = 512 WHERE id = ${modelConfigId}`)
   await repositories.setChannelScheduler(channelId, modelConfigId)
   await repositories.recordCloudConsent(projectId, modelConfigId)
@@ -53,14 +53,26 @@ it('pauses a scheduler whose configured context cannot fit input plus output res
     crypto: { isEncryptionAvailable: () => true, encryptString: (value) => Buffer.from(value), decryptString: (value) => value.toString() }, fetch })
   const runner = createSingleAgentRunner({ repositories, modelClient, taskRuns, toolEngine: createToolEngine(repositories, createApprovalService(repositories)) })
   const orchestrator = createSerialOrchestrator({ repositories, modelClient, taskRuns, runner })
-  const run = await taskRuns.startTaskRun(channelId, modelConfigId, 'goal')
-  const decision = await repositories.appendTaskRunEvent(run.id, run.generation, 'speaker_decided', { agentId: first.id })
-  const turn = await repositories.startAgentTurn(run.id, run.generation, first.id, decision.seq)
-  await repositories.completeAgentTurn(turn.id, '文'.repeat(600))
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, requiredInput === 'current_goal' ? '文'.repeat(600) : 'goal')
+  if (requiredInput === 'latest_agent') {
+    const decision = await repositories.appendTaskRunEvent(run.id, run.generation, 'speaker_decided', { agentId: first.id })
+    const turn = await repositories.startAgentTurn(run.id, run.generation, first.id, decision.seq)
+    await repositories.completeAgentTurn(turn.id, '文'.repeat(600))
+  }
   await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
   expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused' })
   expect(fetch).not.toHaveBeenCalled()
-  expect(await repositories.listAgentTurns(run.id)).toHaveLength(1)
+  expect(await repositories.listAgentTurns(run.id)).toHaveLength(requiredInput === 'current_goal' ? 0 : 1)
+})
+
+it('retains a complete long CEO goal while bounding only the latest Agent text', async () => {
+  const members = await repositories.listChannelAgents(channelId)
+  const agents = await repositories.listAgents()
+  const goal = 'goal '.repeat(650) + 'mandatory final requirement'
+  const data = JSON.parse(speakerSelectionPrompt(members, agents, goal, 'x'.repeat(4000)))
+  expect(data.currentCeoGoal).toBe(goal)
+  expect(data.latestCompletedAgentMessage).toBe('x'.repeat(3000))
+  expect(() => speakerSelectionPrompt(members, agents, '文'.repeat(4000), '')).toThrow('过长')
 })
 function setup(reply: (system: string, emit: (event: StreamEvent) => Promise<void>) => Promise<void>) {
   const modelClient: any = { requireCloudConsent: vi.fn().mockResolvedValue(undefined), streamChat: vi.fn(async (input: any, emit: any) => reply(input.messages[0].content, emit)) }
@@ -315,11 +327,16 @@ it('uses a configured scheduler and validates each decision before starting a Tu
   })
   modelClient.selectSpeaker = vi.fn().mockResolvedValueOnce(JSON.stringify({ nextSpeaker: first.id, reason: 'Assign Alpha' }))
     .mockResolvedValueOnce(JSON.stringify({ nextSpeaker: null, reason: 'Done' }))
-  const run = await taskRuns.startTaskRun(channelId, modelConfigId, 'Please collaborate')
+  const goal = 'Please collaborate '.repeat(180) + 'mandatory final requirement'
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, goal)
   await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
   expect((await repositories.listAgentTurns(run.id)).map((turn) => turn.agentId)).toEqual([first.id])
   expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'completed' })
   expect(modelClient.selectSpeaker).toHaveBeenCalledTimes(2)
+  expect(modelClient.selectSpeaker.mock.calls.map(([input]: [{ prompt: string }]) => JSON.parse(input.prompt))).toEqual([
+    expect.objectContaining({ currentCeoGoal: goal, latestCompletedAgentMessage: '' }),
+    expect.objectContaining({ currentCeoGoal: goal, latestCompletedAgentMessage: 'finished' }),
+  ])
   const decisions = (await repositories.listTaskRunEvents(run.id)).filter((event) => event.eventType === 'speaker_decided')
   expect(decisions.map((event) => event.displayReason)).toEqual(['Assign Alpha', 'Done'])
   expect(decisions.map((event) => JSON.parse(event.metadataJson))).toEqual([{ reason: 'automatic_selection' }, { reason: 'automatic_complete' }])

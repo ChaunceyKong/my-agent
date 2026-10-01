@@ -59,9 +59,12 @@ export function createSerialOrchestrator(deps: {
                   && currentMembers.length === members.length && currentMembers.every((member) => memberRevisions[member.agentId] === member.revision)
               }
               try {
-                const messages = (await deps.repositories.listMessages(run.channelId)).filter((message) => message.taskRunId === run.id && message.status === 'completed')
+                const messages = (await deps.repositories.listMessages(run.channelId)).filter((message) => message.taskRunId === run.id)
+                const goal = messages.filter((message) => message.origin === 'ceo' && ['sent', 'completed'].includes(message.status)).at(-1)
+                if (!goal) throw new Error('任务目标不存在')
+                const latestAgent = messages.filter((message) => message.origin === 'agent' && message.status === 'completed').at(-1)
                 const raw = await deps.modelClient.selectSpeaker({ projectId: input.projectId, modelConfigId: scheduler,
-                  taskRunId: run.id, prompt: speakerSelectionPrompt(members, agents, messages.at(-1)?.content ?? '') }, current)
+                  taskRunId: run.id, prompt: speakerSelectionPrompt(members, agents, goal.content, latestAgent?.content ?? '') }, current)
                 const decision = parseSpeakerDecision(raw, members, agents)
                 turn = await deps.repositories.commitSpeakerDecision({ taskRunId: run.id, generation: run.generation,
                   modelConfigId: scheduler, memberRevisions, ...decision }) ?? undefined

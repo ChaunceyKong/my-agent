@@ -1,6 +1,6 @@
 import type { StreamEvent } from '../../shared/types'
 import type { Repositories } from '../database/repositories'
-import { ModelInterventionError, type ModelClient } from './model-client'
+import { ModelClientError, ModelInterventionError, type ModelClient } from './model-client'
 import type { createSingleAgentRunner } from './single-agent-runner'
 import type { TaskRunService } from './task-run-service'
 import { parseSpeakerDecision, speakerSelectionPrompt } from './speaker-selector'
@@ -85,7 +85,8 @@ export function createSerialOrchestrator(deps: {
               } catch (error) {
                 const latest = await deps.repositories.getTaskRun(run.id)
                 if (latest?.status !== 'running' || latest.generation !== run.generation || latest.currentTurnId) return
-                const reason = error instanceof ModelInterventionError ? error.message : '自动调度不可用，请 CEO 指派下一位 Agent。'
+                const reason = error instanceof ModelInterventionError || error instanceof ModelClientError && error.interventionRequired
+                  ? error.message : '自动调度不可用，请 CEO 指派下一位 Agent。'
                 await deps.taskRuns.pauseTaskRun(run.id, reason, run.generation)
                 await send({ taskRunId: run.id, type: 'error', content: reason })
                 return

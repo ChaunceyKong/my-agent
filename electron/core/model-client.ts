@@ -307,6 +307,9 @@ export function createModelClient({
       try {
         await attemptCall(input, async () => await taskRuns.canAcceptChunk(input.taskRunId) && (!canSend || await canSend()), onModelSelected, async (modelConfig, signal, guard, observe) => {
           const supportsTools = await verify(modelConfig, false, signal)
+          if (!supportsTools && input.messages.some((message) => message.role === 'tool' || (message.role === 'assistant' && 'tool_calls' in message))) {
+            throw new ModelInterventionError('实际模型不支持原生工具对话，请 CEO 更换支持工具调用的模型后继续。')
+          }
           const tools = supportsTools ? input.tools : undefined
           const messages = !supportsTools && input.tools?.length
             ? [...input.messages, { role: 'system' as const, content: 'This model has no tool capability. Answer in ordinary text only. Do not claim to have read files, run commands, or made changes. Explain when a requested action requires a tool-capable model.' }]

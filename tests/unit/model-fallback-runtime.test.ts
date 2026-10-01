@@ -7,6 +7,7 @@ import { createRepositories, type Repositories } from '../../electron/database/r
 import { createCloudConsentService } from '../../electron/core/cloud-consent-service'
 import { createModelClient, type ModelClient } from '../../electron/core/model-client'
 import { createTaskRunService } from '../../electron/core/task-run-service'
+import { createSingleAgentRunner } from '../../electron/core/single-agent-runner'
 import type { StreamChatInput, StreamEvent } from '../../shared/types'
 
 let directory: string
@@ -263,4 +264,56 @@ it('a delayed stream event cannot emit completion after its 30-second attempt de
   release(); await flush()
   expect(events.map((event) => event.type)).toEqual(['delta', 'error'])
   expect(models()).toEqual(['primary'])
+})
+
+it('rejects native-tool history before sending to a completion-only fallback candidate', async () => {
+  const local = await client.saveModelConfig({ providerPreset: 'ollama', modelName: 'completion-only', apiKey: '' })
+  await client.saveModelConfig({ id: root, providerPreset: 'openai', modelName: 'primary', apiKey: '', fallbackConfigId: local.id })
+  await client.recordCloudConsent(input.projectId, root)
+  await repositories.recordToolResultConsent(input.projectId, root, 1)
+  input.hasToolObservations = true
+  input.messages.push({ role: 'assistant', content: null, tool_calls: [{ index: 0, id: 'prior', name: 'read_file', arguments: '{"path":"a.md"}' }] }, { role: 'tool', tool_call_id: 'prior', content: 'untrusted prior result' })
+  fetchImpl.mockImplementation((url) => String(url).endsWith('/api/show') ? new Response(JSON.stringify({ capabilities: ['completion'] }), { headers: { 'content-type': 'application/json' } }) : http(503))
+  await expect(chat()).rejects.toThrow('请 CEO 更换支持工具调用的模型')
+  expect(models()).toEqual(['primary', 'primary'])
+  expect(fetchImpl.mock.calls.filter(([url]) => String(url).endsWith('/api/show'))).toHaveLength(1)
+  expect(events).toEqual([])
+})
+
+it('pauses a pinned tool continuation when live capabilities disappear, without a second completion request or effect replay', async () => {
+  const local = await client.saveModelConfig({ providerPreset: 'ollama', modelName: 'local', apiKey: '', fallbackConfigId: fallback })
+  const run = (await repositories.getTaskRun(input.taskRunId))!
+  const agent = await repositories.createAgent({ name: 'Local reader', title: 'reader', avatar: null, systemPrompt: 'Inspect authorized data', modelConfigId: local.id, defaultToolPermissions: { read_file: true } })
+  const member = await repositories.saveChannelAgent({ channelId: run.channelId, agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  const turn = (await repositories.startSingleMemberTurn(run.id, run.generation))!
+  let metadataCalls = 0
+  fetchImpl.mockImplementation((url) => {
+    if (String(url).endsWith('/api/show')) return new Response(JSON.stringify({ capabilities: ++metadataCalls === 1 ? ['completion', 'tools'] : ['completion'] }), { headers: { 'content-type': 'application/json' } })
+    return new Response('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"once","function":{"name":"read_file","arguments":"{\\"path\\":\\"a.md\\"}"}}]},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })
+  })
+  let effects = 0
+  const execute = vi.fn(async (context, request) => {
+    const execution = await repositories.createToolExecution(context, request)
+    return { execution: await repositories.finishToolExecution(execution.id, () => { effects += 1; return { status: 'completed', riskLevel: 'low', resultSummary: 'read complete' } }) }
+  })
+  const runner = createSingleAgentRunner({ repositories, taskRuns, modelClient: client, toolEngine: { execute } as any })
+  const outcome = await runner.run({ taskRunId: run.id, projectId: input.projectId, channelId: run.channelId, turnId: turn.id, generation: run.generation,
+    active: { agent, modelConfigId: local.id, memberRevision: member.revision }, onEvent: async (event) => { events.push(event) } })
+  expect(outcome).toMatchObject({ status: 'paused', reason: expect.stringContaining('请 CEO 更换支持工具调用的模型') })
+  expect(metadataCalls).toBe(2); expect(models()).toEqual(['local'])
+  expect(effects).toBe(1); expect(execute).toHaveBeenCalledTimes(1)
+  expect((await repositories.listToolExecutions(run.id))[0]).toMatchObject({ status: 'completed', resultSummary: 'read complete' })
+  expect(events.some((event) => event.type === 'complete')).toBe(false)
+})
+
+it('retains ordinary text mode for a completion-only model when there is no native-tool history', async () => {
+  const local = await client.saveModelConfig({ providerPreset: 'ollama', modelName: 'completion-only', apiKey: '' })
+  input.modelConfigId = local.id
+  input.tools = [{ type: 'function', function: { name: 'read_file', description: 'read authorized files', parameters: { type: 'object' } } }]
+  fetchImpl.mockImplementation((url) => String(url).endsWith('/api/show') ? new Response(JSON.stringify({ capabilities: ['completion'] }), { headers: { 'content-type': 'application/json' } }) : sse())
+  await chat()
+  expect(models()).toEqual(['completion-only'])
+  const body = JSON.parse(fetchImpl.mock.calls.find(([url]) => String(url).endsWith('/chat/completions'))![1].body)
+  expect(body.tools).toBeUndefined(); expect(body.messages.at(-1).content).toContain('ordinary text only')
+  expect(events.at(-1)?.type).toBe('complete')
 })

@@ -9,7 +9,8 @@ import { createTaskRunService } from '../../electron/core/task-run-service'
 import { createSingleAgentRunner } from '../../electron/core/single-agent-runner'
 import { createSerialOrchestrator } from '../../electron/core/serial-orchestrator'
 import { createSessionSummaryService } from '../../electron/core/session-summary-service'
-import { ModelClientError, ModelInterventionError } from '../../electron/core/model-client'
+import { createModelClient, ModelClientError, ModelInterventionError } from '../../electron/core/model-client'
+import { createCloudConsentService } from '../../electron/core/cloud-consent-service'
 import { registerHandlers } from '../../electron/ipc/register-handlers'
 import { IpcChannel } from '../../shared/ipc-channels'
 import type { Agent, StreamEvent } from '../../shared/types'
@@ -43,7 +44,7 @@ beforeEach(async () => {
   }
   agent = await repositories.createAgent({ name: 'Alpha', title: 'test', avatar: null, systemPrompt: 'Inspect the authorized data', modelConfigId: primaryId, defaultToolPermissions: { read_file: true } })
 })
-afterEach(() => { database.close(); rmSync(directory, { recursive: true, force: true }) })
+afterEach(() => { vi.useRealTimers(); database.close(); rmSync(directory, { recursive: true, force: true }) })
 
 async function select(onSelected: any, id = backupId) {
   await onSelected({ configuredModelConfigId: primaryId, actualModelConfigId: id, modelSnapshot: JSON.stringify(await repositories.getModelConfig(id)) })
@@ -238,4 +239,37 @@ it.each(['exhausted', 'missing fallback consent'])('pauses a summary for %s and 
   await summarize(run.id)
   expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused' })
   expect(await repositories.getLatestSessionSummary(channelId)).toEqual(prior)
+})
+
+it.each(['speaker', 'summary'].flatMap((consumer) => ['401', 'deadline', 'ollama'].map((failure) => ({ consumer, failure }))))('preserves the controlled $failure pause reason from a real $consumer request', async ({ consumer, failure }) => {
+  if (failure === 'ollama') await repositories.updateModelConfig(primaryId, { ...(await repositories.getModelConfig(primaryId))!, providerPreset: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', encryptedApiKey: '' })
+  await enableAgent(); await repositories.setChannelScheduler(channelId, primaryId)
+  if (consumer === 'speaker') {
+    const other = await repositories.createAgent({ ...agent, name: 'Beta' })
+    await repositories.saveChannelAgent({ channelId, agentId: other.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  }
+  const run = await taskRuns.startTaskRun(channelId, primaryId, 'goal')
+  if (consumer === 'summary') for (let index = 0; index < 10; index++) {
+    const decision = await repositories.appendTaskRunEvent(run.id, run.generation, 'speaker_decided', { agentId: agent.id })
+    const turn = await repositories.startAgentTurn(run.id, run.generation, agent.id, decision.seq)
+    await repositories.completeAgentTurn(turn.id, 'completed prefix')
+  }
+  const fetchImpl = vi.fn(() => {
+    if (failure === 'deadline') return new Promise<Response>(() => {})
+    if (failure === 'ollama') throw Object.assign(new TypeError('secret transport body'), { cause: { code: 'ECONNREFUSED' } })
+    return Promise.resolve(new Response('secret Provider body', { status: 401 }))
+  })
+  const modelClient = createModelClient({ repositories, taskRuns, consent: createCloudConsentService(repositories), fetch: fetchImpl,
+    crypto: { isEncryptionAvailable: () => true, encryptString: (key) => Buffer.from(key), decryptString: () => 'safe-key' } })
+  if (failure === 'deadline') vi.useFakeTimers()
+  const pending = consumer === 'speaker'
+    ? createSerialOrchestrator({ repositories, taskRuns, modelClient, runner: {} as any }).run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
+    : createSessionSummaryService(repositories, modelClient, taskRuns)(run.id)
+  if (failure === 'deadline') await vi.advanceTimersByTimeAsync(120000)
+  await pending
+  const reason = failure === '401' ? '模型服务拒绝凭证，请检查 API 密钥配置' : failure === 'ollama' ? '请先启动 Ollama 服务' : '模型调用超过 120 秒，请重试'
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused', pauseReason: reason })
+  expect(reason).not.toContain('secret')
+  expect(fetchImpl).toHaveBeenCalledTimes(failure === 'deadline' ? 4 : 1)
+  if (consumer === 'summary') expect(await repositories.getLatestSessionSummary(channelId)).toBeUndefined()
 })

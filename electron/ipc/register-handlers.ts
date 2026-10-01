@@ -124,7 +124,11 @@ export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, mode
   ipcMain.handle(IpcChannel.ModelDefaultSet, (_event, id: unknown) => repositories.setDefaultScheduler(id === null ? null : validId(id)))
   ipcMain.handle(IpcChannel.MessageList, (_event, channelId: string) => repositories.listMessages(channelId))
   ipcMain.handle(IpcChannel.TaskRunList, (_event, channelId: string) => repositories.listTaskRuns(channelId))
-  ipcMain.handle(IpcChannel.TaskRunSnapshot, (_event, channelId: unknown) => repositories.getChannelTaskSnapshot(validId(channelId)))
+  ipcMain.handle(IpcChannel.TaskRunSnapshot, async (_event, channelId: unknown) => {
+    const snapshot = await repositories.getChannelTaskSnapshot(validId(channelId))
+    for (const run of snapshot.runs) if (taskRuns?.hasActiveEffects(run.id)) snapshot.resumeAllowed[run.id] = false
+    return snapshot
+  })
   ipcMain.handle(IpcChannel.CloudConsentHas, (_event, projectId: string, modelConfigId: string) => repositories.hasCloudConsent(projectId, modelConfigId))
   ipcMain.handle(IpcChannel.CloudConsentGrant, async (_event, projectId: string, modelConfigId: string, scope: unknown) => {
     const project = (await repositories.listProjects()).find((item) => item.id === projectId)

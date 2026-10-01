@@ -55,20 +55,25 @@ it('surfaces cleanup timeout as paused and blocks resume/new send until cleanup 
   const run = await start(); const effect = deferred(); const pending = tasks.trackEffect(run.id, () => effect.promise)
   expect(await tasks.cancelTaskRun(run.id)).toMatchObject({ status: 'paused', pauseReason: 'effect_cleanup_pending' })
   await expect(tasks.resumeTaskRun(run.id)).rejects.toThrow('清理')
+  expect((await ipc().invoke(IpcChannel.TaskRunSnapshot, channelId)).resumeAllowed[run.id]).toBe(false)
   await expect(start()).rejects.toThrow('继续或结束')
   effect.resolve(); await pending
   expect(await tasks.cancelTaskRun(run.id)).toMatchObject({ status: 'cancelled' })
 })
 
-it('requires explicit continuation after approval rejection and starts a fresh generation/Turn', async () => {
+it.each(['rejected', 'expired'])('requires explicit continuation after approval is %s and starts a fresh generation/Turn', async (decision) => {
   const run = await start(); const turn = (await repo.startSingleMemberTurn(run.id, run.generation))!
-  const approvals = createApprovalService(repo)
+  let approvalNow = new Date()
+  const approvals = createApprovalService(repo, () => approvalNow)
   const engine = createToolEngine(repo, approvals)
   const execution = (await engine.execute({ taskRunId: run.id, generation: run.generation, turnId: turn.id, agentId: agent.id }, { toolName: 'run_process', input: { executableId: 'x', args: [] } })).execution
   await repo.markAgentTurnWaiting(turn.id, execution.id)
+  expect((await repo.getChannelTaskSnapshot(channelId)).resumeAllowed[run.id]).toBe(false)
   await expect(tasks.resumeTaskRun(run.id)).rejects.toThrow('未完成')
   const approval = (await repo.getApprovalForToolExecution(execution.id))!
-  await approvals.reject(approval.id, approval.requestHash)
+  if (decision === 'rejected') await approvals.reject(approval.id, approval.requestHash)
+  else { approvalNow = new Date(approvalNow.getTime() + 6 * 60 * 1000); await approvals.expire(approval.id) }
+  expect((await repo.getChannelTaskSnapshot(channelId)).resumeAllowed[run.id]).toBe(true)
   expect(await repo.getTaskRun(run.id)).toMatchObject({ status: 'running', generation: run.generation, currentTurnId: turn.id })
   const resumed = await tasks.resumeTaskRun(run.id)
   expect(resumed).toMatchObject({ status: 'running', generation: run.generation + 1, turnCount: 2 })

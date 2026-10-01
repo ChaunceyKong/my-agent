@@ -347,6 +347,7 @@ export interface ChannelTaskSnapshot {
   members: ChannelAgent[]
   messages: Message[]
   runs: TaskRun[]
+  resumeAllowed: Record<string, boolean>
   turns: AgentTurn[]
   events: Array<Omit<TaskRunEvent, 'metadataJson'>>
 }

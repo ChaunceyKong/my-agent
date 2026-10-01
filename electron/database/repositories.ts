@@ -1235,7 +1235,19 @@ export function createRepositories(client: DatabaseClient): Repositories {
         if (!channel) throw new Error('群聊不存在')
         const runs = tx.select().from(taskRuns).where(eq(taskRuns.channelId, channelId)).orderBy(asc(taskRuns.createdAt), asc(taskRuns.id)).all()
         const ids = runs.map((run) => run.id)
-        return { channel, runs,
+        const resumeAllowed = Object.fromEntries(runs.map((run) => {
+          const waiting = run.currentTurnId && tx.select().from(agentTurns).where(eq(agentTurns.id, run.currentTurnId)).get()
+          const eligible = run.status === 'paused' || (run.status === 'running' && waiting && waiting.status === 'waiting_approval')
+          const outstanding = tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id),
+            or(inArray(toolExecutions.status, ['executing', 'waiting_approval']), eq(toolExecutions.processRecoveryRequired, true)))).get()
+          const pendingApproval = tx.select({ id: approvalRequests.id }).from(approvalRequests).innerJoin(toolExecutions, eq(toolExecutions.id, approvalRequests.toolExecutionId))
+            .where(and(eq(toolExecutions.taskRunId, run.id), inArray(approvalRequests.status, ['pending', 'approved', 'executing']),
+              inArray(toolExecutions.status, ['executing', 'waiting_approval']))).get()
+          const journal = tx.select({ id: overwritePublications.executionId }).from(overwritePublications).innerJoin(toolExecutions, eq(toolExecutions.id, overwritePublications.executionId))
+            .where(and(eq(toolExecutions.taskRunId, run.id), inArray(overwritePublications.state, ['preparing', 'staged', 'publishing', 'effect_claimed', 'published', 'cleanup_pending', 'needs_recovery']))).get()
+          return [run.id, !!eligible && !outstanding && !pendingApproval && !journal && !runs.some((other) => other.id !== run.id && ['running', 'cancelling', 'paused'].includes(other.status))]
+        }))
+        return { channel, runs, resumeAllowed,
           schedulerModelConfigId: channel.schedulerModelConfigId ?? tx.select().from(modelSettings).where(eq(modelSettings.id, 1)).get()?.schedulerModelConfigId ?? null,
           agents: tx.select().from(agents).all().map(({ systemPrompt: _prompt, ...agent }) => agent),
           members: tx.select().from(channelAgents).where(eq(channelAgents.channelId, channelId)).all(),

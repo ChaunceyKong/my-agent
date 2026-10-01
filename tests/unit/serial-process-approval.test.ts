@@ -37,10 +37,12 @@ it('records approved process completion without terminalizing the collaborative 
     await repositories.markAgentTurnWaiting(turn.id, execution.id)
     const approval = (await repositories.getApprovalForToolExecution(execution.id))!
     await approvals.approve(approval.id, approval.requestHash)
+    expect((await repositories.getChannelTaskSnapshot(channel.id)).resumeAllowed[run.id]).toBe(false)
     await createProcessToolService(repositories, createTaskRunService(repositories)).runApproved(approval.id)
     expect(await repositories.getToolExecution(execution.id)).toMatchObject({ status: 'completed' })
     expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'running', currentTurnId: turn.id })
     expect((await repositories.listAgentTurns(run.id))[0].status).toBe('waiting_approval')
+    expect((await repositories.getChannelTaskSnapshot(channel.id)).resumeAllowed[run.id]).toBe(true)
     expect((await repositories.listTaskRunEvents(run.id)).filter((event) => event.eventType === 'tool_decided')).toHaveLength(1)
     await expect(repositories.createStartedTaskRun({ channelId: channel.id, modelConfigId: model.id, content: 'next' })).rejects.toThrow('继续或结束')
   } finally { database.close() }

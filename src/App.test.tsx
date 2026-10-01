@@ -19,7 +19,7 @@ const reply = (content: string, overrides: Partial<Message> = {}): Message => ({
 let durable: ChannelTaskSnapshot; let emit: (event: StreamEvent) => void; let api: AgentTeamApi; let unsubscribe: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
-  durable = { channel, schedulerModelConfigId: null, agents: [], members: [], messages: [], runs: [], turns: [], events: [] }
+  durable = { channel, resumeAllowed: {}, schedulerModelConfigId: null, agents: [], members: [], messages: [], runs: [], turns: [], events: [] }
   unsubscribe = vi.fn()
   api = {
     agents: { list: vi.fn().mockResolvedValue([]), get: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn() },
@@ -113,6 +113,7 @@ it('waits for persisted cancellation and discards late output', async () => {
 })
 it('shows persisted pause and scheduling reason after initialization and allows explicit assign', async () => {
   team(); durable.runs = [run({ status: 'paused', pauseReason: '请 CEO 指派下一位', turnCount: 2 })]
+  durable.resumeAllowed = { 'run-1': true }
   durable.events = [{ id: 'e1', taskRunId: 'run-1', seq: 9, generation: 0, eventType: 'speaker_decided', agentId: 'a1', messageId: null, toolExecutionId: null, displayReason: '优先核对计划', createdAt: '' }]
   render(<App />); await ready(); expect(screen.getByLabelText('CEO 任务控制')).toHaveTextContent('优先核对计划'); expect(screen.getByRole('button', { name: '发送消息' })).toBeDisabled()
   await userEvent.selectOptions(screen.getByLabelText('下一位 Agent'), 'a2'); await userEvent.click(screen.getByRole('button', { name: '指派并继续' })); await waitFor(() => expect(api.tasks.assign).toHaveBeenCalledWith('run-1', 'a2'))
@@ -120,6 +121,11 @@ it('shows persisted pause and scheduling reason after initialization and allows 
 it('disables resume during a pending approval while keeping the Run running', async () => {
   team(); durable.runs = [run({ currentTurnId: 'turn-1', turnCount: 1 })]; durable.turns = [turn({ status: 'waiting_approval' })]
   render(<App />); await ready(); expect(screen.getByRole('button', { name: '继续当前任务' })).toBeDisabled(); expect(screen.getByLabelText('CEO 任务控制')).toHaveTextContent('下一位 Agent 不会发言')
+})
+it.each(['approved effect', 'rejected approval', 'expired approval'])('enables explicit continue and assign after Main confirms %s is terminal', async () => {
+  team(); durable.runs = [run({ currentTurnId: 'turn-1', turnCount: 1 })]; durable.turns = [turn({ status: 'waiting_approval' })]; durable.resumeAllowed = { 'run-1': true }
+  render(<App />); await ready(); expect(screen.getByRole('button', { name: '继续当前任务' })).toBeEnabled(); expect(screen.getByLabelText('CEO 任务控制')).toHaveTextContent('等待 CEO 继续')
+  await userEvent.selectOptions(screen.getByLabelText('下一位 Agent'), 'a2'); expect(screen.getByRole('button', { name: '指派并继续' })).toBeEnabled()
 })
 it('does not grant process recovery until manual stop and verification is checked', async () => {
   render(<ToolCard items={[{ id: 't1', taskRunId: 'run-1', toolName: 'run_process', riskLevel: 'high', status: 'failed', resultSummary: null, createdAt: '', processRecoveryRequired: true }]} onChanged={() => {}} />)

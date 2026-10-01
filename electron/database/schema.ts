@@ -102,6 +102,8 @@ export const modelConfigs = sqliteTable('model_configs', {
   baseUrl: text('base_url').notNull(),
   modelName: text('model_name').notNull(),
   encryptedApiKey: text('encrypted_api_key').notNull(),
+  contextWindow: integer('context_window'),
+  maxOutputTokens: integer('max_output_tokens'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 })
@@ -456,6 +458,12 @@ export function migrate(sqlite: Database.Database): void {
     sqlite.transaction(() => {
       sqlite.exec('ALTER TABLE task_run_events ADD COLUMN display_reason TEXT')
       sqlite.pragma('user_version = 13')
+    })()
+  }
+  if (Number(sqlite.pragma('user_version', { simple: true })) < 14) {
+    sqlite.transaction(() => {
+      sqlite.exec('ALTER TABLE model_configs ADD COLUMN context_window INTEGER; ALTER TABLE model_configs ADD COLUMN max_output_tokens INTEGER; CREATE UNIQUE INDEX session_summaries_prefix_idx ON session_summaries(task_run_id, covered_through_seq)')
+      sqlite.pragma('user_version = 14')
     })()
   }
 }

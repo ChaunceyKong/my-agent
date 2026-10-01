@@ -58,6 +58,19 @@ async function createProjectAndModel(): Promise<{ projectId: string; modelConfig
 }
 
 describe('scheduler request', () => {
+  it('requires exact summary consent and bounds multilingual prompt and Provider response', async () => {
+    const { projectId, modelConfigId } = await createProjectAndModel()
+    const other = await client.saveModelConfig({ providerPreset: 'openai', modelName: 'other', apiKey: 'secret' })
+    await expect(client.summarizeSession({ projectId, modelConfigId: other.id, taskRunId: 'run', prompt: 'private' }, async () => true)).rejects.toThrow('consent')
+    await expect(client.summarizeSession({ projectId, modelConfigId, taskRunId: 'run', prompt: '文'.repeat(3000) }, async () => true)).rejects.toThrow('预算不足')
+    await expect(client.summarizeSession({ projectId, modelConfigId, taskRunId: 'run', prompt: 'private' }, async () => false)).rejects.toThrow('失效')
+    expect(fetchImpl).not.toHaveBeenCalled()
+    fetchImpl.mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: 'summary' } }] }), { headers: { 'content-type': 'application/json' } }))
+    expect(await client.summarizeSession({ projectId, modelConfigId, taskRunId: 'run', prompt: 'private' }, async () => true)).toBe('summary')
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toMatchObject({ stream: false, max_tokens: 1024 })
+    fetchImpl.mockResolvedValueOnce(new Response('x'.repeat(17000), { headers: { 'content-type': 'application/json' } }))
+    await expect(client.summarizeSession({ projectId, modelConfigId, taskRunId: 'run', prompt: 'private' }, async () => true)).rejects.toThrow('过长')
+  })
   it('does not send any scheduling context without exact Project/ModelConfig consent', async () => {
     const { projectId, modelConfigId } = await createProjectAndModel()
     const other = (await repositories.saveModelConfig({ providerPreset: 'openai', baseUrl: 'https://example.test', modelName: 'other', encryptedApiKey: 'secret' })).id
@@ -215,7 +228,7 @@ describe('OpenAI-compatible streaming', () => {
     expect(fetchImpl).toHaveBeenCalledWith('https://api.deepseek.com/chat/completions', expect.objectContaining({
       method: 'POST',
       headers: expect.objectContaining({ Authorization: 'Bearer secret' }),
-      body: JSON.stringify({ model: 'deepseek-chat', messages: [{ role: 'user', content: '你好' }], stream: true }),
+      body: JSON.stringify({ model: 'deepseek-chat', messages: [{ role: 'user', content: '你好' }], stream: true, max_tokens: 1024 }),
     }))
   })
 

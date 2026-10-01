@@ -4,6 +4,7 @@ import type { ModelClient } from './model-client'
 import type { createSingleAgentRunner } from './single-agent-runner'
 import type { TaskRunService } from './task-run-service'
 import { parseSpeakerDecision, speakerSelectionPrompt } from './speaker-selector'
+import { createSessionSummaryService } from './session-summary-service'
 
 /** One durable Turn at a time; every model decision is rechecked at commit. */
 export function createSerialOrchestrator(deps: {
@@ -12,6 +13,7 @@ export function createSerialOrchestrator(deps: {
   taskRuns: TaskRunService
   runner: ReturnType<typeof createSingleAgentRunner>
 }) {
+  const summarize = createSessionSummaryService(deps.repositories, deps.modelClient)
   return {
     async run(input: { taskRunId: string; projectId: string; channelId: string; onEvent(event: StreamEvent): Promise<void> }): Promise<void> {
       const send = input.onEvent
@@ -102,7 +104,14 @@ export function createSerialOrchestrator(deps: {
             if (failed) await send({ taskRunId: run.id, type: 'error', content: outcome.reason })
             return
           }
+          if (outcome.status === 'paused') {
+            await deps.repositories.finishAgentTurn(turn.id, 'failed')
+            await deps.repositories.pauseTaskRun(run.id, outcome.reason)
+            await send({ taskRunId: run.id, type: 'error', content: outcome.reason })
+            return
+          }
           await deps.repositories.completeAgentTurn(turn.id, outcome.content)
+          await summarize(run.id)
         }
       } catch {
         const run = await deps.repositories.getTaskRun(input.taskRunId)

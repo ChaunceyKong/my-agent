@@ -348,7 +348,7 @@ it('preserves existing runs and generation on repeated migration', () => {
     migrate(sqlite)
     migrate(sqlite)
     expect(sqlite.prepare('SELECT id, generation, status FROM task_runs').get()).toEqual({ id: 'r', generation: 0, status: 'running' })
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(13)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(14)
   } finally { sqlite.close() }
 })
 

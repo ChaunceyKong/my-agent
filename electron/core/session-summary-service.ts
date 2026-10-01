@@ -1,0 +1,45 @@
+import type { Repositories } from '../database/repositories'
+import type { ModelClient } from './model-client'
+
+/** Summaries cover a completed prefix only; they are never a source of state or routing. */
+export function createSessionSummaryService(repositories: Repositories, modelClient: ModelClient) {
+  return async (taskRunId: string): Promise<void> => {
+    const run = await repositories.getTaskRun(taskRunId)
+    if (!run || run.status !== 'running' || run.currentTurnId) return
+    const completed = (await repositories.listTaskRunEvents(run.id)).filter((event) => event.eventType === 'turn_completed')
+    if (completed.length < 10) return
+    const cutoff = completed[Math.floor(completed.length / 10) * 10 - 1].seq
+    const previous = await repositories.getLatestSessionSummary(run.channelId)
+    if (previous?.taskRunId === run.id && previous.coveredThroughSeq >= cutoff) return
+    const channel = await repositories.getChannel(run.channelId)
+    if (!channel?.schedulerModelConfigId) return
+    const config = await repositories.getModelConfig(channel.schedulerModelConfigId)
+    if (!config) return
+    const snapshotMembers = async () => {
+      const members = (await repositories.listChannelAgents(run.channelId)).filter((member) => member.isEnabled).sort((a, b) => a.agentId.localeCompare(b.agentId))
+      return JSON.stringify(await Promise.all(members.map(async (member) => ({ member, agent: await repositories.getAgent(member.agentId) }))))
+    }
+    const memberSnapshot = await snapshotMembers()
+    const modelSnapshot = JSON.stringify(config)
+    const current = async () => {
+      const latest = await repositories.getTaskRun(run.id)
+      const currentChannel = await repositories.getChannel(run.channelId)
+      return latest?.status === 'running' && latest.generation === run.generation && !latest.currentTurnId
+        && currentChannel?.schedulerModelConfigId === config.id && JSON.stringify(await repositories.getModelConfig(config.id)) === modelSnapshot
+        && await snapshotMembers() === memberSnapshot && await repositories.hasCloudConsent(channel.projectId, config.id)
+    }
+    try {
+      await modelClient.requireCloudConsent(channel.projectId, config.id)
+      const history = (await repositories.listMessages(run.channelId)).filter((message) => message.taskRunId === run.id && message.taskRunSeq !== null
+        && message.taskRunSeq <= cutoff && (message.status === 'completed' || (message.origin === 'ceo' && message.status === 'sent'))
+        && !(previous?.taskRunId === run.id && message.taskRunSeq <= previous.coveredThroughSeq))
+      const prompt = JSON.stringify({ coveredThroughSeq: cutoff, previousSummary: previous?.content ?? null,
+        conversation: history.map((message) => ({ seq: message.taskRunSeq, author: message.authorName, text: message.content })) })
+      const content = await modelClient.summarizeSession({ projectId: channel.projectId, modelConfigId: config.id, taskRunId: run.id, prompt }, current)
+      if (!await current()) return
+      await repositories.saveSessionSummary({ taskRunId: run.id, generation: run.generation, coveredThroughSeq: cutoff, content, modelConfigId: config.id, modelSnapshot, memberSnapshot })
+    } catch {
+      // A failed attempt preserves the old summary. A later completed Turn retries the same prefix.
+    }
+  }
+}

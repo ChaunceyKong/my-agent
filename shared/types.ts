@@ -228,6 +228,8 @@ export interface SaveModelConfigInput {
   baseUrl?: string
   modelName: string
   apiKey: string
+  contextWindow?: number | null
+  maxOutputTokens?: number | null
 }
 
 export interface ModelConfigSummary {
@@ -236,6 +238,8 @@ export interface ModelConfigSummary {
   baseUrl: string
   modelName: string
   hasApiKey: boolean
+  contextWindow?: number | null
+  maxOutputTokens?: number | null
 }
 
 export interface SendMessageInput {

@@ -13,11 +13,13 @@ it('upgrades v12 events without altering authorization metadata and is idempoten
     sqlite.exec(`
       PRAGMA user_version = 12;
       CREATE TABLE task_run_events (id TEXT PRIMARY KEY, metadata_json TEXT NOT NULL);
+      CREATE TABLE model_configs (id TEXT PRIMARY KEY);
+      CREATE TABLE session_summaries (task_run_id TEXT, covered_through_seq INTEGER);
       INSERT INTO task_run_events VALUES ('decision', '{"reason":"automatic_selection"}');
     `)
     migrate(sqlite)
     migrate(sqlite)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(13)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(14)
     expect(sqlite.prepare('SELECT id,metadata_json,display_reason FROM task_run_events').get()).toEqual({
       id: 'decision', metadata_json: '{"reason":"automatic_selection"}', display_reason: null,
     })
@@ -46,7 +48,7 @@ it('migrates real v10 shaped rows, pauses duplicate running runs and keeps legac
       INSERT INTO messages VALUES ('old','c','r1','agent','AI','private reply','completed','now');
     `)
     migrate(sqlite)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(13)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(14)
     expect(sqlite.prepare('SELECT id,status,generation,pause_reason FROM task_runs ORDER BY id').all()).toEqual([
       { id: 'r1', status: 'paused', generation: 1, pause_reason: 'migration_duplicate_running' },
       { id: 'r2', status: 'paused', generation: 1, pause_reason: 'migration_duplicate_running' },
@@ -87,7 +89,7 @@ it.each([3, 4])('upgrades original v%i schema with existing run and message thro
     sqlite.pragma(`user_version = ${version}`)
     migrate(sqlite)
     migrate(sqlite)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(13)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(14)
     expect(sqlite.prepare('SELECT id,generation,status FROM task_runs').get()).toEqual({ id: 'r', generation: 0, status: 'running' })
     expect(sqlite.prepare('SELECT id,agent_id,origin,content FROM messages').get()).toEqual({ id: 'msg', agent_id: null, origin: 'legacy', content: 'historical reply' })
     expect(sqlite.prepare('SELECT count(*) AS n FROM audit_events').get()).toEqual({ n: 0 })

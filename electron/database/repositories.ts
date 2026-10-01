@@ -14,6 +14,7 @@ import type {
   CreateChannelInput,
   CreateProjectInput,
   Message,
+  SessionSummary,
   TaskRunEvent,
   TaskRunEventType,
   ModelProviderPreset,
@@ -33,7 +34,8 @@ import { hashToolRequest, toolAuditEvent } from '../core/audit-service'
 import { makeTaskRunEvent, type EventMetadata } from '../core/orchestrator-events'
 import { parseAgentMentions } from '../core/mention-parser'
 import type { AppDatabase, DatabaseClient } from './client'
-import { agentTurns, agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, mentionQueue, messages, modelConfigs, overwritePublications, projects, registeredExecutables, taskRunEvents, taskRuns, toolExecutions } from './schema'
+import { agentTurns, agents, approvalRequests, auditEvents, channelAgents, channels, cloudConsents, toolResultConsents, mentionQueue, messages, modelConfigs, overwritePublications, projects, registeredExecutables, sessionSummaries, taskRunEvents, taskRuns, toolExecutions } from './schema'
+import { validateModelBudget } from '../core/context-manager'
 
 export interface ToolContext {
   taskRunId: string
@@ -167,6 +169,8 @@ export interface SaveModelConfigRecordInput {
   baseUrl: string
   modelName: string
   encryptedApiKey: string
+  contextWindow?: number | null
+  maxOutputTokens?: number | null
 }
 
 export interface ModelConfigRecord extends SaveModelConfigRecordInput {
@@ -176,6 +180,8 @@ export interface ModelConfigRecord extends SaveModelConfigRecordInput {
 }
 
 export interface Repositories {
+  getLatestSessionSummary(channelId: string): Promise<SessionSummary | undefined>
+  saveSessionSummary(input: { taskRunId: string; generation: number; coveredThroughSeq: number; content: string; modelConfigId: string; modelSnapshot: string; memberSnapshot: string }): Promise<SessionSummary>
   createToolExecution(context: ToolContext, request: ToolRequest): Promise<ToolExecution>
   getToolExecution(id: string): Promise<ToolExecution | undefined>
   listToolExecutions(taskRunId: string): Promise<ToolExecution[]>
@@ -246,6 +252,29 @@ export interface Repositories {
 
 export function createRepositories(client: DatabaseClient): Repositories {
   return {
+    async getLatestSessionSummary(channelId) {
+      return client.db.select().from(sessionSummaries).where(eq(sessionSummaries.channelId, channelId)).orderBy(sql`rowid DESC`).limit(1).get()
+    },
+    async saveSessionSummary(input) {
+      return client.db.transaction((tx) => {
+        const run = tx.select().from(taskRuns).where(eq(taskRuns.id, input.taskRunId)).get()
+        const channel = run && tx.select().from(channels).where(eq(channels.id, run.channelId)).get()
+        const config = tx.select().from(modelConfigs).where(eq(modelConfigs.id, input.modelConfigId)).get()
+        const members = run && tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.isEnabled, true))).all()
+        const identities = members?.map((member) => ({ member, agent: tx.select().from(agents).where(eq(agents.id, member.agentId)).get() })).sort((a, b) => a.member.agentId.localeCompare(b.member.agentId))
+        if (!run || run.status !== 'running' || run.generation !== input.generation || run.currentTurnId || channel?.schedulerModelConfigId !== input.modelConfigId
+          || JSON.stringify(config) !== input.modelSnapshot || JSON.stringify(identities) !== input.memberSnapshot
+          || !tx.select().from(cloudConsents).where(and(eq(cloudConsents.projectId, channel.projectId), eq(cloudConsents.modelConfigId, input.modelConfigId))).get()) throw new Error('摘要状态已失效')
+        const cutoff = tx.select().from(taskRunEvents).where(and(eq(taskRunEvents.taskRunId, run.id), eq(taskRunEvents.seq, input.coveredThroughSeq), eq(taskRunEvents.eventType, 'turn_completed'))).get()
+        if (!cutoff || !Number.isSafeInteger(input.coveredThroughSeq) || !input.content.trim() || Buffer.byteLength(input.content, 'utf8') > 8000) throw new Error('摘要内容无效')
+        const prior = tx.select().from(sessionSummaries).where(eq(sessionSummaries.taskRunId, run.id)).orderBy(sql`${sessionSummaries.coveredThroughSeq} DESC`).limit(1).get()
+        if (prior && prior.coveredThroughSeq >= input.coveredThroughSeq) return prior
+        const saved = tx.insert(sessionSummaries).values({ id: randomUUID(), channelId: run.channelId, taskRunId: run.id,
+          coveredThroughSeq: input.coveredThroughSeq, content: input.content, modelConfigId: input.modelConfigId, createdAt: new Date().toISOString() }).returning().get()!
+        appendEvent(tx, run, 'summary_created')
+        return saved
+      })
+    },
     async createToolExecution(context, request) {
       return client.db.transaction((tx) => {
         const run = tx.select().from(taskRuns).where(eq(taskRuns.id, context.taskRunId)).get()
@@ -1059,10 +1088,13 @@ export function createRepositories(client: DatabaseClient): Repositories {
     },
 
     async saveModelConfig(input: SaveModelConfigRecordInput): Promise<ModelConfigRecord> {
+      validateModelBudget(input)
       const timestamp = new Date().toISOString()
       const modelConfig: ModelConfigRecord = {
         id: randomUUID(),
         ...input,
+        contextWindow: input.contextWindow ?? null,
+        maxOutputTokens: input.maxOutputTokens ?? null,
         createdAt: timestamp,
         updatedAt: timestamp,
       }

@@ -6,6 +6,10 @@ const call = (name = 'read_file', args: unknown = { path: 'a.md' }, id = 'call-1
 function setup(responses: Array<string | ReturnType<typeof call>>, execution: { id?: string; status: string; resultSummary: string | null } = { status: 'completed', resultSummary: '完成' }, result?: unknown) {
   let index = 0
   const repositories: any = { getTaskRun: vi.fn().mockResolvedValue({ id: 'r', status: 'running', generation: 0, currentTurnId: 't' }), listMessages: vi.fn().mockResolvedValue([]), listChannelAgents: vi.fn().mockResolvedValue([{ channelId: 'c', agentId: 'a', isEnabled: true, modelConfigOverrideId: null, revision: 'v1' }]), getAgent: vi.fn().mockResolvedValue(agent), hasToolResultConsent: vi.fn().mockResolvedValue(true) }
+  repositories.getModelConfig = vi.fn().mockResolvedValue({ id: 'm', contextWindow: 32768, maxOutputTokens: 1024 })
+  repositories.getLatestSessionSummary = vi.fn().mockResolvedValue(undefined)
+  repositories.listToolExecutions = vi.fn().mockResolvedValue([])
+  repositories.listApprovalRequests = vi.fn().mockResolvedValue([])
   const modelClient: any = { streamChat: vi.fn(async (_input: any, emit: any) => { const response = responses[index++]; if (typeof response === 'string') await emit({ taskRunId: 'r', type: 'delta', content: response }); else await emit({ taskRunId: 'r', type: 'tool_call', toolCall: { ...response, index: 0 } }); await emit({ taskRunId: 'r', type: 'complete' }) }) }
   const taskRuns: any = { canAcceptChunk: vi.fn().mockResolvedValue(true), finishTaskRun: vi.fn().mockResolvedValue({}) }
   const toolEngine: any = { execute: vi.fn().mockResolvedValue({ execution: { id: 'e', ...execution }, result }) }
@@ -80,4 +84,19 @@ it('redacts credentials and applies a UTF-8 byte cap to tool observations', () =
   const output = sanitizeToolObservation('ok', { path: '.env/token.txt', content: `normal text ${root}/.env and ${root.replaceAll('\\', '/')}/credentials/key\nAuthorization: Bearer abc123\n{"api_key":"x","cookie":"y"}\n` + '😀'.repeat(6000), truncated: false } as any, root)
   expect(output).not.toContain('abc123'); expect(output).not.toContain('"x"'); expect(output).not.toContain('token.txt'); expect(output).not.toContain(root); expect(output).not.toContain('.env')
   expect(Buffer.byteLength(output, 'utf8')).toBeLessThanOrEqual(12_000)
+})
+
+it('pauses before another model hop when sanitized tool data exceeds the total context budget', async () => {
+  const { runner, modelClient, repositories, toolEngine } = setup([call(), 'must not be sent'], { status: 'completed', resultSummary: 'read' }, { path: 'a.md', content: '文'.repeat(4000), truncated: false })
+  repositories.getModelConfig.mockResolvedValue({ id: 'm', contextWindow: 8192, maxOutputTokens: 1024 })
+  expect(await runner.run({ ...turn, onEvent: async () => {} })).toMatchObject({ status: 'paused', reason: expect.stringContaining('预算不足') })
+  expect(modelClient.streamChat).toHaveBeenCalledTimes(1)
+  expect(toolEngine.execute).toHaveBeenCalledTimes(1)
+})
+
+it('keeps per-hop tool-result consent even when a context budget is available', async () => {
+  const { runner, modelClient, repositories } = setup([call(), 'must not send'])
+  repositories.hasToolResultConsent.mockResolvedValue(false)
+  expect(await runner.run({ ...turn, onEvent: async () => {} })).toMatchObject({ status: 'failed', reason: expect.stringContaining('工具结果上传授权') })
+  expect(modelClient.streamChat).toHaveBeenCalledTimes(1)
 })

@@ -17,6 +17,13 @@ beforeEach(async () => {
 afterEach(async () => { await rm(fixture, { recursive: true, force: true }) })
 
 describe('readTextFile', () => {
+  it('reads a native workspace file after listing its directory', async () => {
+    await listDirectory(root, '.')
+    await expect(readTextFile(root, 'nested/hello.txt')).resolves.toMatchObject({
+      path: 'nested/hello.txt', content: '你好 world\nsecond world',
+    })
+  })
+
   it('returns UTF-8 text with relative paths and content-free summary', async () => {
     const result = await readTextFile(root, 'nested/hello.txt')
     expect(result).toMatchObject({ path: 'nested/hello.txt', content: '你好 world\nsecond world', truncated: false, bytes: 25 })

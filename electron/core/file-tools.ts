@@ -37,7 +37,10 @@ async function readBoundedText(root: string, path: string): Promise<{ content: s
   const file = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
   try {
     const opened = await file.stat()
-    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) {
+    // Electron on Windows can report a different `dev` for FileHandle.stat()
+    // than lstat(). Inode equality binds the open handle; subsequent path-race
+    // checks compare lstat observations only.
+    if (!opened.isFile() || opened.ino !== before.ino) {
       throw new FileToolError('FILE_CHANGED', '文件在读取前发生变化')
     }
     await resolveSafePath(root, path)
@@ -54,7 +57,7 @@ async function readBoundedText(root: string, path: string): Promise<{ content: s
     const after = await file.stat()
     const current = await lstat(await resolveSafePath(root, path))
     if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs
-      || current.dev !== opened.dev || current.ino !== opened.ino) {
+      || current.dev !== before.dev || current.ino !== before.ino) {
       throw new FileToolError('FILE_CHANGED', '文件在读取期间发生变化')
     }
     let content: string

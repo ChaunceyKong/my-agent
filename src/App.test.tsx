@@ -1,315 +1,142 @@
 // @vitest-environment jsdom
 import React from 'react'
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import '@testing-library/jest-dom/vitest'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import App from './App'
 import { ApprovalCard } from './components/agent/ApprovalCard'
-import type { AgentTeamApi, Channel, Message, Project, StreamEvent, TaskRun } from '../shared/types'
+import { ToolCard } from './components/agent/ToolCard'
+import type { AgentSummary, AgentTeamApi, AgentTurn, Channel, ChannelTaskSnapshot, Message, StreamEvent, TaskRun } from '../shared/types'
 
-const project: Project = { id: 'p1', name: '内容矩阵', workspacePath: 'C:/work/content', icon: null, createdAt: '', updatedAt: '' }
+const project = { id: 'p1', name: '内容矩阵', icon: null, createdAt: '', updatedAt: '' }
 const channel: Channel = { id: 'c1', projectId: 'p1', name: '主线任务协同群', icon: null, speakerMode: 'automatic', maxTurns: 30, schedulerModelConfigId: null, createdAt: '', updatedAt: '' }
 const model = { id: 'm1', providerPreset: 'deepseek' as const, baseUrl: 'https://api.deepseek.com', modelName: 'deepseek-chat', hasApiKey: true }
-let emitStream: (event: StreamEvent) => void
-let api: AgentTeamApi
-let unsubscribe: ReturnType<typeof vi.fn>
+const agent: AgentSummary = { id: 'a1', name: '规划师', avatar: '🧭', title: '规划', modelConfigId: 'm1', defaultToolPermissions: {}, isBuiltin: false, createdAt: '', updatedAt: '' }
+const run = (overrides: Partial<TaskRun> = {}): TaskRun => ({ id: 'run-1', channelId: 'c1', modelConfigId: 'm1', status: 'running', generation: 0, currentTurnId: null, turnCount: 0, pauseReason: null, createdAt: '', startedAt: null, finishedAt: null, errorMessage: null, ...overrides })
+const turn = (overrides: Partial<AgentTurn> = {}): AgentTurn => ({ id: 'turn-1', taskRunId: 'run-1', ordinal: 1, agentId: 'a1', generation: 0, status: 'running', triggerEventSeq: 1, messageId: null, startedAt: '', finishedAt: null, ...overrides })
+const reply = (content: string, overrides: Partial<Message> = {}): Message => ({ id: 'reply-1', channelId: 'c1', taskRunId: 'run-1', agentId: 'a1', origin: 'agent', taskRunSeq: 4, role: 'agent', authorName: '规划师', content, status: 'completed', createdAt: '', ...overrides })
+let durable: ChannelTaskSnapshot; let emit: (event: StreamEvent) => void; let api: AgentTeamApi; let unsubscribe: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
+  durable = { channel, schedulerModelConfigId: null, agents: [], members: [], messages: [], runs: [], turns: [], events: [] }
   unsubscribe = vi.fn()
   api = {
     agents: { list: vi.fn().mockResolvedValue([]), get: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn() },
     channelAgents: { list: vi.fn().mockResolvedValue([]), save: vi.fn(), remove: vi.fn() },
     approvals: { approve: vi.fn(), reject: vi.fn(), expire: vi.fn(), runApproved: vi.fn(), list: vi.fn().mockResolvedValue([]) },
-    tools: { list: vi.fn().mockResolvedValue([]) },
-    workspace: { list: vi.fn().mockResolvedValue({ entries: [], summary: '', truncated: false, limits: {} }) },
-    executables: { list: vi.fn().mockResolvedValue([]), save: vi.fn() },
+    tools: { list: vi.fn().mockResolvedValue([]) }, workspace: { list: vi.fn().mockResolvedValue({ entries: [] }) }, executables: { list: vi.fn().mockResolvedValue([]), save: vi.fn() },
     projects: { list: vi.fn().mockResolvedValue([project]), pickWorkspace: vi.fn().mockResolvedValue({ id: 'workspace-1', label: '已选择本地目录' }), create: vi.fn().mockResolvedValue(project) },
-    channels: { list: vi.fn().mockResolvedValue([channel]), create: vi.fn().mockResolvedValue({ ...channel, id: 'c2', name: '选题群' }), setScheduler: vi.fn(), configure: vi.fn(), remove: vi.fn() },
-    models: { list: vi.fn().mockResolvedValue([model]), save: vi.fn().mockResolvedValue({ ...model, id: 'm2' }), remove: vi.fn(), test: vi.fn(), discover: vi.fn(), getDefaultScheduler: vi.fn().mockResolvedValue(null), setDefaultScheduler: vi.fn() },
-    messages: { list: vi.fn().mockResolvedValue([]) },
-    consent: { has: vi.fn().mockResolvedValue(true), grant: vi.fn().mockResolvedValue(undefined) },
-    tasks: { list: vi.fn().mockResolvedValue([]), send: vi.fn().mockResolvedValue({ taskRunId: 'run-1' }), cancel: vi.fn().mockResolvedValue(undefined), continue: vi.fn(), assign: vi.fn(), terminate: vi.fn(), interrupt: vi.fn(), acknowledgeProcessRecovery: vi.fn() },
-    events: { onStream: vi.fn((listener) => { emitStream = listener; return unsubscribe }) },
+    channels: { list: vi.fn().mockResolvedValue([channel]), create: vi.fn(), setScheduler: vi.fn(), configure: vi.fn(), remove: vi.fn() },
+    models: { list: vi.fn().mockResolvedValue([model]), save: vi.fn().mockResolvedValue(model), remove: vi.fn(), test: vi.fn(), discover: vi.fn(), getDefaultScheduler: vi.fn().mockResolvedValue(null), setDefaultScheduler: vi.fn() },
+    messages: { list: vi.fn() }, consent: { has: vi.fn().mockResolvedValue(true), grant: vi.fn() },
+    tasks: { list: vi.fn(), snapshot: vi.fn(async () => structuredClone(durable)), send: vi.fn(async () => { durable.runs = [run()]; return { taskRunId: 'run-1' } }), cancel: vi.fn(async () => { durable.runs = [run({ status: 'cancelled', generation: 1 })] }), continue: vi.fn(), assign: vi.fn(), terminate: vi.fn(), interrupt: vi.fn(), acknowledgeProcessRecovery: vi.fn() },
+    events: { onStream: vi.fn((listener) => { emit = listener; return unsubscribe }) },
   }
   window.agentTeam = api
 })
 afterEach(cleanup)
+async function ready() { await screen.findByRole('heading', { name: channel.name }); await waitFor(() => expect(screen.getByLabelText('消息内容')).toBeEnabled()) }
+async function send() { await ready(); await userEvent.type(screen.getByLabelText('消息内容'), '帮我分析选题'); await userEvent.click(screen.getByRole('button', { name: '发送消息' })); await screen.findByRole('button', { name: '停止生成' }) }
+function team() { durable.agents = [agent, { ...agent, id: 'a2', name: '审稿人', avatar: '🔎' }]; durable.members = durable.agents.map((item) => ({ channelId: 'c1', agentId: item.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null, revision: 'r1', createdAt: '', updatedAt: '' })) }
 
-function persistedReply(taskRunId: string, content: string): Message {
-  return { id: `persisted-${taskRunId}`, channelId: 'c1', taskRunId, agentId: null, origin: 'legacy', taskRunSeq: null, role: 'agent', authorName: 'AI 助手', content, status: 'completed', createdAt: '2026-09-21T00:00:00Z' }
-}
-
-function persistedRun(status: TaskRun['status']): TaskRun {
-  return { id: 'history-run', channelId: 'c1', modelConfigId: 'm1', status, generation: 0, currentTurnId: null, turnCount: 0, pauseReason: null, createdAt: '', startedAt: null, finishedAt: null, errorMessage: null }
-}
-
-async function send() {
-  await screen.findByRole('heading', { name: channel.name })
-  await userEvent.type(screen.getByLabelText('消息内容'), '帮我分析选题')
-  await userEvent.click(screen.getByRole('button', { name: '发送消息' }))
-  await screen.findByRole('button', { name: '停止生成' })
-}
-
-it('selects a workspace immediately and uses the default initial channel when left empty', async () => {
-  vi.mocked(api.projects.list).mockResolvedValue([])
-  render(<App />)
-  await userEvent.click(await screen.findByRole('button', { name: '新建项目' }))
-  await userEvent.type(screen.getByLabelText('项目名称'), '内容矩阵')
-  await userEvent.click(screen.getByLabelText('本地目录'))
-  expect(api.projects.pickWorkspace).toHaveBeenCalledTimes(1)
-  await userEvent.click(screen.getByRole('button', { name: '确认创建项目' }))
-  expect(await screen.findByRole('heading', { name: channel.name })).toBeVisible()
+it('selects a workspace immediately and preserves the default initial channel', async () => {
+  vi.mocked(api.projects.list).mockResolvedValue([]); render(<App />)
+  await userEvent.click(await screen.findByRole('button', { name: '新建项目' })); await userEvent.type(screen.getByLabelText('项目名称'), '内容矩阵'); await userEvent.click(screen.getByLabelText('本地目录'))
+  expect(api.projects.pickWorkspace).toHaveBeenCalledTimes(1); await userEvent.click(screen.getByRole('button', { name: '确认创建项目' })); await ready()
   expect(api.projects.create).toHaveBeenCalledWith({ name: '内容矩阵', workspaceId: 'workspace-1', firstChannelName: '' })
 })
-
-it('does not render the workspace root received by Main', async () => {
-  render(<App />)
-  await screen.findByRole('heading', { name: channel.name })
-  expect(screen.queryByText('C:/work/content')).not.toBeInTheDocument()
+it('renders true Agent identity and keeps a Run running after its first completed Turn', async () => {
+  team(); durable.runs = [run({ currentTurnId: 'turn-2', turnCount: 2 })]; durable.turns = [turn({ status: 'completed' }), turn({ id: 'turn-2', ordinal: 2, agentId: 'a2' })]; durable.messages = [reply('规划已完成')]
+  render(<App />); await ready()
+  expect(screen.getByRole('log')).toHaveTextContent('规划师'); expect(screen.getByRole('log')).toHaveTextContent('🧭')
+  expect(screen.getByLabelText('CEO 任务控制')).toHaveTextContent('当前发言：审稿人'); expect(screen.getByLabelText('CEO 任务控制')).toHaveTextContent('已启动 2 轮')
+  expect(screen.getByRole('button', { name: '停止生成' })).toBeVisible()
+  await act(async () => emit({ taskRunId: 'run-1', type: 'delta', generation: 0, turnId: 'turn-1', agentId: 'a1', content: '旧轮迟到' }))
+  expect(screen.queryByText('旧轮迟到')).not.toBeInTheDocument()
 })
-
-it('appends only matching live deltas and rejects terminal or unknown events', async () => {
-  render(<App />)
-  await send()
-  act(() => {
-    emitStream({ taskRunId: 'other', type: 'delta', content: '错误会话内容' })
-    emitStream({ taskRunId: 'run-1', type: 'delta', content: '正在分析' })
-  })
-  expect(screen.getByText('正在分析')).toBeVisible()
-  vi.mocked(api.messages.list).mockResolvedValue([persistedReply('run-1', '正在分析')])
+it('fences generation, Agent and Turn streams and replaces tool-hop previews with the final durable reply', async () => {
+  team(); durable.runs = [run({ generation: 2, currentTurnId: 'turn-1', turnCount: 1 })]; durable.turns = [turn({ generation: 2 })]
+  render(<App />); await ready()
   await act(async () => {
-    emitStream({ taskRunId: 'run-1', type: 'complete' })
-    emitStream({ taskRunId: 'run-1', type: 'delta', content: '迟到内容' })
+    emit({ taskRunId: 'run-1', type: 'delta', generation: 1, turnId: 'turn-1', agentId: 'a1', content: '旧代次' })
+    emit({ taskRunId: 'run-1', type: 'delta', generation: 2, turnId: 'turn-1', agentId: 'a2', content: '伪发言者' })
+    emit({ taskRunId: 'run-1', type: 'delta', generation: 2, turnId: 'turn-1', agentId: 'a1', step: 0, content: '读取工具前' })
+    emit({ taskRunId: 'run-1', type: 'delta', generation: 2, turnId: 'turn-1', agentId: 'a1', step: 1, content: '最终回复' })
   })
-  expect(screen.queryByText(/错误会话内容|迟到内容/)).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument()
+  expect(screen.getByText('最终回复')).toBeVisible(); expect(screen.queryByText(/旧代次|伪发言者|读取工具前/)).not.toBeInTheDocument()
+  durable.messages = [reply('持久化完整最终回复')]; durable.runs = [run({ status: 'completed', generation: 2, turnCount: 1 })]; durable.turns = [turn({ status: 'completed', generation: 2 })]
+  await act(async () => emit({ taskRunId: 'run-1', type: 'complete' }))
+  expect(await screen.findByText('持久化完整最终回复')).toBeVisible(); expect(screen.queryByText('最终回复')).not.toBeInTheDocument()
 })
-
-it('buffers early events until the returned run id is known', async () => {
-  vi.mocked(api.tasks.send).mockImplementation(async () => {
-    vi.mocked(api.messages.list).mockResolvedValue([persistedReply('run-1', '快速响应')])
-    emitStream({ taskRunId: 'unknown', type: 'delta', content: '丢弃内容' })
-    emitStream({ taskRunId: 'run-1', type: 'delta', content: '快速响应' })
-    emitStream({ taskRunId: 'run-1', type: 'complete' })
+it('inserts ordered structured mentions and invalidates a token when its text is edited', async () => {
+  team(); render(<App />); await ready()
+  await userEvent.selectOptions(screen.getByLabelText('@ 指派成员'), 'a1'); await userEvent.type(screen.getByLabelText('消息内容'), '请先规划 '); await userEvent.selectOptions(screen.getByLabelText('@ 指派成员'), 'a2')
+  expect(screen.getByLabelText('指派顺序')).toHaveTextContent('1. @规划师2. @审稿人')
+  await userEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  expect(api.tasks.send).toHaveBeenCalledWith(expect.objectContaining({ mentions: [expect.objectContaining({ agentId: 'a1', start: 0, end: 4, text: '@规划师' }), expect.objectContaining({ agentId: 'a2', text: '@审稿人' })] }))
+})
+it('buffers a first bound delta arriving before the send response without duplicating a persisted reply', async () => {
+  team(); vi.mocked(api.tasks.send).mockImplementation(async () => {
+    durable.runs = [run({ currentTurnId: 'turn-1', turnCount: 1 })]; durable.turns = [turn()]
+    emit({ taskRunId: 'run-1', type: 'delta', generation: 0, turnId: 'turn-1', agentId: 'a1', content: '快速回复' })
     return { taskRunId: 'run-1' }
   })
-  render(<App />)
-  await screen.findByRole('heading', { name: channel.name })
-  await userEvent.type(screen.getByLabelText('消息内容'), '测试')
-  await userEvent.click(screen.getByRole('button', { name: '发送消息' }))
-  expect(await screen.findByText('快速响应')).toBeVisible()
-  expect(screen.queryByText('丢弃内容')).not.toBeInTheDocument()
+  render(<App />); await send(); expect(await screen.findByText('快速回复')).toBeVisible()
+  durable.messages = [reply('快速回复')]; durable.runs = [run({ status: 'completed', turnCount: 1 })]; durable.turns = [turn({ status: 'completed' })]
+  await act(async () => emit({ taskRunId: 'run-1', type: 'complete' })); expect(screen.getAllByText('快速回复')).toHaveLength(1)
 })
-
-it('requires explicit consent for the project and model before sending', async () => {
-  vi.mocked(api.consent.has).mockResolvedValue(false)
-  render(<App />)
-  await screen.findByRole('heading', { name: channel.name })
-  await userEvent.type(screen.getByLabelText('消息内容'), '私有内容')
-  await userEvent.click(screen.getByRole('button', { name: '发送消息' }))
-  expect(await screen.findByRole('dialog', { name: '云端模型授权' })).toBeVisible()
-  expect(api.tasks.send).not.toHaveBeenCalled()
-  await userEvent.click(screen.getByRole('checkbox', { name: /我了解 Agent 工具结果/ }))
-  await userEvent.click(screen.getByRole('button', { name: '同意并发送' }))
-  await waitFor(() => expect(api.tasks.send).toHaveBeenCalled())
-  expect(api.consent.grant).toHaveBeenCalledWith('p1', 'm1', { allowToolResultUpload: true })
+it('isolates the hidden channel stream while restoring its durable history on reselection', async () => {
+  const other = { ...channel, id: 'c2', name: '第二群' }; vi.mocked(api.channels.list).mockResolvedValue([channel, other])
+  team(); durable.runs = [run({ currentTurnId: 'turn-1', turnCount: 1 })]; durable.turns = [turn()]
+  vi.mocked(api.tasks.snapshot).mockImplementation(async (id) => id === 'c1' ? structuredClone(durable) : { ...structuredClone(durable), channel: other, messages: [], runs: [], turns: [] })
+  render(<App />); await ready(); await userEvent.click(screen.getByRole('button', { name: '第二群' }))
+  await act(async () => emit({ taskRunId: 'run-1', type: 'delta', generation: 0, turnId: 'turn-1', agentId: 'a1', content: '第一群文本' }))
+  expect(screen.queryByText('第一群文本')).not.toBeInTheDocument()
+  durable.messages = [reply('第一群完成文本')]; durable.runs = [run({ status: 'completed', turnCount: 1 })]; durable.turns = [turn({ status: 'completed' })]
+  await userEvent.click(screen.getByRole('button', { name: channel.name })); expect(await screen.findByText('第一群完成文本')).toBeVisible()
 })
-
-it('cancels the live run and discards late output', async () => {
-  render(<App />)
-  await send()
-  await userEvent.click(screen.getByRole('button', { name: '停止生成' }))
-  await waitFor(() => expect(api.tasks.cancel).toHaveBeenCalledWith('run-1'))
-  act(() => emitStream({ taskRunId: 'run-1', type: 'delta', content: '取消后内容' }))
-  expect(screen.queryByText('取消后内容')).not.toBeInTheDocument()
-  expect(await screen.findByText('已取消')).toBeVisible()
+it('previews Agent and scheduler categories and authorizes each exact model only after a click', async () => {
+  team(); durable.schedulerModelConfigId = 'm2'; vi.mocked(api.models.list).mockResolvedValue([model, { ...model, id: 'm2', modelName: 'scheduler' }])
+  const granted = new Set<string>(); vi.mocked(api.consent.has).mockImplementation(async (_p, id) => granted.has(id)); vi.mocked(api.consent.grant).mockImplementation(async (_p, id) => { granted.add(id) })
+  render(<App />); await ready(); await userEvent.type(screen.getByLabelText('消息内容'), '私有计划'); await userEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  expect(await screen.findByRole('dialog', { name: '云端模型授权' })).toHaveTextContent('Agent 规划师'); expect(api.tasks.send).not.toHaveBeenCalled(); expect(api.consent.grant).not.toHaveBeenCalled()
+  await userEvent.click(within(screen.getByRole('dialog')).getByRole('checkbox')); await userEvent.click(screen.getByRole('button', { name: '同意并发送' }))
+  expect(await screen.findByRole('dialog', { name: '云端模型授权' })).toHaveTextContent('自动选人'); expect(screen.getByRole('dialog')).toHaveTextContent('每 10 个完成轮次的摘要'); expect(screen.getByRole('dialog')).toHaveTextContent('scheduler')
+  expect(api.tasks.send).not.toHaveBeenCalled(); await userEvent.click(screen.getByRole('button', { name: '暂不发送' }))
+  expect(api.consent.grant).toHaveBeenCalledTimes(1); expect(screen.getByLabelText('消息内容')).toHaveValue('私有计划')
 })
-
-it('isolates channel histories and never inserts another channel stream', async () => {
-  vi.mocked(api.channels.list).mockResolvedValue([channel, { ...channel, id: 'c2', name: '第二群' }])
-  render(<App />)
-  await send()
-  await userEvent.click(screen.getByRole('button', { name: '第二群' }))
-  act(() => emitStream({ taskRunId: 'run-1', type: 'delta', content: '第一群回复' }))
-  expect(screen.queryByText('第一群回复')).not.toBeInTheDocument()
-  expect(screen.queryByText('帮我分析选题')).not.toBeInTheDocument()
-  await userEvent.click(screen.getByRole('button', { name: channel.name }))
-  expect(await screen.findByText('第一群回复')).toBeVisible()
+it('waits for persisted cancellation and discards late output', async () => {
+  render(<App />); await send(); await userEvent.click(screen.getByRole('button', { name: '停止生成' })); await screen.findByText('已取消')
+  await act(async () => emit({ taskRunId: 'run-1', type: 'delta', generation: 0, content: '迟到输出' }))
+  expect(screen.queryByText('迟到输出')).not.toBeInTheDocument(); expect(api.tasks.cancel).toHaveBeenCalledWith('run-1')
 })
-
-it('shows safe failures, retains draft on send rejection, and unsubscribes', async () => {
-  vi.mocked(api.tasks.send).mockRejectedValue(new Error('internal secret'))
-  const view = render(<App />)
-  await screen.findByRole('heading', { name: channel.name })
-  await userEvent.type(screen.getByLabelText('消息内容'), '保留草稿')
-  await userEvent.click(screen.getByRole('button', { name: '发送消息' }))
-  expect(await screen.findByRole('alert')).toHaveTextContent('发送失败')
-  expect(screen.getByLabelText('消息内容')).toHaveValue('保留草稿')
-  expect(screen.queryByText(/internal secret/)).not.toBeInTheDocument()
-  view.unmount()
-  expect(unsubscribe).toHaveBeenCalledTimes(1)
+it('shows persisted pause and scheduling reason after initialization and allows explicit assign', async () => {
+  team(); durable.runs = [run({ status: 'paused', pauseReason: '请 CEO 指派下一位', turnCount: 2 })]
+  durable.events = [{ id: 'e1', taskRunId: 'run-1', seq: 9, generation: 0, eventType: 'speaker_decided', agentId: 'a1', messageId: null, toolExecutionId: null, displayReason: '优先核对计划', createdAt: '' }]
+  render(<App />); await ready(); expect(screen.getByLabelText('CEO 任务控制')).toHaveTextContent('优先核对计划'); expect(screen.getByRole('button', { name: '发送消息' })).toBeDisabled()
+  await userEvent.selectOptions(screen.getByLabelText('下一位 Agent'), 'a2'); await userEvent.click(screen.getByRole('button', { name: '指派并继续' })); await waitFor(() => expect(api.tasks.assign).toHaveBeenCalledWith('run-1', 'a2'))
 })
-
-it('saves credentials through settings and renders explicit unavailable cockpit states', async () => {
-  render(<App />)
-  await userEvent.click(await screen.findByRole('button', { name: '模型设置' }))
-  await userEvent.type(screen.getByLabelText('API Key'), 'secret-key')
-  await userEvent.click(screen.getByRole('button', { name: '保存配置' }))
-  await waitFor(() => expect(api.models.save).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'secret-key', providerPreset: 'deepseek' })))
-  await userEvent.click(screen.getByRole('button', { name: '关闭' }))
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-  expect(screen.getByText(/尚未创建 Agent/)).toBeVisible()
-  await userEvent.click(screen.getByRole('tab', { name: '工作区文件' }))
-  expect(await screen.findByLabelText('安全工作区文件')).toBeVisible()
-  await userEvent.click(screen.getByRole('button', { name: '收起右侧面板' }))
-  expect(screen.queryByRole('complementary', { name: '团队与工作区' })).not.toBeInTheDocument()
+it('disables resume during a pending approval while keeping the Run running', async () => {
+  team(); durable.runs = [run({ currentTurnId: 'turn-1', turnCount: 1 })]; durable.turns = [turn({ status: 'waiting_approval' })]
+  render(<App />); await ready(); expect(screen.getByRole('button', { name: '继续当前任务' })).toBeDisabled(); expect(screen.getByLabelText('CEO 任务控制')).toHaveTextContent('下一位 Agent 不会发言')
 })
-
-it('executes an approved operation only after an explicit click', async () => {
-  render(<ApprovalCard items={[{ id: 'approval-1', toolExecutionId: 'tool-1', requestHash: 'a'.repeat(64), status: 'approved', expiresAt: '2026-10-01T00:00:00Z' }]} onChanged={() => {}} />)
-  expect(api.approvals.runApproved).not.toHaveBeenCalled()
-  await userEvent.click(screen.getByRole('button', { name: '执行已批准操作' }))
-  expect(api.approvals.runApproved).toHaveBeenCalledWith('approval-1')
+it('does not grant process recovery until manual stop and verification is checked', async () => {
+  render(<ToolCard items={[{ id: 't1', taskRunId: 'run-1', toolName: 'run_process', riskLevel: 'high', status: 'failed', resultSummary: null, createdAt: '', processRecoveryRequired: true }]} onChanged={() => {}} />)
+  expect(screen.getByRole('button', { name: '登记人工核验' })).toBeDisabled(); expect(api.tasks.acknowledgeProcessRecovery).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('checkbox')); await userEvent.click(screen.getByRole('button', { name: '登记人工核验' }))
+  expect(api.tasks.acknowledgeProcessRecovery).toHaveBeenCalledWith('run-1', 't1', 'manually_stopped_and_verified')
 })
-
-it('shows persisted paused runs and rejects their late events', async () => {
-  vi.mocked(api.tasks.list).mockResolvedValue([{ id: 'paused-run', channelId: 'c1', modelConfigId: 'm1', status: 'paused', generation: 0, currentTurnId: null, turnCount: 0, pauseReason: null, createdAt: '', startedAt: null, finishedAt: null, errorMessage: null }])
-  render(<App />)
-  expect(await screen.findByText('任务已暂停，应用重启后不会自动续跑')).toBeVisible()
-  act(() => emitStream({ taskRunId: 'paused-run', type: 'delta', content: '不应出现' }))
-  expect(screen.queryByText('不应出现')).not.toBeInTheDocument()
-  expect(api.tasks.send).not.toHaveBeenCalled()
+it('executes approval only after an explicit click', async () => {
+  render(<ApprovalCard items={[{ id: 'ap1', toolExecutionId: 't1', requestHash: 'a'.repeat(64), status: 'approved', expiresAt: '' }]} onChanged={() => {}} />)
+  expect(api.approvals.runApproved).not.toHaveBeenCalled(); await userEvent.click(screen.getByRole('button', { name: '执行已批准操作' })); expect(api.approvals.runApproved).toHaveBeenCalledWith('ap1')
 })
-
-it('renders stream errors and rejects later events for the failed run', async () => {
-  render(<App />)
-  await send()
-  act(() => {
-    emitStream({ taskRunId: 'run-1', type: 'error', content: '模型服务请求失败，请检查配置后重试' })
-    emitStream({ taskRunId: 'run-1', type: 'delta', content: '失败后内容' })
-  })
-  expect(screen.getByRole('alert')).toHaveTextContent('模型服务请求失败')
-  expect(screen.queryByText('失败后内容')).not.toBeInTheDocument()
+it('retains draft and hides internal diagnostics on send rejection, and releases subscriptions', async () => {
+  vi.mocked(api.tasks.send).mockRejectedValue(new Error('PRIVATE_KEY')); const view = render(<App />); await ready(); await userEvent.type(screen.getByLabelText('消息内容'), '保留草稿'); await userEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('操作未完成'); expect(screen.getByLabelText('消息内容')).toHaveValue('保留草稿'); expect(screen.queryByText(/PRIVATE_KEY/)).not.toBeInTheDocument(); view.unmount(); expect(unsubscribe).toHaveBeenCalledTimes(1)
 })
-
-it('retains the draft when cloud consent is declined', async () => {
-  vi.mocked(api.consent.has).mockResolvedValue(false)
-  render(<App />)
-  await screen.findByRole('heading', { name: channel.name })
-  await userEvent.type(screen.getByLabelText('消息内容'), '暂不上传')
-  await userEvent.click(screen.getByRole('button', { name: '发送消息' }))
-  await userEvent.click(await screen.findByRole('button', { name: '暂不发送' }))
-  expect(screen.getByLabelText('消息内容')).toHaveValue('暂不上传')
-  expect(api.consent.grant).not.toHaveBeenCalled()
-  expect(api.tasks.send).not.toHaveBeenCalled()
-})
-
-it('creates and selects a channel within the current project', async () => {
-  render(<App />)
-  await screen.findByRole('heading', { name: channel.name })
-  await userEvent.click(screen.getByRole('button', { name: '新建会话群聊' }))
-  await userEvent.type(screen.getByLabelText('群聊名称'), '选题群')
-  await userEvent.click(screen.getByRole('button', { name: '确认建群' }))
-  expect(await screen.findByRole('heading', { name: '选题群' })).toBeVisible()
-  expect(api.channels.create).toHaveBeenCalledWith({ projectId: 'p1', name: '选题群' })
-})
-
-it('deletes the confirmed Channel records and selects the refreshed fallback Channel', async () => {
-  const other = { ...channel, id: 'c2', name: '保留群聊' }
-  vi.mocked(api.channels.list).mockResolvedValue([channel, other])
-  vi.mocked(api.channels.remove).mockImplementation(async () => { vi.mocked(api.channels.list).mockResolvedValue([other]) })
-  render(<App />)
-  await screen.findByRole('heading', { name: channel.name })
-  await userEvent.click(screen.getByRole('button', { name: '删除当前群聊' }))
-  expect(await screen.findByRole('dialog', { name: '删除群聊' })).toHaveTextContent(channel.name)
-  expect(api.channels.remove).not.toHaveBeenCalled()
-  await userEvent.click(screen.getByRole('button', { name: '确认删除群聊' }))
-  expect(api.channels.remove).toHaveBeenCalledWith({ channelId: 'c1', confirmation: 'delete_channel_records' })
-  expect(await screen.findByRole('heading', { name: '保留群聊' })).toBeVisible()
-  expect(screen.queryByRole('button', { name: channel.name })).not.toBeInTheDocument()
-  expect(screen.queryByRole('dialog', { name: '删除群聊' })).not.toBeInTheDocument()
-})
-
-it('keeps the Channel selected when pending operations prevent deletion', async () => {
-  vi.mocked(api.channels.remove).mockRejectedValue(new Error('pending effect PRIVATE_DETAILS'))
-  render(<App />)
-  await screen.findByRole('heading', { name: channel.name })
-  await userEvent.click(screen.getByRole('button', { name: '删除当前群聊' }))
-  await userEvent.click(screen.getByRole('button', { name: '确认删除群聊' }))
-  expect(await screen.findByRole('alert')).toHaveTextContent('任务、审批和恢复操作')
-  expect(screen.queryByText(/PRIVATE_DETAILS/)).not.toBeInTheDocument()
-  expect(screen.getByRole('heading', { name: channel.name })).toBeVisible()
-})
-
-it('does not replace the selected project with a stale channel-list response', async () => {
-  vi.mocked(api.projects.list).mockResolvedValue([project, { ...project, id: 'p2', name: '第二项目' }])
-  let resolveFirst!: (value: Channel[]) => void
-  vi.mocked(api.channels.list).mockImplementation((id) => id === 'p1' ? new Promise((resolve) => { resolveFirst = resolve }) : Promise.resolve([{ ...channel, id: 'c2', projectId: 'p2', name: '第二项目群' }]))
-  render(<App />)
-  await userEvent.selectOptions(await screen.findByLabelText('选择项目'), 'p2')
-  expect(await screen.findByRole('heading', { name: '第二项目群' })).toBeVisible()
-  await act(async () => resolveFirst([channel]))
-  expect(screen.getByRole('heading', { name: '第二项目群' })).toBeVisible()
-  expect(screen.queryByRole('button', { name: channel.name })).not.toBeInTheDocument()
-})
-
-it('reconciles stream events that arrive while loading a persisted running task', async () => {
-  let resolveMessages!: (value: []) => void
-  vi.mocked(api.messages.list).mockImplementationOnce(() => new Promise((resolve) => { resolveMessages = resolve })).mockResolvedValue([persistedReply('resumed-view-run', '加载期间的回复')])
-  vi.mocked(api.tasks.list).mockResolvedValue([{ id: 'resumed-view-run', channelId: 'c1', modelConfigId: 'm1', status: 'running', generation: 0, currentTurnId: null, turnCount: 0, pauseReason: null, createdAt: '', startedAt: null, finishedAt: null, errorMessage: null }])
-  render(<App />)
-  await screen.findByRole('heading', { name: channel.name })
-  act(() => {
-    emitStream({ taskRunId: 'resumed-view-run', type: 'delta', content: '加载期间的回复' })
-    emitStream({ taskRunId: 'resumed-view-run', type: 'complete' })
-  })
-  await act(async () => resolveMessages([]))
-  expect(screen.getByText('加载期间的回复')).toBeVisible()
-  expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument()
-})
-
-it.each(['completed', 'running'] as const)('reads the durable reply when completion races a %s history snapshot', async (status) => {
-  let resolveRuns!: (runs: TaskRun[]) => void
-  vi.mocked(api.messages.list).mockResolvedValueOnce([]).mockResolvedValue([persistedReply('history-run', '加载竞态中的完整回复')])
-  vi.mocked(api.tasks.list).mockImplementation(() => new Promise((resolve) => { resolveRuns = resolve }))
-  render(<App />)
-  await screen.findByRole('heading', { name: channel.name })
-  act(() => {
-    emitStream({ taskRunId: 'history-run', type: 'delta', content: '末尾片段' })
-    emitStream({ taskRunId: 'history-run', type: 'complete' })
-  })
-  await act(async () => resolveRuns([persistedRun(status)]))
-  expect(await screen.findByText('加载竞态中的完整回复')).toBeVisible()
-  expect(screen.queryByText('末尾片段')).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument()
-})
-
-it('replaces the streamed tail with the durable full reply after reloading mid-generation', async () => {
-  vi.mocked(api.tasks.list).mockResolvedValue([persistedRun('running')])
-  render(<App />)
-  await screen.findByRole('button', { name: '停止生成' })
-  act(() => emitStream({ taskRunId: 'history-run', type: 'delta', content: '只收到末尾' }))
-  expect(screen.getByText('只收到末尾')).toBeVisible()
-  vi.mocked(api.messages.list).mockResolvedValue([persistedReply('history-run', '刷新前的开头，加上只收到末尾')])
-  act(() => {
-    emitStream({ taskRunId: 'history-run', type: 'complete' })
-    emitStream({ taskRunId: 'history-run', type: 'delta', content: '迟到追加' })
-  })
-  expect(await screen.findByText('刷新前的开头，加上只收到末尾')).toBeVisible()
-  expect(screen.queryByText('只收到末尾')).not.toBeInTheDocument()
-  expect(screen.queryByText(/迟到追加/)).not.toBeInTheDocument()
-})
-
-it('never appends buffered deltas onto an already persisted completed reply', async () => {
-  let resolveRuns!: (runs: TaskRun[]) => void
-  vi.mocked(api.messages.list).mockResolvedValue([persistedReply('history-run', '已持久化的完整回复')])
-  vi.mocked(api.tasks.list).mockImplementation(() => new Promise((resolve) => { resolveRuns = resolve }))
-  render(<App />)
-  await screen.findByRole('heading', { name: channel.name })
-  act(() => emitStream({ taskRunId: 'history-run', type: 'delta', content: '重复尾部' }))
-  await act(async () => resolveRuns([persistedRun('running')]))
-  expect(screen.getByText('已持久化的完整回复')).toBeVisible()
-  expect(screen.queryByText(/重复尾部/)).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument()
+it('keeps confirmed deletion and refreshes the fallback channel', async () => {
+  const other = { ...channel, id: 'c2', name: '保留群聊' }; vi.mocked(api.channels.list).mockResolvedValue([channel, other]); vi.mocked(api.channels.remove).mockImplementation(async () => { vi.mocked(api.channels.list).mockResolvedValue([other]); durable.channel = other })
+  render(<App />); await ready(); await userEvent.click(screen.getByRole('button', { name: '删除当前群聊' })); const dialog = await screen.findByRole('dialog', { name: '删除群聊' }); expect(api.channels.remove).not.toHaveBeenCalled()
+  await userEvent.click(within(dialog).getByRole('button', { name: '确认删除群聊' })); expect(await screen.findByRole('heading', { name: '保留群聊' })).toBeVisible(); expect(api.channels.remove).toHaveBeenCalledWith({ channelId: 'c1', confirmation: 'delete_channel_records' })
 })

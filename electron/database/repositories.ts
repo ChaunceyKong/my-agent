@@ -10,6 +10,7 @@ import type {
   ApprovalRequestStatus,
   Channel,
   ChannelAgent,
+  ChannelTaskSnapshot,
   CeoMentionToken,
   ConfigureChannelInput,
   CreateChannelInput,
@@ -273,6 +274,7 @@ export interface Repositories {
   completeAgentTurn(id: string, content: string): Promise<{ turn: AgentTurn; message: Message }>
   finishAgentTurn(id: string, status: 'failed' | 'cancelled'): Promise<AgentTurn>
   listAgentTurns(taskRunId: string): Promise<AgentTurn[]>
+  getChannelTaskSnapshot(channelId: string): Promise<ChannelTaskSnapshot>
   listMessages(channelId: string): Promise<Message[]>
   listAuditEvents(channelId: string): Promise<AuditEvent[]>
   saveModelConfig(input: SaveModelConfigRecordInput): Promise<ModelConfigRecord>
@@ -1226,6 +1228,26 @@ export function createRepositories(client: DatabaseClient): Repositories {
     },
     async listAgentTurns(taskRunId) {
       return client.db.select().from(agentTurns).where(eq(agentTurns.taskRunId, taskRunId)).orderBy(asc(agentTurns.ordinal)).all()
+    },
+    async getChannelTaskSnapshot(channelId) {
+      return client.db.transaction((tx) => {
+        const channel = tx.select().from(channels).where(eq(channels.id, channelId)).get()
+        if (!channel) throw new Error('群聊不存在')
+        const runs = tx.select().from(taskRuns).where(eq(taskRuns.channelId, channelId)).orderBy(asc(taskRuns.createdAt), asc(taskRuns.id)).all()
+        const ids = runs.map((run) => run.id)
+        return { channel, runs,
+          schedulerModelConfigId: channel.schedulerModelConfigId ?? tx.select().from(modelSettings).where(eq(modelSettings.id, 1)).get()?.schedulerModelConfigId ?? null,
+          agents: tx.select().from(agents).all().map(({ systemPrompt: _prompt, ...agent }) => agent),
+          members: tx.select().from(channelAgents).where(eq(channelAgents.channelId, channelId)).all(),
+          messages: tx.select().from(messages).where(eq(messages.channelId, channelId)).orderBy(
+            sql`CASE WHEN ${messages.taskRunSeq} IS NOT NULL THEN (SELECT created_at FROM task_runs WHERE id = ${messages.taskRunId}) ELSE ${messages.createdAt} END`,
+            sql`CASE WHEN ${messages.taskRunSeq} IS NOT NULL THEN ${messages.taskRunId} ELSE ${messages.id} END`,
+            sql`CASE WHEN ${messages.taskRunSeq} IS NOT NULL THEN ${messages.taskRunSeq} ELSE 0 END`, asc(messages.id)).all(),
+          turns: ids.length ? tx.select().from(agentTurns).where(inArray(agentTurns.taskRunId, ids)).orderBy(asc(agentTurns.ordinal)).all() : [],
+          events: ids.length ? tx.select().from(taskRunEvents).where(inArray(taskRunEvents.taskRunId, ids)).orderBy(asc(taskRunEvents.seq)).all()
+            .map(({ metadataJson: _metadata, ...event }) => event) : [],
+        }
+      })
     },
 
     async listMessages(channelId: string): Promise<Message[]> {

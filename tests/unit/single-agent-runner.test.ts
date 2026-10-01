@@ -26,6 +26,14 @@ it('executes a native tool call then completes with the follow-up response', asy
   expect(taskRuns.finishTaskRun).not.toHaveBeenCalled()
 })
 
+it('forwards only bound text deltas and never raw native tool calls or tool input to Renderer', async () => {
+  const { runner } = setup([call('read_file', { path: 'PRIVATE_TOOL_INPUT' }), '完成'])
+  const events: any[] = []
+  await runner.run({ ...turn, onEvent: async (event) => { events.push(event) } })
+  expect(events).toEqual([{ taskRunId: 'r', type: 'delta', content: '完成', generation: 0, turnId: 't', agentId: 'a', step: 1 }])
+  expect(JSON.stringify(events)).not.toContain('PRIVATE_TOOL_INPUT')
+})
+
 it('fails closed when an empty tool_calls terminal becomes a model stream error', async () => {
   const { runner, modelClient, repositories, taskRuns, toolEngine } = setup([])
   modelClient.streamChat.mockImplementationOnce(async (_input: any, emit: any) => emit({ taskRunId: 'r', type: 'error', content: '模型响应格式无效，请重试。' }))

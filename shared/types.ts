@@ -330,9 +330,25 @@ export interface AuditEvent {
 
 export interface StreamEvent {
   taskRunId: string
+  generation?: number
+  turnId?: string
+  agentId?: string
+  step?: number
   type: 'delta' | 'tool_call' | 'complete' | 'error'
   content?: string
   toolCall?: NativeToolCall
+}
+
+/** Durable UI snapshot. Event metadata, prompts and tool inputs never cross this boundary. */
+export interface ChannelTaskSnapshot {
+  channel: Channel
+  schedulerModelConfigId: string | null
+  agents: AgentSummary[]
+  members: ChannelAgent[]
+  messages: Message[]
+  runs: TaskRun[]
+  turns: AgentTurn[]
+  events: Array<Omit<TaskRunEvent, 'metadataJson'>>
 }
 
 export interface NativeToolCall { id: string; index: number; name: ToolName; arguments: string }
@@ -407,6 +423,7 @@ export interface AgentTeamApi {
   }
   tasks: {
     list(channelId: string): Promise<TaskRun[]>
+    snapshot(channelId: string): Promise<ChannelTaskSnapshot>
     send(input: SendMessageInput): Promise<{ taskRunId: string }>
     cancel(taskRunId: string): Promise<void>
     continue(taskRunId: string): Promise<{ taskRunId: string }>

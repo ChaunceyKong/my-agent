@@ -41,6 +41,20 @@ afterEach(async () => { database.close(); await rm(directory, { recursive: true,
 const invoke = (name: IpcChannel, ...args: any[]) => handlers.get(name)!({ sender }, ...args)
 const send = () => invoke(IpcChannel.MessageSend, { channelId, modelConfigId, content: '你好' })
 
+it('returns one ordered durable snapshot without prompts, roots, keys or event metadata', async () => {
+  const agent = await repositories.createAgent({ name: 'snapshot-agent', title: 'test', avatar: '🧭', systemPrompt: 'PRIVATE_SYSTEM_PROMPT', modelConfigId, defaultToolPermissions: {} })
+  await repositories.saveChannelAgent({ channelId, agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  const run = await repositories.createStartedTaskRun({ channelId, modelConfigId, content: 'CEO input', mentions: [{ agentId: agent.id, start: 0, end: 15, text: '@snapshot-agent' }] }).catch(() => undefined)
+  // A malformed mention must not leave a half-created snapshot.
+  expect(run).toBeUndefined()
+  const created = await repositories.createStartedTaskRun({ channelId, modelConfigId, content: '@snapshot-agent input', mentions: [{ agentId: agent.id, start: 0, end: 15, text: '@snapshot-agent' }] })
+  const snapshot = await invoke(IpcChannel.TaskRunSnapshot, channelId)
+  expect(snapshot.runs).toEqual([created]); expect(snapshot.messages.map((item: any) => item.content)).toEqual(['@snapshot-agent input'])
+  expect(snapshot.events.map((item: any) => item.seq)).toEqual([1, 2]); expect(snapshot.events.every((item: any) => !Object.hasOwn(item, 'metadataJson'))).toBe(true)
+  expect(JSON.stringify(snapshot)).not.toMatch(/PRIVATE_KEY|PRIVATE_SYSTEM_PROMPT|workspacePath|encryptedApiKey|policySnapshotJson|inputJson/)
+  await expect(Promise.resolve().then(() => invoke(IpcChannel.TaskRunSnapshot, '../invalid'))).rejects.toThrow('请求无效')
+})
+
 it.each(['fetch', 'stream'])('rejects zero-Agent old model response after edit during %s', async (phase) => {
   await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: true })
   let release!: (response?: Response) => void
@@ -148,7 +162,7 @@ it('streams from Main, persists reply and terminal state, and returns only safe 
   await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: true })
   fetchImpl.mockResolvedValue(new Response('data: {"choices":[{"delta":{"content":"你好，主理人"}}]}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
   const { taskRunId } = await send()
-  await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, { taskRunId, type: 'complete' }))
+  await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, { taskRunId, generation: 0, type: 'complete' }))
   const messages = await invoke(IpcChannel.MessageList, channelId)
   expect(messages.map((message: any) => message.content)).toEqual(['你好', '你好，主理人'])
   expect(await invoke(IpcChannel.TaskRunList, channelId)).toEqual([expect.objectContaining({ id: taskRunId, status: 'completed' })])
@@ -220,7 +234,7 @@ it.each([
   fetchImpl.mockResolvedValue(new Response(body, { headers: { 'content-type': contentType } }))
   const { taskRunId } = await send()
   await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, {
-    taskRunId, type: 'error', content: '模型响应格式异常，请稍后重试',
+    taskRunId, generation: 0, type: 'error', content: '模型响应格式异常，请稍后重试',
   }))
   expect(await repositories.getTaskRun(taskRunId)).toMatchObject({ status: 'failed', errorMessage: '模型响应格式异常，请稍后重试' })
   expect(await repositories.listMessages(channelId)).toEqual([expect.objectContaining({ role: 'ceo', content: '你好' })])

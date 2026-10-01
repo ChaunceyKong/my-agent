@@ -5,7 +5,7 @@ import { EmptyState } from '../common/EmptyState'
 const tools: ToolName[] = ['list_dir', 'read_file', 'search_files', 'write_file', 'run_process']
 const blank = (modelConfigId: string): AgentEditorInput => ({ name: '', avatar: null, title: '', systemPrompt: '', modelConfigId, defaultToolPermissions: {} })
 
-export function AgentManager({ channel, models, onChannelChanged }: { channel?: Channel; models: ModelConfigSummary[]; onChannelChanged(channel: Channel): void }) {
+export function AgentManager({ channel, models, onChannelChanged, onMembersChanged }: { channel?: Channel; models: ModelConfigSummary[]; onChannelChanged(channel: Channel): void; onMembersChanged?(): void }) {
   const [agents, setAgents] = useState<AgentSummary[]>([])
   const [members, setMembers] = useState<ChannelAgent[]>([])
   const [editing, setEditing] = useState<string | undefined>()
@@ -30,7 +30,7 @@ export function AgentManager({ channel, models, onChannelChanged }: { channel?: 
     if (busy) return
     const channelId = channel.id
     setBusy(true); setError('')
-    try { await operation(); await reload(channelId) }
+    try { await operation(); await reload(channelId); onMembersChanged?.() }
     catch { if (currentChannel.current === channelId) setError(message) }
     finally { setBusy(false) }
   }

@@ -58,6 +58,7 @@ const api: AgentTeamApi = {
   },
   tasks: {
     list: (channelId: string) => ipcRenderer.invoke(IpcChannel.TaskRunList, channelId),
+    snapshot: (channelId) => ipcRenderer.invoke(IpcChannel.TaskRunSnapshot, channelId),
     send: (input: SendMessageInput) => ipcRenderer.invoke(IpcChannel.MessageSend, input),
     cancel: (taskRunId: string) => ipcRenderer.invoke(IpcChannel.TaskRunCancel, taskRunId),
     continue: (taskRunId) => ipcRenderer.invoke(IpcChannel.TaskRunContinue, taskRunId),

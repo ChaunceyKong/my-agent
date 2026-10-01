@@ -102,7 +102,11 @@ export function createSingleAgentRunner(deps: {
           assertContextFits(messages, config, tools)
           await deps.modelClient.streamChat({ projectId: input.projectId, modelConfigId: input.active.modelConfigId, taskRunId: current.id, messages, tools }, async (event) => {
             if (!await currentTurn()) return
-            if (event.type === 'delta') reply += event.content ?? ''
+            if (event.type === 'delta') {
+              reply += event.content ?? ''
+              await input.onEvent({ taskRunId: current.id, type: 'delta', content: event.content,
+                generation: input.generation, turnId: input.turnId, agentId: input.active.agent.id, step })
+            }
             if (event.type === 'tool_call' && event.toolCall) {
               const old = calls.get(event.toolCall.index)
               calls.set(event.toolCall.index, { ...event.toolCall, id: old?.id || event.toolCall.id, name: (old?.name || event.toolCall.name), arguments: (old?.arguments ?? '') + event.toolCall.arguments })

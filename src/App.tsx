@@ -5,6 +5,7 @@ import { ProjectNavigation } from './components/layout/ProjectNavigation'
 import { RightCockpit } from './components/layout/RightCockpit'
 import { MessageStream } from './components/chat/MessageStream'
 import { Composer } from './components/chat/Composer'
+import { TaskControls } from './components/chat/TaskControls'
 import { SettingsDialog } from './components/settings/SettingsDialog'
 import { CloudConsentDialog } from './components/settings/CloudConsentDialog'
 import { EmptyState } from './components/common/EmptyState'
@@ -27,6 +28,9 @@ function Workbench() {
   const channel = state.channels.find((item) => item.id === state.channelId)
   const model = state.models.find((item) => item.id === state.modelId)
   const conversation = state.conversations[state.channelId] ?? emptyConversation
+  const active = conversation.runs.find((run) => ['running', 'cancelling', 'paused'].includes(run.status))
+  const members = conversation.agents.filter((agent) => conversation.members.some((member) => member.agentId === agent.id && member.isEnabled)
+    && conversation.agents.filter((other) => other.name === agent.name && conversation.members.some((member) => member.agentId === other.id && member.isEnabled)).length === 1)
   const consentProject = state.projects.find((item) => item.id === state.consent?.projectId)
   const consentModel = state.models.find((item) => item.id === state.consent?.modelConfigId)
   return <div className="app-shell"><AppHeader project={project} channel={channel} cockpitOpen={cockpitOpen} onToggle={() => setCockpitOpen(!cockpitOpen)} /><div className={`workbench ${cockpitOpen ? '' : 'cockpit-closed'}`}>
@@ -34,10 +38,11 @@ function Workbench() {
     <main className="chat-panel"><div className="chat-heading"><div><span className="eyebrow">项目会话</span><h1>{channel?.name ?? '你的协作工作台'}</h1></div>{project && <span className="chat-workspace">已绑定本地目录</span>}{channel && <button className="text-button" aria-label="删除当前群聊" onClick={() => setDeletingChannel(channel)}>删除群聊</button>}</div>
       {state.error && <div className="error-card" role="alert">{state.error}<button className="text-button" onClick={() => { void store.initialize() }}>重新加载</button></div>}
       {state.loading ? <div className="loading-state">正在读取本地项目…</div> : !channel ? <div className="welcome-panel"><EmptyState title={project ? '选择或创建一个群聊' : '让想法在这里开始'}>{project ? '为不同主题建立独立会话，保留清晰的对话历史。' : '新建项目并绑定本地目录，然后配置模型，开始第一次对话。'}</EmptyState></div> : <MessageStream conversation={conversation} />}
-      <Composer draft={conversation.draft} models={state.models} modelId={state.modelId} disabled={!channel || !conversation.loaded} sending={state.sending} running={conversation.runs.some((run) => run.status === 'running')} onDraft={store.setDraft} onModel={store.setModel} onSend={() => { void store.send() }} onCancel={() => { void store.cancel() }} onSettings={() => setDialog('settings')} />
+      <TaskControls key={channel?.id} conversation={conversation} store={store} busy={state.sending} />
+      <Composer draft={conversation.draft} models={state.models} modelId={state.modelId} disabled={!channel || !conversation.loaded} sending={state.sending} running={active?.status === 'running'} blocked={!!active} cancelling={active?.status === 'cancelling'} members={members} mentions={conversation.mentions} onMention={store.insertMention} onInterrupt={() => { void store.interrupt() }} onDraft={store.setDraft} onModel={store.setModel} onSend={() => { void store.send() }} onCancel={() => { void store.cancel() }} onSettings={() => setDialog('settings')} />
     </main>
-    {cockpitOpen && <RightCockpit project={project} channel={channel} model={model} models={state.models} run={conversation.runs.at(-1)} onChannelChanged={store.updateChannel} />}
-  </div>{dialog === 'settings' && <SettingsDialog onSave={store.saveModel} onClose={() => { setDialog(null); void store.refreshModels() }} />}{(dialog === 'project' || dialog === 'channel') && <CreationDialog kind={dialog} store={store} onClose={() => setDialog(null)} />}{deletingChannel && <DeleteChannelDialog channel={deletingChannel} store={store} onClose={() => setDeletingChannel(null)} />}{state.consent && consentProject && consentModel && <CloudConsentDialog project={consentProject} model={consentModel} busy={state.sending} onConfirm={store.grantConsent} onClose={store.dismissConsent} />}</div>
+    {cockpitOpen && <RightCockpit project={project} channel={channel} model={model} models={state.models} run={conversation.runs.at(-1)} revision={conversation.events.length} onRefresh={() => { void store.refreshChannel() }} onChannelChanged={store.updateChannel} />}
+  </div>{dialog === 'settings' && <SettingsDialog onSave={store.saveModel} onClose={() => { setDialog(null); void store.refreshModels() }} />}{(dialog === 'project' || dialog === 'channel') && <CreationDialog kind={dialog} store={store} onClose={() => setDialog(null)} />}{deletingChannel && <DeleteChannelDialog channel={deletingChannel} store={store} onClose={() => setDeletingChannel(null)} />}{state.consent && consentProject && consentModel && <CloudConsentDialog key={consentModel.id} project={consentProject} model={consentModel} purposes={state.consent.purposes} busy={state.sending} onConfirm={store.grantConsent} onClose={store.dismissConsent} />}</div>
 }
 
 function DeleteChannelDialog({ channel, store, onClose }: { channel: Channel; store: WorkbenchStore; onClose(): void }) {

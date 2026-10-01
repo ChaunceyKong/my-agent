@@ -137,6 +137,19 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .approval-card button { margin-right: 7px; padding: 4px 8px; font-size: 11px; }
 .workspace-tree { list-style: none; padding: 0; margin: 0; font-size: 11px; }
 .workspace-tree li { padding: 5px 0; overflow-wrap: anywhere; }
+.mention-toolbar, .composer-actions, .task-actions, .task-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.mention-toolbar { margin-bottom: 8px; font-size: 11px; color: #717d91; }
+.mention-toolbar select { padding: 4px 7px; }
+.mention-chips { list-style: none; padding: 0; margin: 0 0 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+.mention-chips li { padding: 2px 8px; border-radius: 12px; color: #5d55bd; background: #efedfc; font-size: 11px; }
+.task-controls { flex-shrink: 0; padding: 10px 22px; border-top: 1px solid #e8ecf3; background: #f8f9fd; }
+.task-summary { justify-content: space-between; font-size: 11px; color: #645cc9; }
+.task-controls .form-note { font-size: 11px; color: #7b8395; margin: 4px 0; overflow-wrap: anywhere; }
+.task-actions { margin-top: 7px; }
+.task-actions button, .task-actions select, .composer-actions button { font-size: 11px; padding: 5px 7px; }
+.process-recovery label { display: block; font-size: 11px; margin: 7px 0; }
+.process-recovery input[type="checkbox"], .dialog input[type="checkbox"] { width: auto; }
+.consent-categories { padding-left: 20px; font-size: 11px; }
 @media (max-width: 1100px) {
   .workbench:not(.cockpit-closed) { grid-template-columns: 256px minmax(0, 1fr); }
   .right-cockpit { position: absolute; right: 0; top: 46px; bottom: 0; width: 320px; z-index: 10; box-shadow: -12px 0 35px #26324716; }

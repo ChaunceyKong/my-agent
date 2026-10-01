@@ -24,6 +24,7 @@ export enum IpcChannel {
   MessageStream = 'message:stream',
   MessageList = 'message:list',
   TaskRunList = 'task-run:list',
+  TaskRunSnapshot = 'task-run:snapshot',
   CloudConsentHas = 'cloud-consent:has',
   CloudConsentGrant = 'cloud-consent:grant',
   AgentList = 'agent:list',

@@ -9,7 +9,7 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 function setup() {
   const api = {
     channels: { list: vi.fn().mockResolvedValue([first, second]), create: vi.fn().mockResolvedValue(third), remove: vi.fn().mockResolvedValue(undefined) },
-    messages: { list: vi.fn().mockResolvedValue([]) }, tasks: { list: vi.fn().mockResolvedValue([]) },
+    messages: { list: vi.fn().mockResolvedValue([]) }, tasks: { list: vi.fn().mockResolvedValue([]), snapshot: vi.fn(async (id: string) => ({ channel: [first, second, third].find((item) => item.id === id), schedulerModelConfigId: null, agents: [], members: [], messages: [], runs: [], turns: [], events: [] })) },
   } as unknown as AgentTeamApi
   return { api, store: createWorkbenchStore(api) }
 }
@@ -34,6 +34,7 @@ it('keeps a confirmed Channel configuration and uses current fallback when delet
   const removing = store.removeChannel(first.id)
   await vi.waitFor(() => expect(api.channels.list).toHaveBeenCalledTimes(2))
   const configured = { ...second, speakerMode: 'manual' as const, maxTurns: 12 }
+  vi.mocked(api.tasks.snapshot).mockImplementation(async (id) => ({ channel: id === second.id ? configured : first, schedulerModelConfigId: null, agents: [], members: [], messages: [], runs: [], turns: [], events: [] }))
   store.updateChannel(configured)
   refresh.resolve([second]); await removing
   expect(store.getSnapshot().channels).toEqual([configured])

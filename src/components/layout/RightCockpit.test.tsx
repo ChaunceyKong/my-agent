@@ -15,7 +15,7 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 let api: AgentTeamApi
 const props = (changed = vi.fn()) => ({ channel, run, models: [], revision: 0, onRefresh: changed, onChannelChanged: vi.fn() })
 beforeEach(() => {
-  api = { agents: { list: vi.fn().mockResolvedValue([]) }, channelAgents: { list: vi.fn().mockResolvedValue([]) },
+  api = { templates: { list: vi.fn().mockResolvedValue([]) }, agents: { list: vi.fn().mockResolvedValue([]) }, channelAgents: { list: vi.fn().mockResolvedValue([]) },
     tools: { list: vi.fn().mockResolvedValue([oldTool]) },
     approvals: { list: vi.fn().mockResolvedValue([pending]), approve: vi.fn(), reject: vi.fn(), runApproved: vi.fn() }, tasks: { acknowledgeProcessRecovery: vi.fn() },
   } as unknown as AgentTeamApi

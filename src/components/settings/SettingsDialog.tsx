@@ -12,6 +12,7 @@ export function SettingsDialog({ onSave, onClose }: { onSave(input: SaveModelCon
   const [context, setContext] = useState('')
   const [output, setOutput] = useState('')
   const [scheduler, setScheduler] = useState('')
+  const [fallback, setFallback] = useState('')
   const [discovered, setDiscovered] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
@@ -23,15 +24,22 @@ export function SettingsDialog({ onSave, onClose }: { onSave(input: SaveModelCon
     finally { setBusy(false) }
   }
   const select = (selected: string) => {
-    setId(selected); setApiKey(''); setDiscovered([])
+    setId(selected); setApiKey(''); setDiscovered([]); setFallback('')
     const model = models.find((item) => item.id === selected)
-    if (model) { setProvider(model.providerPreset); setModelName(model.modelName); setBaseUrl(model.baseUrl); setContext(model.contextWindow?.toString() ?? ''); setOutput(model.maxOutputTokens?.toString() ?? '') }
+    if (model) { setProvider(model.providerPreset); setModelName(model.modelName); setBaseUrl(model.baseUrl); setContext(model.contextWindow?.toString() ?? ''); setOutput(model.maxOutputTokens?.toString() ?? ''); setFallback(model.fallbackConfigId ?? '') }
+  }
+  const chain: string[] = []
+  let next = fallback
+  const seen = new Set<string>(id ? [id] : [])
+  while (next && chain.length < 3 && !seen.has(next)) {
+    seen.add(next); const candidate = models.find((model) => model.id === next)
+    chain.push(candidate?.modelName ?? '配置不存在'); next = candidate?.fallbackConfigId ?? ''
   }
   return <Dialog title="模型设置" onClose={onClose} busy={busy}><form onSubmit={async (event) => {
     event.preventDefault()
     await action(async () => {
       await onSave({ ...(id ? { id } : {}), providerPreset: provider, modelName: modelName.trim(), baseUrl: baseUrl.trim(), apiKey,
-        contextWindow: context ? Number(context) : null, maxOutputTokens: output ? Number(output) : null })
+        contextWindow: context ? Number(context) : null, maxOutputTokens: output ? Number(output) : null, fallbackConfigId: fallback || null })
       setApiKey(''); await reload(); setNotice('模型配置已保存')
     })
   }}><label>已有配置<select disabled={busy} value={id} onChange={(event) => select(event.target.value)}><option value="">新建模型配置</option>{models.map((model) => <option key={model.id} value={model.id}>{model.modelName} · {model.providerPreset}</option>)}</select></label>
@@ -45,6 +53,9 @@ export function SettingsDialog({ onSave, onClose }: { onSave(input: SaveModelCon
   {provider !== 'ollama' && <label>API Key<input type="password" required={!id} autoComplete="off" value={apiKey} disabled={busy} onChange={(event) => setApiKey(event.target.value)} placeholder={id ? '留空保留已有密钥' : ''} /></label>}
   <label>上下文窗口<input type="number" min="1" value={context} disabled={busy} onChange={(event) => setContext(event.target.value)} placeholder="使用保守默认值" /></label>
   <label>最大输出 Token<input type="number" min="1" value={output} disabled={busy} onChange={(event) => setOutput(event.target.value)} placeholder="使用保守默认值" /></label>
+  <label>备选模型<select value={fallback} disabled={busy} onChange={(event) => setFallback(event.target.value)}><option value="">不使用备选模型</option>{models.filter((model) => model.id !== id).map((model) => <option key={model.id} value={model.id}>{model.modelName} · {model.providerPreset}</option>)}</select></label>
+  <p className="form-note">配置链：{modelName || '当前模型'}{chain.length ? ` → ${chain.join(' → ')}` : '（无备选）'}。最多两次降级；保存时检查所有上游链，拒绝循环。</p>
+  <p className="form-note">仅在输出前重试或降级：429 等待 2 / 4 秒，5xx 或网络故障重试一次。401、已输出内容或已执行工具不会自动切换；每个云端候选需分别授权。</p>
   <p className="form-note">密钥加密保存在本机。修改配置后需重新确认云端外发。Ollama 仅支持本机模型。</p>
   <label>默认调度模型<select value={scheduler} disabled={busy} onChange={(event) => { const value = event.target.value; void action(async () => { await window.agentTeam.models.setDefaultScheduler(value || null); setScheduler(value) }) }}><option value="">未设置</option>{models.map((model) => <option key={model.id} value={model.id}>{model.modelName}</option>)}</select></label><p className="form-note">群聊未指定调度模型时使用此默认配置。</p>
   {notice && <p role="status" className="form-note">{notice}</p>}

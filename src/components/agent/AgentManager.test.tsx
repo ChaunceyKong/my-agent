@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import '@testing-library/jest-dom/vitest'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -16,6 +16,7 @@ let api: AgentTeamApi
 beforeEach(() => {
   members = [first, second].map((agent) => ({ channelId: 'c', agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null, revision: 'rev', createdAt: '', updatedAt: '' }))
   api = {
+    templates: { list: vi.fn().mockResolvedValue([]), get: vi.fn(), importTeam: vi.fn(), copyAgent: vi.fn() },
     agents: { list: vi.fn().mockResolvedValue([first, second]), get: vi.fn().mockResolvedValue(first), update: vi.fn().mockResolvedValue(first), create: vi.fn(), remove: vi.fn() },
     channelAgents: { list: vi.fn(async () => members), save: vi.fn(async (input) => { const saved = { ...members.find((item) => item.agentId === input.agentId)!, ...input }; members = members.map((item) => item.agentId === input.agentId ? saved : item); return saved }), remove: vi.fn(async (_, id) => { members = members.filter((item) => item.agentId !== id) }) },
     channels: { configure: vi.fn().mockResolvedValue({ ...channel, speakerMode: 'manual', maxTurns: 12, schedulerModelConfigId: 'override' }) },
@@ -23,6 +24,40 @@ beforeEach(() => {
   window.agentTeam = api
 })
 afterEach(cleanup)
+
+const role = { id: 'writer', name: '模板作者', avatar: '✍️', title: '作者', systemPrompt: '模板提示原文', responsibilities: ['查证来源'], outputFormat: '正文与出处' }
+const template = { id: 'media', name: '内容团队', avatar: '📝', description: '模板说明', roles: [role] }
+function catalog() {
+  vi.mocked(api.templates.list).mockResolvedValue([{ ...template, roleCount: 1, roleNames: [role.name] }])
+  vi.mocked(api.templates.get).mockResolvedValue(template)
+  vi.mocked(api.templates.copyAgent).mockResolvedValue({ agents: [], members: [] })
+}
+
+it('previews the entire prompt and copies only editor identity/model with tools disabled', async () => {
+  catalog(); render(<AgentManager channel={channel} models={models} onChannelChanged={() => {}} />)
+  await userEvent.click(await screen.findByRole('button', { name: '预览模板：内容团队' }))
+  expect(await screen.findByText('模板提示原文')).toBeVisible()
+  await userEvent.click(screen.getByRole('button', { name: '复制并编辑：模板作者' }))
+  expect(screen.getByLabelText('write_file')).toBeDisabled()
+  await userEvent.clear(screen.getByLabelText('Agent 名称')); await userEvent.type(screen.getByLabelText('Agent 名称'), '副本作者')
+  await userEvent.clear(screen.getByLabelText('Agent 系统提示')); await userEvent.type(screen.getByLabelText('Agent 系统提示'), '自定义提示')
+  await userEvent.selectOptions(screen.getByLabelText('Agent 模型'), 'override')
+  await userEvent.click(screen.getByRole('button', { name: '创建模板副本' }))
+  await waitFor(() => expect(api.templates.copyAgent).toHaveBeenCalledWith({ templateId: 'media', roleId: 'writer', channelId: 'c', editor: { name: '副本作者', avatar: '✍️', title: '作者', systemPrompt: '自定义提示', modelConfigId: 'override' } }))
+  expect(template.roles[0].systemPrompt).toBe('模板提示原文')
+})
+
+it('ignores a completed import callback after unmounting the old Channel', async () => {
+  catalog(); let resolve!: (value: { agents: Agent[]; members: ChannelAgent[] }) => void
+  vi.mocked(api.templates.importTeam).mockReturnValue(new Promise((done) => { resolve = done }))
+  const changed = vi.fn(); const view = render(<AgentManager channel={channel} models={models} onChannelChanged={() => {}} onMembersChanged={changed} />)
+  await userEvent.click(await screen.findByRole('button', { name: '导入团队：内容团队' }))
+  const reads = vi.mocked(api.agents.list).mock.calls.length
+  view.unmount(); await act(async () => resolve({ agents: [], members: [] }))
+  expect(changed).not.toHaveBeenCalled()
+  // No state from the old import is displayed in a later Channel instance.
+  expect(vi.mocked(api.agents.list).mock.calls.length).toBe(reads)
+})
 
 it('renders multiple enabled members and changes one membership without overwriting the other', async () => {
   render(<AgentManager channel={channel} models={models} onChannelChanged={() => {}} />)

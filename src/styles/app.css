@@ -69,6 +69,7 @@ button:hover:not(:disabled) { background: var(--accent-soft); border-color: var(
 button:disabled { cursor: not-allowed; opacity: .48; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 input, select, textarea { border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; color: var(--text); background: var(--subtle); min-width: 0; }
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 input, textarea { width: 100%; }
 select { max-width: 100%; }
 h1, h2, h3, p { margin: 0; }

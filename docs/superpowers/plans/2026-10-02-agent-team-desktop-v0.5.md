@@ -52,3 +52,15 @@ Run the complete unit suite with one worker, type check, build and all old/new r
 ## Completion rule
 
 Do not label the entire v0.5 release complete merely because Task 1 or a build configuration passes. All implemented stages require independent review. If release/update infrastructure or platform hosts are missing, report the delivered local functionality separately from the blocked release acceptance, including the exact user decision or external evidence still needed.
+
+## Progress — 2026-10-02
+
+Task 1 is implemented and independently reviewed PASS at `1ca4728`. No unresolved review findings. Tasks 2–6 have not started; the next implementation scope is controlled errors and diagnostic logs. Product version remains `0.4.0` until the release configuration stage.
+
+- Theme implementation: `68efa28`. Full single-worker unit suite 529/529, all real Electron tests 37/37, type check, build and diff check passed at that commit.
+- Visual QA found native dark placeholder contrast of 3.55:1. The scoped CSS/E2E fix `1ca4728` uses the muted token for input and textarea placeholders. Real computed-style assertions measured 5.06:1 in light and 7.73:1 in dark.
+- After that style-only fix: theme unit tests 10/10, theme Electron tests 5/5, type check, build and diff check passed. The entire suite was not rerun for this final one-rule style patch.
+- The independent reviewer separately ran theme/App unit tests 28/28, type check and diff check, and locked the final review to `1ca4728`.
+- Root inspected all six regenerated light/dark settings, validation/focus and template-preview screenshots in `test-results/`; visual QA passed. Screenshots are disposable test outputs, not release artifacts. System-color changes were simulated with Chromium media emulation in the real Electron app.
+- No dependencies, IPC or database changes, no package build, and no external model requests. Original untracked user documents retained their initial SHA-256; existing `release/` artifacts were untouched.
+- Trusted update hosting and signing configuration are still pending user input; no automatic update network or publication operation was introduced.

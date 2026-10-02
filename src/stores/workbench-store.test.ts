@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { createWorkbenchStore } from './workbench-store'
-import type { AgentTeamApi, Channel, ChannelTaskSnapshot, StreamEvent, TaskRun } from '../../shared/types'
+import type { AgentTeamApi, Channel, ChannelTaskSnapshot, ModelConfigSummary, StreamEvent, TaskRun } from '../../shared/types'
 
 const first: Channel = { id: 'c1', projectId: 'p', name: 'first', icon: null, speakerMode: 'automatic', maxTurns: 30, schedulerModelConfigId: null, createdAt: '', updatedAt: '' }
 const second: Channel = { ...first, id: 'c2', name: 'second' }
@@ -72,7 +72,7 @@ function flow(initialRun?: TaskRun) {
   let emit!: (event: StreamEvent) => void
   const api = {
     projects: { list: vi.fn().mockResolvedValue([{ id: 'p', name: 'project' }]) },
-    models: { list: vi.fn().mockResolvedValue([{ id: 'model', modelName: 'model', providerPreset: 'openai', baseUrl: 'https://example.test', hasApiKey: true }]) },
+    models: { list: vi.fn().mockResolvedValue(['model', 'selected-model', 'new-model'].map((id) => modelFixture(id))) },
     channels: { list: vi.fn().mockResolvedValue([first, second]) },
     tasks: { snapshot: vi.fn(async (id: string) => id === first.id ? structuredClone(snapshot) : { ...structuredClone(snapshot), channel: second, runs: [], turns: [], messages: [] }), send: vi.fn().mockResolvedValue({ taskRunId: 'created' }), continue: vi.fn(), assign: vi.fn(), cancel: vi.fn(), terminate: vi.fn(), interrupt: vi.fn() },
     consent: { has: vi.fn().mockResolvedValue(true), grant: vi.fn() },
@@ -82,6 +82,7 @@ function flow(initialRun?: TaskRun) {
   return { api, store, emit: (event: StreamEvent) => emit(event), get: () => snapshot, set: (next: ChannelTaskSnapshot) => { snapshot = next } }
 }
 async function loaded(store: ReturnType<typeof createWorkbenchStore>) { await vi.waitFor(() => expect(store.getSnapshot().conversations[first.id]?.loaded).toBe(true)) }
+const modelFixture = (id: string, fallbackConfigId: string | null = null): ModelConfigSummary => ({ id, modelName: id, providerPreset: 'openai', baseUrl: 'https://example.test', hasApiKey: true, fallbackConfigId })
 
 it.each(['send', 'interrupt', 'continue', 'assign'] as const)('uses the selected model for new %s input and the existing Run model for continuation', async (kind) => {
   const { api, store } = flow(kind === 'send' ? undefined : runFixture(kind === 'interrupt' ? 'running' : 'paused'))
@@ -205,4 +206,96 @@ it.each(['before confirm', 'during grant'])('revalidates Run generation %s and n
   grant.resolve(); await confirming
   if (phase === 'before confirm') expect(api.consent.grant).not.toHaveBeenCalled()
   expect(api.tasks.continue).not.toHaveBeenCalled(); expect(store.getSnapshot().consent).toBeNull(); expect(store.getSnapshot().sending).toBe(false)
+})
+
+it('authorizes every fresh fallback candidate separately before dispatching ordinary chat', async () => {
+  const { api, store } = flow(); await loaded(store)
+  vi.mocked(api.models.list).mockResolvedValue([modelFixture('model', 'backup'), modelFixture('backup', 'last'), modelFixture('last')])
+  const granted = new Set<string>()
+  vi.mocked(api.consent.has).mockImplementation(async (_project, id) => granted.has(id))
+  vi.mocked(api.consent.grant).mockImplementation(async (_project, id) => { granted.add(id) })
+  store.setDraft('goal'); await store.send()
+  for (const id of ['model', 'backup', 'last']) {
+    expect(store.getSnapshot().consent?.modelConfigId).toBe(id)
+    if (id !== 'model') expect(store.getSnapshot().consent?.purposes[0]).toContain('备选模型')
+    expect(api.tasks.send).not.toHaveBeenCalled()
+    await store.grantConsent()
+  }
+  expect(api.consent.grant).toHaveBeenCalledTimes(3)
+  expect(api.tasks.send).toHaveBeenCalledTimes(1)
+})
+
+it('expands effective Agent, scheduler and summary fallback routes but not disabled members', async () => {
+  const context = flow(); const { api, store } = context; await loaded(store)
+  context.get().agents = ['a1', 'a2', 'disabled'].map((id) => ({ id, name: id, avatar: '🤖', title: id, modelConfigId: 'unused', defaultToolPermissions: {}, isBuiltin: false, createdAt: '', updatedAt: '' }))
+  context.get().members = ['a1', 'a2', 'disabled'].map((id) => ({ id, channelId: first.id, agentId: id, isEnabled: id !== 'disabled', modelConfigOverrideId: id === 'disabled' ? 'missing' : 'agent', toolPermissionsOverride: null, revision: '1', createdAt: '', updatedAt: '' }))
+  context.get().schedulerModelConfigId = 'scheduler'
+  vi.mocked(api.models.list).mockResolvedValue([modelFixture('agent', 'backup'), modelFixture('backup'), modelFixture('scheduler', 'backup')])
+  store.setDraft('goal'); await store.send()
+  expect(vi.mocked(api.consent.has).mock.calls.map((call) => call[1])).toEqual(['agent', 'backup', 'scheduler'])
+  expect(api.tasks.send).toHaveBeenCalledTimes(1)
+})
+
+it.each([
+  [modelFixture('model', 'missing')],
+  [modelFixture('model', 'backup'), modelFixture('backup', 'model')],
+  [modelFixture('model', 'b1'), modelFixture('b1', 'b2'), modelFixture('b2', 'b3'), modelFixture('b3')],
+].map((models) => ({ models })))('rejects malformed fresh routes before checking consent or sending', async ({ models }) => {
+  const { api, store } = flow(); await loaded(store)
+  vi.mocked(api.models.list).mockResolvedValue(models)
+  store.setDraft('goal'); await store.send()
+  expect(api.consent.has).not.toHaveBeenCalled(); expect(api.tasks.send).not.toHaveBeenCalled()
+  expect(store.getSnapshot().sending).toBe(false)
+  expect(store.getSnapshot().conversations[first.id].error).toContain('授权状态读取失败')
+})
+
+it('does not grant a displayed consent after the model destination changes', async () => {
+  const { api, store } = flow(); await loaded(store)
+  vi.mocked(api.consent.has).mockResolvedValue(false)
+  store.setDraft('goal'); await store.send()
+  vi.mocked(api.models.list).mockResolvedValue([{ ...modelFixture('model'), baseUrl: 'https://changed.test' }])
+  await store.grantConsent()
+  expect(api.consent.grant).not.toHaveBeenCalled(); expect(api.tasks.send).not.toHaveBeenCalled()
+  expect(store.getSnapshot().models[0].baseUrl).toBe('https://changed.test')
+  expect(store.getSnapshot().consent?.modelConfigId).toBe('model')
+})
+
+it('navigation invalidates a fresh-model read before any consent or dispatch', async () => {
+  const { api, store } = flow(); await loaded(store)
+  const models = deferred<ModelConfigSummary[]>(); vi.mocked(api.models.list).mockReturnValueOnce(models.promise)
+  store.setDraft('goal'); const sending = store.send()
+  await vi.waitFor(() => expect(api.models.list).toHaveBeenCalledTimes(2))
+  await store.selectChannel(second.id); models.resolve([modelFixture('model')]); await sending
+  expect(api.consent.has).not.toHaveBeenCalled(); expect(api.tasks.send).not.toHaveBeenCalled()
+})
+
+it('rechecks a route changed during consent before dispatch and requests the new backup consent', async () => {
+  const { api, store } = flow(); await loaded(store)
+  const consent = deferred<boolean>(); vi.mocked(api.consent.has).mockReturnValueOnce(consent.promise).mockResolvedValue(false)
+  store.setDraft('goal'); const sending = store.send()
+  await vi.waitFor(() => expect(api.consent.has).toHaveBeenCalled())
+  vi.mocked(api.models.list).mockResolvedValue([modelFixture('model', 'backup'), modelFixture('backup')])
+  vi.mocked(api.consent.has).mockImplementation(async (_project, id) => id === 'model')
+  consent.resolve(true); await sending
+  expect(api.tasks.send).not.toHaveBeenCalled()
+  expect(store.getSnapshot().consent?.modelConfigId).toBe('backup')
+})
+
+it('cancel invalidates a continuation waiting for its fresh model routes', async () => {
+  const context = flow(runFixture()); const { api, store } = context; await loaded(store)
+  const models = deferred<ModelConfigSummary[]>(); vi.mocked(api.models.list).mockReturnValueOnce(models.promise)
+  const continuing = store.continue()
+  await vi.waitFor(() => expect(api.models.list).toHaveBeenCalledTimes(2))
+  await store.cancel(); models.resolve([modelFixture('model')]); await continuing
+  expect(api.tasks.continue).not.toHaveBeenCalled(); expect(api.consent.has).not.toHaveBeenCalled()
+  expect(store.getSnapshot().consent).toBeNull()
+})
+
+it('ignores a delayed model-list refresh after explicit model selection changes', async () => {
+  const { api, store } = flow(); await loaded(store)
+  const models = deferred<ModelConfigSummary[]>(); vi.mocked(api.models.list).mockReturnValueOnce(models.promise)
+  const refreshing = store.refreshModels(); store.setModel('new-model')
+  models.resolve([modelFixture('model')]); await refreshing
+  expect(store.getSnapshot().modelId).toBe('new-model')
+  expect(store.getSnapshot().models.some((model) => model.id === 'new-model')).toBe(true)
 })

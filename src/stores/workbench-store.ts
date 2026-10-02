@@ -23,13 +23,14 @@ export function createWorkbenchStore(api: AgentTeamApi) {
   const listeners = new Set<() => void>()
   let selection = 0; let lifecycle = 0; let channelRevision = 0; let pendingAction: Action | null = null
   let navigation = 0; let operation = 0; let dispatching = false
+  let pendingConsentModel: ModelConfigSummary | null = null
   const refreshing = new Map<string, { again: boolean; promise: Promise<void> }>()
   const buffered: Array<{ channelId: string | null; event: StreamEvent }> = []
   const previewBindings = new Map<string, { generation: number; step: number }>()
   const update = (next: Partial<WorkbenchState>) => { state = { ...state, ...next }; listeners.forEach((listener) => listener()) }
   const conversation = (id: string) => state.conversations[id] ?? emptyConversation
   const patch = (id: string, next: Partial<Conversation>) => update({ conversations: { ...state.conversations, [id]: { ...conversation(id), ...next } } })
-  const invalidateAction = () => { operation++; pendingAction = null; update({ consent: null, sending: false }) }
+  const invalidateAction = () => { operation++; pendingAction = null; pendingConsentModel = null; update({ consent: null, sending: false }) }
   const currentAction = (action: Action) => {
     const run = conversation(action.channelId).runs.find(unresolved)
     return action.navigation === navigation && action.operation === operation && action.channelId === state.channelId && action.projectId === state.projectId
@@ -147,31 +148,55 @@ export function createWorkbenchStore(api: AgentTeamApi) {
     } catch { if (action.operation === operation) patch(action.channelId, { error: '操作未完成，请核对模型授权、审批和任务清理状态后重试' }) }
     finally { dispatching = false; finishAction(action) }
   }
-  async function authorize(action: Action) {
-    if (!currentAction(action)) { finishAction(action); return }
+  function consentRequirements(action: Action, models: ModelConfigSummary[]) {
     const current = conversation(action.channelId); const channel = state.channels.find((item) => item.id === action.channelId)
     const requirements = new Map<string, string[]>()
-    const add = (id: string, purpose: string) => requirements.set(id, [...(requirements.get(id) ?? []), purpose])
+    const add = (id: string, purpose: string) => {
+      const visited = new Set<string>(); let candidate: string | null = id
+      while (candidate) {
+        const model = models.find((item) => item.id === candidate)
+        if (!model || visited.has(candidate) || visited.size > 2) throw new Error('模型备选链无效，请检查模型设置')
+        visited.add(candidate)
+        const description = candidate === id ? purpose : `备选模型（${visited.size - 1}）：${purpose}`
+        requirements.set(candidate, [...(requirements.get(candidate) ?? []), description])
+        candidate = model.fallbackConfigId ?? null
+      }
+    }
     const enabled = current.members.filter((member) => member.isEnabled)
     if (!enabled.length) add(action.modelConfigId, '普通对话：当前输入、历史消息、既有摘要')
     for (const member of enabled) {
       const agent = current.agents.find((item) => item.id === member.agentId)
-      if (agent) add(member.modelConfigOverrideId ?? agent.modelConfigId, `Agent ${agent.name}：角色提示、当前输入、完成的历史与摘要、任务状态、获准的脱敏工具结果`)
+      if (!agent) throw new Error('群聊成员状态无效，请刷新后重试')
+      add(member.modelConfigOverrideId ?? agent.modelConfigId, `Agent ${agent.name}：角色提示、当前输入、完成的历史与摘要、任务状态、获准的脱敏工具结果`)
     }
     if (current.schedulerModelConfigId && enabled.length) {
       if (channel?.speakerMode === 'automatic' && enabled.length > 1) add(current.schedulerModelConfigId, '自动选人：已启用成员 ID、名称、角色、完整当前 CEO 目标、最近完成的 Agent 消息（最多 3000 字）')
       add(current.schedulerModelConfigId, '每 10 个完成轮次的摘要：此前摘要与已完成的会话前缀，不含原始工具输入')
     }
+    return requirements
+  }
+  async function authorize(action: Action) {
+    if (!currentAction(action)) { finishAction(action); return }
+    const models = await api.models.list()
+    if (!currentAction(action)) { finishAction(action); return }
+    update({ models })
+    const requirements = consentRequirements(action, models)
     for (const [modelConfigId, purposes] of requirements) {
       const granted = await api.consent.has(action.projectId, modelConfigId)
       if (!currentAction(action)) { finishAction(action); return }
       if (!granted) {
-        pendingAction = action; update({ consent: { projectId: action.projectId, channelId: action.channelId, modelConfigId, purposes }, sending: false }); return
+        pendingAction = action; pendingConsentModel = models.find((model) => model.id === modelConfigId)!
+        update({ consent: { projectId: action.projectId, channelId: action.channelId, modelConfigId, purposes }, sending: false }); return
       }
     }
     await refreshChannel(action.channelId)
     if (!currentAction(action)) { finishAction(action); return }
-    pendingAction = null; update({ consent: null }); await execute(action)
+    const latestModels = await api.models.list()
+    if (!currentAction(action)) { finishAction(action); return }
+    if (JSON.stringify(models) !== JSON.stringify(latestModels) || JSON.stringify([...requirements]) !== JSON.stringify([...consentRequirements(action, latestModels)])) {
+      await authorize(action); return
+    }
+    pendingAction = null; pendingConsentModel = null; update({ consent: null }); await execute(action)
   }
   async function act(kind: Action['kind'], agentId?: string) {
     const current = conversation(state.channelId); const run = current.runs.find(unresolved)
@@ -230,8 +255,12 @@ export function createWorkbenchStore(api: AgentTeamApi) {
       if (revision === channelRevision) update({ channels }); else channels = state.channels
       if (!channels.some((item) => item.id === state.channelId) && channels[0]) await selectChannel(channels[0].id)
     },
-    async saveModel(input: SaveModelConfigInput) { const model = await api.models.save(input); update({ models: [...state.models.filter((item) => item.id !== model.id), model], modelId: model.id }) },
-    async refreshModels() { const models = await api.models.list(); update({ models, modelId: models.some((model) => model.id === state.modelId) ? state.modelId : models[0]?.id ?? '' }); await refreshChannel() },
+    async saveModel(input: SaveModelConfigInput) { const model = await api.models.save(input); invalidateAction(); update({ models: [...state.models.filter((item) => item.id !== model.id), model], modelId: model.id }) },
+    async refreshModels() {
+      const version = lifecycle; const readOperation = operation; const models = await api.models.list()
+      if (version !== lifecycle || readOperation !== operation) return
+      update({ models, modelId: models.some((model) => model.id === state.modelId) ? state.modelId : models[0]?.id ?? '' }); await refreshChannel()
+    },
     send: () => act('send'), interrupt: () => act('interrupt'), continue: () => act('continue'), assign: (agentId: string) => act('assign', agentId), cancel: () => stop(false), terminate: () => stop(true),
     dismissConsent: invalidateAction,
     async grantConsent() {
@@ -240,6 +269,11 @@ export function createWorkbenchStore(api: AgentTeamApi) {
       try {
         await refreshChannel(action.channelId)
         if (!currentAction(action)) { finishAction(action); return }
+        const models = await api.models.list()
+        if (!currentAction(action)) { finishAction(action); return }
+        if (JSON.stringify(models.find((model) => model.id === consent.modelConfigId)) !== JSON.stringify(pendingConsentModel)) {
+          pendingConsentModel = null; update({ models, consent: null }); await authorize(action); return
+        }
         await api.consent.grant(consent.projectId, consent.modelConfigId, { allowToolResultUpload: true })
         if (!currentAction(action)) { finishAction(action); return }
         await refreshChannel(action.channelId)

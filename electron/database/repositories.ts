@@ -1349,7 +1349,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         const finished = tx.update(agentTurns).set({ status: 'completed', messageId: message.id, finishedAt: timestamp }).where(eq(agentTurns.id, id)).returning().get()!
         tx.update(taskRuns).set({ currentTurnId: null }).where(eq(taskRuns.id, run.id)).run()
         appendEvent(tx, run, 'turn_completed', { agentId: turn.agentId, messageId: message.id, metadata: { ordinal: turn.ordinal } })
-        const members = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.isEnabled, true))).all()
+        const members = tx.select().from(channelAgents).where(eq(channelAgents.channelId, run.channelId)).all()
         const allAgents = tx.select().from(agents).all()
         const suggestions = parseAgentMentions(message.content, turn.agentId, members, allAgents)
         const lastPosition = tx.select({ position: mentionQueue.position }).from(mentionQueue).where(eq(mentionQueue.taskRunId, run.id))

@@ -31,3 +31,18 @@ it('retains email, prefix, duplicate-name, self and disabled membership boundari
   expect(parseAgentMentions('mail@Alpha example_@Beta @Same @Disabled @Alpha @Beta', 'a0', members, agents)).toEqual(['a1'])
   expect(parseAgentMentions('@Beta', 'another', [], agents)).toEqual([])
 })
+
+it.each(['disabled', 'nonmember'] as const)('recognizes a known %s long name without routing its enabled short prefix', (state) => {
+  const { agents, members } = fixtures(['内容主编 (PM)', '内容主编 (PM) 2', 'Alpha', 'Alpha Beta'])
+  if (state === 'disabled') { members[1].isEnabled = false; members[3].isEnabled = false }
+  else { members.splice(3, 1); members.splice(1, 1) }
+  expect(parseAgentMentions('@内容主编 (PM) 2， @Alpha Beta.', 'another', members, agents)).toEqual([])
+  expect(parseAgentMentions('@内容主编 (PM) 请复核。 @Alpha normal words', 'another', members, agents)).toEqual(['a0', 'a2'])
+})
+
+it('does not let a disabled or nonmember same-name record invalidate the unique enabled recipient', () => {
+  const { agents, members } = fixtures(['Same', 'Same', 'Same'])
+  members[1].isEnabled = false
+  members.pop()
+  expect(parseAgentMentions('@Same please check', 'another', members, agents)).toEqual(['a0'])
+})

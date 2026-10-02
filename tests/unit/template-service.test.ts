@@ -289,3 +289,71 @@ it.each(['model', 'channel'] as const)('rechecks %s deletion after asynchronous 
   expect(await savedState()).toEqual({ agents: [], members: [] })
   expect(fetchImpl).not.toHaveBeenCalled()
 })
+
+async function completeTemplateHandoff(speakerId: string, content: string) {
+  const channel = (await repositories.getChannel(channelId))!
+  await repositories.recordCloudConsent(channel.projectId, modelConfigId)
+  const run = await repositories.createStartedTaskRun({ channelId, modelConfigId, content: '开始团队交接复核' })
+  const decision = await repositories.appendTaskRunEvent(run.id, run.generation, 'speaker_decided', { agentId: speakerId })
+  const turn = await repositories.startAgentTurn(run.id, run.generation, speakerId, decision.seq)
+  const completed = await repositories.completeAgentTurn(turn.id, content, {
+    modelRouteSnapshot: JSON.stringify(await repositories.getModelFallbackChain(modelConfigId)),
+  })
+  expect(completed.turn.status).toBe('completed')
+  expect(await repositories.listMessages(channelId)).toContainEqual(expect.objectContaining({
+    id: completed.message.id, content, status: 'completed', agentId: speakerId,
+  }))
+  return {
+    queued: database.db.select().from(schema.mentionQueue).all().map((mention) => mention.agentId),
+    events: (await repositories.listTaskRunEvents(run.id)).filter((event) => event.eventType === 'mention_queued').map((event) => event.agentId),
+  }
+}
+
+it.each(['disabled', 'removed'] as const)(
+  'never queues the enabled shorter name when a completed message names a %s duplicate-import longer name', async (state) => {
+    const first = await service.importTeam(teamInput('media'))
+    const second = await service.importTeam(teamInput('media'))
+    const longNameAgent = second.agents[0]
+    expect(longNameAgent.name).toBe('内容主编 (PM) 2')
+    if (state === 'disabled') await repositories.saveChannelAgent({
+      channelId, agentId: longNameAgent.id, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null,
+    })
+    else {
+      await repositories.removeChannelAgent(channelId, longNameAgent.id)
+      const channel = (await repositories.getChannel(channelId))!
+      const other = await repositories.createChannel({ projectId: channel.projectId, name: '其他团队' })
+      await repositories.saveChannelAgent({ channelId: other.id, agentId: longNameAgent.id, isEnabled: true,
+        modelConfigOverrideId: null, toolPermissionsOverride: null })
+    }
+    const result = await completeTemplateHandoff(first.agents[2].id, `请 @${longNameAgent.name} 继续处理。`)
+    expect(result.queued).toEqual([])
+    expect(result.events).toEqual([])
+  },
+)
+
+it.each(['disabled', 'removed'] as const)(
+  'consumes a %s longer name without shortening it while preserving later ordinary-dialogue valid handoffs', async (state) => {
+    const first = await service.importTeam(teamInput('media'))
+    const second = await service.importTeam(teamInput('media'))
+    const longNameAgent = second.agents[0]
+    if (state === 'disabled') await repositories.saveChannelAgent({ channelId, agentId: longNameAgent.id,
+      isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
+    else await repositories.removeChannelAgent(channelId, longNameAgent.id)
+    const content = `请 @${longNameAgent.name} 等候。\n请 @${first.agents[1].name} 先核对材料。\n请 @${first.agents[0].name} 继续处理。`
+    const result = await completeTemplateHandoff(first.agents[2].id, content)
+    expect(result.queued).toEqual([first.agents[1].id, first.agents[0].id])
+    expect(result.events).toEqual([first.agents[1].id, first.agents[0].id])
+  },
+)
+
+it.each(['disabled', 'nonmember'] as const)(
+  'counts only enabled name duplicates when a completed handoff has a %s same-name Agent in the catalog', async (state) => {
+    const first = await service.importTeam(teamInput('media'))
+    const duplicate = await repositories.createAgent({ ...editor(), name: first.agents[0].name, defaultToolPermissions: {} })
+    if (state === 'disabled') await repositories.saveChannelAgent({ channelId, agentId: duplicate.id,
+      isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
+    const result = await completeTemplateHandoff(first.agents[2].id, `请 @${first.agents[0].name} 继续处理。`)
+    expect(result.queued).toEqual([first.agents[0].id])
+    expect(result.events).toEqual([first.agents[0].id])
+  },
+)

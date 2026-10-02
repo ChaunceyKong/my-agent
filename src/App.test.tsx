@@ -56,6 +56,14 @@ it('renders true Agent identity and keeps a Run running after its first complete
   await act(async () => emit({ taskRunId: 'run-1', type: 'delta', generation: 0, turnId: 'turn-1', agentId: 'a1', content: '旧轮迟到' }))
   expect(screen.queryByText('旧轮迟到')).not.toBeInTheDocument()
 })
+it('does not replace the scheduler decision with a later model attempt reason', async () => {
+  team(); durable.runs = [run({ currentTurnId: 'turn-1', turnCount: 1 })]; durable.turns = [turn()]
+  const base = { taskRunId: 'run-1', generation: 0, agentId: null, messageId: null, toolExecutionId: null, createdAt: '' }
+  durable.events = [{ ...base, id: 'decision', seq: 1, eventType: 'speaker_decided', displayReason: '规划师负责设计' }, { ...base, id: 'attempt', seq: 2, eventType: 'model_attempt', displayReason: '模型调用第 1 次' }]
+  render(<App />); await ready()
+  expect(screen.getByLabelText('CEO 任务控制')).toHaveTextContent('调度理由：规划师负责设计')
+  expect(screen.getByLabelText('CEO 任务控制')).not.toHaveTextContent('调度理由：模型调用')
+})
 it('fences generation, Agent and Turn streams and replaces tool-hop previews with the final durable reply', async () => {
   team(); durable.runs = [run({ generation: 2, currentTurnId: 'turn-1', turnCount: 1 })]; durable.turns = [turn({ generation: 2 })]
   render(<App />); await ready()

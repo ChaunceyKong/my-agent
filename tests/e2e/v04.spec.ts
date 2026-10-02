@@ -1,0 +1,253 @@
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import type { Page } from 'playwright/test'
+import { test, expect, createProject, createAndBindAgent, type Desktop, type Provider } from './fixtures'
+
+async function snapshot(page: Page) {
+  return page.evaluate(async () => {
+    const [project] = await window.agentTeam.projects.list()
+    const [channel] = await window.agentTeam.channels.list(project.id)
+    return window.agentTeam.tasks.snapshot(channel.id)
+  })
+}
+
+async function configureFallback(desktop: Desktop, provider: Provider) {
+  await createProject(desktop)
+  const { page } = desktop
+  for (const name of ['backup-v04', 'primary-v04']) {
+    await page.getByRole('button', { name: '模型设置', exact: true }).click()
+    const settings = page.getByRole('dialog', { name: '模型设置', exact: true })
+    await settings.getByRole('combobox', { name: '模型服务商', exact: true }).selectOption('openai')
+    await settings.getByLabel('服务地址', { exact: true }).fill(provider.url)
+    await settings.getByLabel('模型名称', { exact: true }).fill(name)
+    await settings.getByLabel('API Key', { exact: true }).fill('v04-private-key')
+    if (name === 'primary-v04') await settings.getByRole('combobox', { name: '备选模型', exact: true }).selectOption({ label: 'backup-v04 · openai' })
+    await settings.getByRole('button', { name: '保存配置', exact: true }).click()
+    await expect(settings.getByRole('status')).toHaveText('模型配置已保存')
+    await settings.getByRole('button', { name: '关闭', exact: true }).click()
+  }
+  const models = await page.evaluate(() => window.agentTeam.models.list())
+  return { primary: models.find((model) => model.modelName === 'primary-v04')!, backup: models.find((model) => model.modelName === 'backup-v04')! }
+}
+
+async function sendAndAuthorizeBoth(page: Page, provider: Provider, content = '验证备选模型') {
+  await page.getByLabel('消息内容', { exact: true }).fill(content)
+  await page.getByRole('button', { name: '发送消息', exact: true }).click()
+  for (const name of ['primary-v04', 'backup-v04']) {
+    const consent = page.getByRole('dialog', { name: '云端模型授权' })
+    await expect(consent).toContainText(name)
+    await expect(consent).toContainText(provider.url)
+    await expect(consent.getByRole('checkbox')).not.toBeChecked()
+    await expect(consent.getByRole('button', { name: '同意并发送', exact: true })).toBeDisabled()
+    expect(provider.requests).toHaveLength(0)
+    await consent.getByRole('checkbox').check()
+    await consent.getByRole('button', { name: '同意并发送', exact: true }).click()
+  }
+  await expect.poll(() => provider.requests.length).toBe(1)
+}
+
+async function exhaustPrimary(provider: Provider) {
+  provider.fail(503)
+  await expect.poll(() => provider.requests.length).toBe(2)
+  provider.fail(503)
+  await expect.poll(() => provider.requests.length).toBe(3)
+  expect(provider.requests.map((request) => request.model)).toEqual(['primary-v04', 'primary-v04', 'backup-v04'])
+}
+
+test('fallback selection survives restart and rejects cycles and referenced deletion atomically', async ({ desktop, provider }) => {
+  const { primary, backup } = await configureFallback(desktop, provider)
+  await desktop.restart()
+  const { page } = desktop
+  await page.getByRole('button', { name: '模型设置', exact: true }).click()
+  const settings = page.getByRole('dialog', { name: '模型设置', exact: true })
+  await settings.getByRole('combobox', { name: '已有配置', exact: true }).selectOption(primary.id)
+  await expect(settings.getByRole('combobox', { name: '备选模型', exact: true })).toHaveValue(backup.id)
+  await expect(settings.getByRole('combobox', { name: '备选模型' }).locator(`option[value="${primary.id}"]`)).toHaveCount(0)
+  await expect(settings.getByLabel('API Key')).toHaveValue('')
+  await settings.getByRole('combobox', { name: '已有配置', exact: true }).selectOption(backup.id)
+  await settings.getByRole('combobox', { name: '备选模型', exact: true }).selectOption(primary.id)
+  await settings.getByRole('button', { name: '保存配置', exact: true }).click()
+  await expect(settings.getByRole('status')).not.toHaveText('模型配置已保存')
+  expect((await page.evaluate(() => window.agentTeam.models.list())).find((model) => model.id === backup.id)?.fallbackConfigId).toBeNull()
+  await settings.getByRole('button', { name: '删除配置', exact: true }).click()
+  expect(await page.evaluate(() => window.agentTeam.models.list())).toHaveLength(2)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.screenshot({ path: 'test-results/v04-model-settings.png', fullPage: true })
+})
+
+test('5xx fallback asks separate consent and persists configured versus actual successful model', async ({ desktop, provider }) => {
+  const { primary, backup } = await configureFallback(desktop, provider)
+  await sendAndAuthorizeBoth(desktop.page, provider)
+  await exhaustPrimary(provider)
+  provider.delta('备选模型完成了本次交付。'); provider.complete()
+  await expect(desktop.page.getByRole('log')).toContainText('备选模型完成了本次交付。')
+  await expect(desktop.page.getByRole('log')).toContainText('backup-v04')
+  await expect.poll(async () => (await snapshot(desktop.page)).runs[0].status).toBe('completed')
+  let state = await snapshot(desktop.page)
+  expect(state.runs[0].modelConfigId).toBe(primary.id)
+  expect(state.messages.at(-1)?.actualModelConfigId).toBe(backup.id)
+  expect(state.events.some((event) => event.eventType === 'model_switched')).toBe(true)
+  expect(JSON.stringify(state)).not.toContain('v04-private-key')
+  expect(JSON.stringify(state)).not.toContain('private provider diagnostic')
+  await desktop.restart()
+  state = await snapshot(desktop.page)
+  expect(state.messages.at(-1)?.actualModelConfigId).toBe(backup.id)
+  await expect(desktop.page.getByRole('log')).toContainText('backup-v04')
+  expect(provider.requests).toHaveLength(3)
+  await desktop.page.setViewportSize({ width: 1440, height: 900 })
+  await desktop.page.screenshot({ path: 'test-results/v04-fallback-chat.png', fullPage: true })
+})
+
+test('Main refuses an unconsented fallback even when primary consent exists', async ({ desktop, provider }) => {
+  const { primary } = await configureFallback(desktop, provider)
+  await desktop.page.evaluate(async (modelId) => {
+    const [project] = await window.agentTeam.projects.list()
+    const [channel] = await window.agentTeam.channels.list(project.id)
+    await window.agentTeam.consent.grant(project.id, modelId, { allowToolResultUpload: true })
+    await window.agentTeam.tasks.send({ channelId: channel.id, modelConfigId: modelId, content: '只授权主模型' })
+  }, primary.id)
+  await expect.poll(() => provider.requests.length).toBe(1)
+  provider.fail(503)
+  await expect.poll(() => provider.requests.length).toBe(2)
+  provider.fail(503)
+  await expect.poll(async () => (await snapshot(desktop.page)).runs[0].status).toBe('paused')
+  expect(provider.requests.map((request) => request.model)).toEqual(['primary-v04', 'primary-v04'])
+  expect((await snapshot(desktop.page)).messages).toHaveLength(1)
+})
+
+test('cancelling during 429 backoff makes no delayed retry or fallback and permits a new task', async ({ desktop, provider }) => {
+  await configureFallback(desktop, provider)
+  await sendAndAuthorizeBoth(desktop.page, provider)
+  provider.fail(429)
+  await desktop.page.getByRole('button', { name: '停止生成', exact: true }).click()
+  await expect.poll(async () => (await snapshot(desktop.page)).runs[0].status).toBe('cancelled')
+  // Observe longer than the first retry delay; no old-generation fetch may appear.
+  await new Promise((resolve) => setTimeout(resolve, 2300))
+  expect(provider.requests).toHaveLength(1)
+  await desktop.page.getByLabel('消息内容', { exact: true }).fill('取消后的新任务')
+  await desktop.page.getByRole('button', { name: '发送消息', exact: true }).click()
+  await expect.poll(() => provider.requests.length).toBe(2)
+  provider.delta('新任务完成。'); provider.complete()
+  await expect.poll(async () => (await snapshot(desktop.page)).runs.at(-1)?.status).toBe('completed')
+  expect(provider.requests[1].model).toBe('primary-v04')
+})
+
+test('401 pauses with credential guidance without retry, fallback, or private provider text', async ({ desktop, provider }) => {
+  await configureFallback(desktop, provider)
+  await sendAndAuthorizeBoth(desktop.page, provider)
+  provider.fail()
+  await expect.poll(async () => (await snapshot(desktop.page)).runs[0].status).toBe('paused')
+  await expect(desktop.page.locator('body')).toContainText('请检查 API 密钥配置')
+  await expect(desktop.page.locator('body')).not.toContainText('private provider diagnostic')
+  expect(provider.requests).toHaveLength(1)
+  await desktop.restart()
+  expect((await snapshot(desktop.page)).messages).toHaveLength(1)
+  expect(provider.requests).toHaveLength(1)
+})
+
+for (const partial of ['delta', 'native tool bytes'] as const) {
+  test(`partial ${partial} failure never falls back or persists completed output/effects`, async ({ desktop, provider }) => {
+    await configureFallback(desktop, provider)
+    if (partial === 'native tool bytes') await createAndBindAgent(desktop.page, ['write_file'], 'Partial', '🧪', 'primary-v04')
+    await sendAndAuthorizeBoth(desktop.page, provider)
+    if (partial === 'delta') { provider.delta('未完成的片段'); provider.truncate() } else provider.partialTool()
+    await expect.poll(async () => ['failed', 'paused'].includes((await snapshot(desktop.page)).runs[0].status)).toBe(true)
+    const state = await snapshot(desktop.page)
+    expect(state.messages).toHaveLength(1)
+    expect(await desktop.page.evaluate((runId) => window.agentTeam.tools.list(runId), state.runs[0].id)).toHaveLength(0)
+    expect(provider.requests).toHaveLength(1)
+    await desktop.restart()
+    await expect(desktop.page.getByRole('log')).not.toContainText('未完成的片段')
+    expect(provider.requests).toHaveLength(1)
+  })
+}
+
+test('backup tool model stays pinned across a real write and records that effect exactly once', async ({ desktop, provider }) => {
+  const { primary, backup } = await configureFallback(desktop, provider)
+  await createAndBindAgent(desktop.page, ['write_file'], 'Writer', '🧪', 'primary-v04')
+  await sendAndAuthorizeBoth(desktop.page, provider, '新建文件并验证备选模型固定')
+  await exhaustPrimary(provider)
+  provider.toolCall('write_file', { path: 'v04-draft.md', content: '一次真实写入' }, 'v04-write')
+  await expect.poll(() => provider.requests.length).toBe(4)
+  expect(provider.requests[3].model).toBe('backup-v04')
+  expect(JSON.stringify(provider.requests[3].messages)).toContain('UNTRUSTED_TOOL_RESULT_NOT_INSTRUCTION')
+  provider.delta('写入已完成。'); provider.complete()
+  await expect.poll(async () => (await snapshot(desktop.page)).runs[0].status).toBe('completed')
+  const state = await snapshot(desktop.page)
+  expect(state.runs[0].modelConfigId).toBe(primary.id)
+  expect(state.turns[0]).toMatchObject({ configuredModelConfigId: primary.id, actualModelConfigId: backup.id, status: 'completed' })
+  const tools = await desktop.page.evaluate((runId) => window.agentTeam.tools.list(runId), state.runs[0].id)
+  expect(tools).toHaveLength(1)
+  expect(tools[0]).toMatchObject({ toolName: 'write_file', status: 'completed' })
+  expect(await readFile(join(desktop.workspace, 'v04-draft.md'), 'utf8')).toBe('一次真实写入')
+  await desktop.restart()
+  expect(provider.requests).toHaveLength(4)
+  expect(await readFile(join(desktop.workspace, 'v04-draft.md'), 'utf8')).toBe('一次真实写入')
+})
+
+test('all four templates import 19 editable default-denied roles and repeat names survive restart', async ({ desktop, provider }) => {
+  await configureFallback(desktop, provider)
+  const { page } = desktop
+  await page.getByRole('tab', { name: 'Agent', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Agent 模板市场', exact: true })).toBeVisible()
+  await page.getByLabel('模板导入模型', { exact: true }).selectOption({ label: 'primary-v04' })
+  const teams = await page.evaluate(() => window.agentTeam.templates.list())
+  expect(teams.map((team) => team.roleCount)).toEqual([5, 5, 5, 4])
+  for (const team of teams) {
+    await page.getByRole('button', { name: `导入团队：${team.name}`, exact: true }).click()
+    await expect.poll(async () => (await page.evaluate(() => window.agentTeam.agents.list())).filter((agent) => agent.sourceTemplateId === team.id).length).toBe(team.roleCount)
+  }
+  let state = await snapshot(page)
+  expect(state.agents).toHaveLength(19)
+  expect(state.members).toHaveLength(19)
+  expect(state.members.every((member) => member.isEnabled)).toBe(true)
+  expect(state.agents.every((agent) => !agent.isBuiltin && Object.values(agent.defaultToolPermissions).every((value) => !value))).toBe(true)
+  expect(state.runs).toHaveLength(0)
+  expect(provider.requests).toHaveLength(0)
+  await page.getByRole('button', { name: `导入团队：${teams[0].name}`, exact: true }).click()
+  await expect.poll(async () => (await page.evaluate(() => window.agentTeam.agents.list())).length).toBe(24)
+  state = await snapshot(page)
+  expect(new Set(state.agents.map((agent) => agent.name)).size).toBe(24)
+  expect(state.agents.some((agent) => agent.name === '内容主编 (PM) 2')).toBe(true)
+  await desktop.restart()
+  expect((await snapshot(desktop.page)).members).toHaveLength(24)
+  expect(provider.requests).toHaveLength(0)
+})
+
+test('preview copy edits persist without mutating catalog and paused import rejects the whole team', async ({ desktop, provider }) => {
+  await configureFallback(desktop, provider)
+  const { page } = desktop
+  await page.getByRole('tab', { name: 'Agent', exact: true }).click()
+  const catalog = await page.evaluate(() => window.agentTeam.templates.get('media'))
+  await page.getByLabel('模板导入模型', { exact: true }).selectOption({ label: 'primary-v04' })
+  await page.getByRole('button', { name: `预览模板：${catalog.name}`, exact: true }).click()
+  const preview = page.getByRole('dialog', { name: `模板预览：${catalog.name}`, exact: true })
+  for (const role of catalog.roles) await expect(preview).toContainText(role.systemPrompt)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.screenshot({ path: 'test-results/v04-template-preview.png', fullPage: true })
+  await preview.getByRole('button', { name: `复制并编辑：${catalog.roles[0].name}`, exact: true }).click()
+  await page.getByLabel('Agent 名称', { exact: true }).fill('自定义主编副本')
+  await page.getByLabel('Agent 系统提示', { exact: true }).fill('自定义系统提示，仅作为本地副本。')
+  await expect(page.getByRole('checkbox', { name: 'write_file', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: '创建模板副本', exact: true }).click()
+  await expect.poll(async () => (await page.evaluate(() => window.agentTeam.agents.list())).length).toBe(1)
+  const [copy] = await page.evaluate(() => window.agentTeam.agents.list())
+  expect(copy).toMatchObject({ name: '自定义主编副本', sourceTemplateId: 'media', isBuiltin: false })
+  expect((await page.evaluate((id) => window.agentTeam.agents.get(id), copy.id)).systemPrompt).toBe('自定义系统提示，仅作为本地副本。')
+  expect(await page.evaluate(() => window.agentTeam.templates.get('media'))).toEqual(catalog)
+  await sendAndAuthorizeBoth(page, provider)
+  provider.delta('副本发言完成。'); provider.complete()
+  await expect.poll(async () => (await snapshot(page)).runs[0].status).toBe('completed')
+  // Restart while live to exercise the durable paused import barrier.
+  await page.getByLabel('消息内容', { exact: true }).fill('重启后暂停的任务')
+  await page.getByRole('button', { name: '发送消息', exact: true }).click()
+  await expect.poll(() => provider.requests.length).toBe(2)
+  await desktop.restart()
+  await expect.poll(async () => (await snapshot(desktop.page)).runs.at(-1)?.status).toBe('paused')
+  await desktop.page.getByRole('tab', { name: 'Agent', exact: true }).click()
+  await desktop.page.getByRole('button', { name: `导入团队：${catalog.name}`, exact: true }).click()
+  await expect(desktop.page.getByRole('alert')).toContainText('任务')
+  expect(await desktop.page.evaluate(() => window.agentTeam.agents.list())).toHaveLength(1)
+  expect((await snapshot(desktop.page)).members).toHaveLength(1)
+  expect(await desktop.page.evaluate(() => window.agentTeam.templates.get('media'))).toEqual(catalog)
+})

@@ -22,6 +22,7 @@ beforeEach(() => {
   durable = { channel, resumeAllowed: {}, schedulerModelConfigId: null, agents: [], members: [], messages: [], runs: [], turns: [], events: [] }
   unsubscribe = vi.fn()
   api = {
+    diagnostics: { report: vi.fn().mockResolvedValue(undefined), export: vi.fn().mockResolvedValue({ status: 'cancelled' }) },
     templates: { list: vi.fn().mockResolvedValue([]), get: vi.fn(), importTeam: vi.fn(), copyAgent: vi.fn() },
     agents: { list: vi.fn().mockResolvedValue([]), get: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn() },
     channelAgents: { list: vi.fn().mockResolvedValue([]), save: vi.fn(), remove: vi.fn() },
@@ -36,10 +37,36 @@ beforeEach(() => {
   }
   window.agentTeam = api
 })
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.restoreAllMocks() })
 async function ready() { await screen.findByRole('heading', { name: channel.name }); await waitFor(() => expect(screen.getByLabelText('消息内容')).toBeEnabled()) }
 async function send() { await ready(); await userEvent.type(screen.getByLabelText('消息内容'), '帮我分析选题'); await userEvent.click(screen.getByRole('button', { name: '发送消息' })); await screen.findByRole('button', { name: '停止生成' }) }
 function team() { durable.agents = [agent, { ...agent, id: 'a2', name: '审稿人', avatar: '🔎' }]; durable.members = durable.agents.map((item) => ({ channelId: 'c1', agentId: item.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null, revision: 'r1', createdAt: '', updatedAt: '' })) }
+
+it('keeps real local and Ollama controls available while browser reports offline', async () => {
+  vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false)
+  render(<App />); await ready()
+  expect(screen.getByText(/浏览器报告网络离线/)).toBeVisible()
+  expect(screen.getByRole('button', { name: '新建项目' })).toBeEnabled()
+  await userEvent.click(screen.getByRole('button', { name: '模型设置' }))
+  await userEvent.selectOptions(screen.getByLabelText('模型服务商'), 'ollama')
+  expect(screen.getByRole('button', { name: '发现本机模型' })).toBeEnabled()
+  expect(api.tasks.send).not.toHaveBeenCalled()
+  expect(api.tasks.continue).not.toHaveBeenCalled()
+  expect(api.tasks.cancel).not.toHaveBeenCalled()
+})
+
+it('reports an unexpected window failure without modifying a running task', async () => {
+  durable.runs = [run()]
+  render(<App />); await ready()
+  act(() => { window.dispatchEvent(new ErrorEvent('error', { message: 'secret external failure' })) })
+  expect(screen.getByText('界面发生意外错误，请检查任务状态后再操作。')).toBeVisible()
+  expect(api.diagnostics.report).toHaveBeenCalledWith('renderer_unhandled_error')
+  expect(screen.queryByText(/secret external/)).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '停止生成' })).toBeVisible()
+  expect(api.tasks.send).not.toHaveBeenCalled()
+  expect(api.tasks.continue).not.toHaveBeenCalled()
+  expect(api.tasks.cancel).not.toHaveBeenCalled()
+})
 
 it('selects a workspace immediately and preserves the default initial channel', async () => {
   vi.mocked(api.projects.list).mockResolvedValue([]); render(<App />)

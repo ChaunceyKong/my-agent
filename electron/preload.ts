@@ -10,6 +10,10 @@ import type {
 } from '../shared/types'
 
 const api: AgentTeamApi = {
+  diagnostics: {
+    report: (code) => ipcRenderer.invoke(IpcChannel.DiagnosticsReport, code),
+    export: () => ipcRenderer.invoke(IpcChannel.DiagnosticsExport),
+  },
   templates: {
     list: () => ipcRenderer.invoke(IpcChannel.TemplateList),
     get: (id) => ipcRenderer.invoke(IpcChannel.TemplateGet, id),

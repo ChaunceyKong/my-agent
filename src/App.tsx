@@ -11,10 +11,11 @@ import { CloudConsentDialog } from './components/settings/CloudConsentDialog'
 import { EmptyState } from './components/common/EmptyState'
 import { Dialog } from './components/common/Dialog'
 import type { Channel } from '../shared/types'
+import { DesktopSafetyShell } from './components/common/DesktopSafetyShell'
 
 export default function App(): JSX.Element {
   if (!window.agentTeam) return <main className="desktop-unavailable"><EmptyState title="请在桌面应用中打开">此工作台需要桌面服务连接才能读取本地项目和发送消息。</EmptyState></main>
-  return <Workbench />
+  return <DesktopSafetyShell><Workbench /></DesktopSafetyShell>
 }
 
 function Workbench() {

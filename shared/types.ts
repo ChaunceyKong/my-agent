@@ -425,7 +425,13 @@ export interface StreamChatInput {
   hasToolObservations?: boolean
 }
 
+export type RendererDiagnosticCode = 'renderer_render_failed' | 'renderer_unhandled_error' | 'renderer_unhandled_rejection'
+
 export interface AgentTeamApi {
+  diagnostics: {
+    report(code: RendererDiagnosticCode): Promise<void>
+    export(): Promise<{ status: 'exported' | 'cancelled' }>
+  }
   templates: {
     list(): Promise<AgentTemplateSummary[]>
     get(id: string): Promise<AgentTemplate>

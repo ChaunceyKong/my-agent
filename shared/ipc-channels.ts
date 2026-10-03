@@ -1,4 +1,6 @@
 export enum IpcChannel {
+  DiagnosticsReport = 'diagnostics:report',
+  DiagnosticsExport = 'diagnostics:export',
   ProjectCreate = 'project:create',
   ProjectList = 'project:list',
   ProjectPickWorkspace = 'project:pick-workspace',

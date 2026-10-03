@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { ModelConfigSummary, ModelProviderPreset, SaveModelConfigInput } from '../../../shared/types'
 import { Dialog } from '../common/Dialog'
+import { DiagnosticExport } from '../common/DesktopSafetyShell'
 
 export function SettingsDialog({ onSave, onClose }: { onSave(input: SaveModelConfigInput): Promise<void>; onClose(): void }) {
   const [models, setModels] = useState<ModelConfigSummary[]>([])
@@ -58,6 +59,7 @@ export function SettingsDialog({ onSave, onClose }: { onSave(input: SaveModelCon
   <p className="form-note">仅在输出前重试或降级：429 等待 2 / 4 秒，5xx 或网络故障重试一次。401、已输出内容或已执行工具不会自动切换；每个云端候选需分别授权。</p>
   <p className="form-note">密钥加密保存在本机。修改配置后需重新确认云端外发。Ollama 仅支持本机模型。</p>
   <label>默认调度模型<select value={scheduler} disabled={busy} onChange={(event) => { const value = event.target.value; void action(async () => { await window.agentTeam.models.setDefaultScheduler(value || null); setScheduler(value) }) }}><option value="">未设置</option>{models.map((model) => <option key={model.id} value={model.id}>{model.modelName}</option>)}</select></label><p className="form-note">群聊未指定调度模型时使用此默认配置。</p>
+  <DiagnosticExport />
   {notice && <p role="status" className="form-note">{notice}</p>}
   <div className="dialog-actions">{id && <><button type="button" disabled={busy} onClick={() => { void action(async () => { setNotice((await window.agentTeam.models.test(id)).message) }) }}>测试连接</button><button type="button" disabled={busy} onClick={() => { void action(async () => { await window.agentTeam.models.remove(id); setId(''); await reload(); setNotice('配置已删除') }) }}>删除配置</button></>}<button type="button" disabled={busy} onClick={onClose}>关闭</button><button className="primary-button" disabled={busy || !modelName.trim() || (!id && provider !== 'ollama' && !apiKey) || !baseUrl.trim()} type="submit">{busy ? '处理中…' : '保存配置'}</button></div></form></Dialog>
 }

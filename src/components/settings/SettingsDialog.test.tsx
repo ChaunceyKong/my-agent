@@ -9,7 +9,7 @@ import { SettingsDialog } from './SettingsDialog'
 
 afterEach(cleanup)
 it('edits and clears a fallback, excludes self and resets the selection for a new config', async () => {
-  window.agentTeam = { models: { list: vi.fn().mockResolvedValue([
+  window.agentTeam = { diagnostics: { report: vi.fn().mockResolvedValue(undefined), export: vi.fn().mockResolvedValue({ status: 'cancelled' }) }, models: { list: vi.fn().mockResolvedValue([
     { id: 'primary', modelName: 'primary', providerPreset: 'openai', baseUrl: 'https://example.test', hasApiKey: true, fallbackConfigId: 'backup' },
     { id: 'backup', modelName: 'backup', providerPreset: 'openai', baseUrl: 'https://backup.test', hasApiKey: true },
   ]), getDefaultScheduler: vi.fn().mockResolvedValue(null) } } as unknown as AgentTeamApi
@@ -25,4 +25,8 @@ it('edits and clears a fallback, excludes self and resets the selection for a ne
   await userEvent.selectOptions(screen.getByLabelText('已有配置'), 'primary')
   await userEvent.selectOptions(screen.getByLabelText('已有配置'), '')
   expect(screen.getByLabelText('备选模型')).toHaveValue('')
+  expect(window.agentTeam.diagnostics.export).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('button', { name: '导出诊断日志' }))
+  expect(window.agentTeam.diagnostics.export).toHaveBeenCalledWith()
+  expect(screen.getByText('已取消导出')).toBeVisible()
 })

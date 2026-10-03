@@ -15,6 +15,7 @@ import { listDirectory } from '../core/file-tools'
 import type { Repositories } from '../database/repositories'
 import { randomUUID } from 'node:crypto'
 import { captureModelRoute } from '../core/model-route'
+import { validRendererDiagnostic, type Diagnostics } from '../core/diagnostics'
 
 interface IpcHandlerRegistrar {
   handle(channel: string, listener: (event: unknown, ...args: any[]) => unknown): void
@@ -34,9 +35,29 @@ export interface IpcHandlerDependencies {
   processes?: ReturnType<typeof createProcessToolService>
   runner?: ReturnType<typeof createSingleAgentRunner>
   orchestrator?: ReturnType<typeof createSerialOrchestrator>
+  diagnostics?: Diagnostics
 }
 
-export function registerHandlers({ ipcMain, dialog, repositories, taskRuns, modelClient, approvals, processes, runner, orchestrator }: IpcHandlerDependencies): void {
+export function registerHandlers({ ipcMain: registrar, dialog, repositories, taskRuns, modelClient, approvals, processes, runner, orchestrator, diagnostics }: IpcHandlerDependencies): void {
+  const ipcMain: IpcHandlerRegistrar = { handle(channel, listener) {
+    registrar.handle(channel, (event, ...args) => {
+      try {
+        const result = listener(event, ...args)
+        if (result instanceof Promise) return result.catch((error: unknown) => { diagnostics?.record('ipc_failed', channel); throw error })
+        return result
+      } catch (error) { diagnostics?.record('ipc_failed', channel); throw error }
+    })
+  } }
+  ipcMain.handle(IpcChannel.DiagnosticsReport, (_event, ...args: unknown[]) => {
+    if (args.length !== 1) throw new Error('诊断请求无效')
+    const code = validRendererDiagnostic(args[0])
+    if (!diagnostics) throw new Error('诊断服务不可用')
+    diagnostics.record(code, 'renderer')
+  })
+  ipcMain.handle(IpcChannel.DiagnosticsExport, (_event, ...args: unknown[]) => {
+    if (args.length || !diagnostics) throw new Error('诊断请求无效')
+    return diagnostics.export()
+  })
   const startingChannels = new Set<string>()
   const workspaceSelections = new Map<string, string>()
   const agents = createAgentService(repositories)

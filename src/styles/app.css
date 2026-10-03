@@ -76,7 +76,7 @@ h1, h2, h3, p { margin: 0; }
 h1 { font-size: 15px; font-weight: 650; }
 h2 { font-size: 17px; }
 h3 { font-size: 12px; font-weight: 650; }
-.app-shell { height: 100dvh; display: flex; flex-direction: column; min-width: 760px; }
+.app-shell { position: relative; height: 100dvh; display: flex; flex-direction: column; min-width: 760px; }
 .app-header { height: 46px; flex-shrink: 0; display: flex; gap: 18px; align-items: center; padding: 0 15px; background: var(--surface); border-bottom: 1px solid var(--border); }
 .brand { display: flex; align-items: center; gap: 8px; white-space: nowrap; font-size: 12px; color: var(--text); }
 .brand-mark { display: grid; place-items: center; background: var(--accent-strong); color: var(--on-accent); border-radius: 6px; width: 23px; height: 23px; }
@@ -222,3 +222,9 @@ dd { margin: 0; overflow-wrap: anywhere; }
   .breadcrumbs { display: none; }
 }
 .theme-picker { font-size: 11px; padding: 4px 7px; flex-shrink: 0; }
+.desktop-safety-shell { height: 100dvh; display: flex; flex-direction: column; }
+.desktop-safety-shell > .app-shell { height: auto; flex: 1; min-height: 0; }
+.connectivity-hint { background: var(--subtle); color: var(--muted); border-bottom: 1px solid var(--border); padding: 7px 14px; font-size: 12px; }
+.global-error-notice { flex-shrink: 0; margin: 8px 14px; }
+.global-error-notice p { margin: 6px 0; }
+.diagnostic-export { margin-top: 12px; }

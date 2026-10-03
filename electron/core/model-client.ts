@@ -68,6 +68,7 @@ export interface ModelClientDependencies {
   taskRuns: Pick<TaskRunService, 'canAcceptChunk' | 'onCancelled'>
   crypto: CryptoAdapter
   fetch?: typeof globalThis.fetch
+  recordFailure?(): void
 }
 
 export function createModelClient({
@@ -76,6 +77,7 @@ export function createModelClient({
   taskRuns,
   crypto,
   fetch: fetchImpl = globalThis.fetch,
+  recordFailure,
 }: ModelClientDependencies): ModelClient {
   const headers = (config: ModelConfigRecord): Record<string, string> => {
     if (config.providerPreset === 'ollama') return { 'Content-Type': 'application/json' }
@@ -195,7 +197,8 @@ export function createModelClient({
       }
       throw new ModelClientError('network')
     } catch (error) {
-      if (controller.signal.aborted) throw new ModelClientError(deadline ? 'deadline' : 'cancelled')
+      if (controller.signal.aborted) { if (deadline) recordFailure?.(); throw new ModelClientError(deadline ? 'deadline' : 'cancelled') }
+      recordFailure?.()
       throw error
     } finally { clearTimeout(timer); unsubscribe() }
   }
@@ -251,7 +254,7 @@ export function createModelClient({
         if (!isRecord(data) || data.error !== undefined || !Array.isArray(data.choices) || data.choices.length !== 1 || !isRecord(data.choices[0]) || !isRecord(data.choices[0].message)
           || data.choices[0].message.role !== 'assistant' || typeof data.choices[0].message.content !== 'string' || data.choices[0].message.tool_calls !== undefined) throw new Error('invalid')
         return { ok: true, message: '模型连接正常' }
-      } catch { return { ok: false, message: '模型连接失败，请检查服务、模型名称和凭证' } }
+      } catch { recordFailure?.(); return { ok: false, message: '模型连接失败，请检查服务、模型名称和凭证' } }
       finally { clearTimeout(timer) }
     },
 

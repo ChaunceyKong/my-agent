@@ -5,10 +5,11 @@ interface StartupDependencies<T extends { close(): void }> {
   prepare(database: T): Promise<unknown>
   showError(options: MessageBoxOptions): Promise<{ response: number }>
   quit(): void
+  recordFailure?(): void
 }
 
 export async function openStartupDatabase<T extends { close(): void }>({
-  open, prepare, showError, quit,
+  open, prepare, showError, quit, recordFailure,
 }: StartupDependencies<T>): Promise<T | undefined> {
   while (true) {
     let database: T | undefined
@@ -17,6 +18,7 @@ export async function openStartupDatabase<T extends { close(): void }>({
       await prepare(database)
       return database
     } catch {
+      recordFailure?.()
       database?.close()
       const { response } = await showError({
         type: 'error',

@@ -20,6 +20,7 @@ let input: StreamChatInput
 let fallback: string
 let root: string
 let events: StreamEvent[]
+let recordFailure: ReturnType<typeof vi.fn>
 const json = (content = '{}') => new Response(JSON.stringify({ choices: [{ message: { content } }] }), { headers: { 'content-type': 'application/json' } })
 const sse = (content = 'answer') => new Response(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
 const http = (status: number) => new Response('private Provider error: secret', { status })
@@ -33,7 +34,9 @@ beforeEach(async () => {
   repositories = createRepositories(database)
   taskRuns = createTaskRunService(repositories)
   fetchImpl = vi.fn()
+  recordFailure = vi.fn()
   client = createModelClient({ repositories, consent: createCloudConsentService(repositories), taskRuns, fetch: fetchImpl,
+    recordFailure,
     crypto: { isEncryptionAvailable: () => true, encryptString: (key) => Buffer.from(key), decryptString: (key) => key.toString() } })
   const { project, channel } = await repositories.createProjectWithInitialChannel({ name: 'fallback', workspacePath: directory })
   fallback = (await client.saveModelConfig({ providerPreset: 'openai', modelName: 'backup', apiKey: 'secret' })).id
@@ -115,6 +118,7 @@ it('120s aggregate deadline closes a three-model timeout chain without a late re
   await flush(); await vi.advanceTimersByTimeAsync(120000); await pending
   expect(models()).toEqual(['primary', 'primary', 'backup', 'backup'])
   expect(signals.every((signal) => signal.aborted)).toBe(true)
+  expect(recordFailure).toHaveBeenCalledTimes(1)
   expect(events).toEqual([expect.objectContaining({ type: 'error', content: '模型调用超过 120 秒，请重试', interventionRequired: true })])
   await vi.advanceTimersByTimeAsync(90000); expect(models()).toHaveLength(4)
 })
@@ -127,6 +131,7 @@ it.each(['delay', 'request'])('real TaskRun cancellation during %s stops all att
   await flush(); await pending
   await vi.advanceTimersByTimeAsync(120000)
   expect(models()).toHaveLength(1); expect(events).toEqual([])
+  expect(recordFailure).not.toHaveBeenCalled()
   const facts = (await repositories.listTaskRunEvents(input.taskRunId)).filter((event) => event.eventType === 'model_attempt')
   expect(facts).toHaveLength(1); expect(facts[0].generation).toBe(0)
 })

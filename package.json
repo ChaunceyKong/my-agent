@@ -1,13 +1,16 @@
 {
   "name": "agent-team-desktop",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "main": "./out/main/main.js",
   "productName": "Agent Team Desktop",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "build:win": "npm run build && electron-builder --win",
+    "build:win": "npm run build && node scripts/package-desktop.mjs win",
+    "build:mac": "npm run build && node scripts/package-desktop.mjs mac",
+    "build:linux": "npm run build && node scripts/package-desktop.mjs linux",
+    "test:package": "playwright test --config playwright.package.config.ts",
     "test": "vitest run",
     "pretest:e2e": "npm run build",
     "test:e2e": "playwright test"
@@ -43,7 +46,7 @@
     "asar": true,
     "npmRebuild": false,
     "directories": {
-      "output": "release/win-v0.4.0"
+      "output": "release/${os}-v${version}"
     },
     "files": [
       "out/**/*",
@@ -55,6 +58,8 @@
         "portable"
       ]
     },
+    "mac": { "target": ["dmg", "zip"] },
+    "linux": { "target": ["AppImage"] },
     "nsis": {
       "oneClick": true,
       "perMachine": false,

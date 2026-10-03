@@ -5,11 +5,12 @@ import { AgentManager } from '../agent/AgentManager'
 import { ToolCard } from '../agent/ToolCard'
 import { ApprovalCard } from '../agent/ApprovalCard'
 import { WorkspaceTree } from '../agent/WorkspaceTree'
+import { APP_VERSION } from '../../../shared/app-version'
 
 export function RightCockpit({ project, channel, model, models, run, revision, onRefresh, onChannelChanged }: { project?: ProjectSummary; channel?: Channel; model?: ModelConfigSummary; models: ModelConfigSummary[]; run?: TaskRun; revision: number; onRefresh(): void; onChannelChanged(channel: Channel): void }) {
   const [tab, setTab] = useState('members')
   const tabs = [['members', 'Agent'], ['files', '工作区文件'], ['tools', '工具与审批'], ['context', '团队上下文']]
-  return <aside id="right-cockpit" className="right-cockpit" aria-label="团队与工作区"><div className="cockpit-title">团队与工作区<span>v0.4</span></div><div className="cockpit-tabs" role="tablist" aria-label="工作台视窗">{tabs.map(([id, label], index) => <button key={id} id={`tab-${id}`} role="tab" aria-controls="cockpit-content" aria-selected={tab === id} tabIndex={tab === id ? 0 : -1} onClick={() => setTab(id)} onKeyDown={(event) => {
+  return <aside id="right-cockpit" className="right-cockpit" aria-label="团队与工作区"><div className="cockpit-title">团队与工作区<span>v{APP_VERSION}</span></div><div className="cockpit-tabs" role="tablist" aria-label="工作台视窗">{tabs.map(([id, label], index) => <button key={id} id={`tab-${id}`} role="tab" aria-controls="cockpit-content" aria-selected={tab === id} tabIndex={tab === id ? 0 : -1} onClick={() => setTab(id)} onKeyDown={(event) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
     event.preventDefault()
     const next = tabs[(index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length][0]

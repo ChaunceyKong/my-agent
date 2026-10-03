@@ -31,8 +31,10 @@ test('system is the default and follows live system color changes without a proj
   await expect(page.getByRole('heading', { name: '主线任务协同群', exact: true })).toHaveCount(0)
   await page.emulateMedia({ colorScheme: 'dark' })
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+  await page.screenshot({ path: 'test-results/v05-theme-system-dark.png', fullPage: true })
   await page.emulateMedia({ colorScheme: 'light' })
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+  await page.screenshot({ path: 'test-results/v05-theme-system-light.png', fullPage: true })
   await expect(selector).toHaveValue('system')
 })
 

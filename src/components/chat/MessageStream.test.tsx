@@ -16,4 +16,5 @@ it('uses durable actual IDs only for completed replies and distinguishes attempt
   expect(screen.getByText(/实际完成模型配置：backup/)).toHaveTextContent('当前名称：renamed')
   expect(screen.queryByText(/实际完成模型配置：primary/)).toBeNull()
   expect(screen.getByText(/开始尝试备选模型/)).toHaveTextContent('尝试记录，非完成结果')
+  expect(screen.getAllByRole('article')).toHaveLength(2)
 })

@@ -25,6 +25,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
   let navigation = 0; let operation = 0; let dispatching = false
   let pendingConsentModel: ModelConfigSummary | null = null
   const refreshing = new Map<string, { again: boolean; promise: Promise<void> }>()
+  const scheduledRefreshes = new Map<string, ReturnType<typeof setTimeout>>()
   const buffered: Array<{ channelId: string | null; event: StreamEvent }> = []
   const previewBindings = new Map<string, { generation: number; step: number }>()
   const update = (next: Partial<WorkbenchState>) => { state = { ...state, ...next }; listeners.forEach((listener) => listener()) }
@@ -38,6 +39,20 @@ export function createWorkbenchStore(api: AgentTeamApi) {
         && (action.kind === 'interrupt' ? run.status === 'running' : conversation(action.channelId).resumeAllowed[run.id] === true) : !run)
   }
   const finishAction = (action: Action) => { if (action.operation === operation) { if (!currentAction(action)) pendingAction = null; update({ sending: false, consent: currentAction(action) ? state.consent : null }) } }
+  function clearScheduledRefresh(channelId: string) {
+    clearTimeout(scheduledRefreshes.get(channelId)); scheduledRefreshes.delete(channelId)
+  }
+  function clearScheduledRefreshes() {
+    for (const channelId of scheduledRefreshes.keys()) clearScheduledRefresh(channelId)
+  }
+  function scheduleRefresh(channelId: string) {
+    if (scheduledRefreshes.has(channelId) || !state.channels.some((item) => item.id === channelId)) return
+    const version = lifecycle
+    scheduledRefreshes.set(channelId, setTimeout(() => {
+      scheduledRefreshes.delete(channelId)
+      if (version === lifecycle) void refreshChannel(channelId)
+    }, 40))
+  }
   function disposition(channelId: string, event: StreamEvent): 'ready' | 'stale' | 'unbound' {
     const current = conversation(channelId); const run = current.runs.find((item) => item.id === event.taskRunId)
     if (!Number.isSafeInteger(event.generation)) return 'stale'
@@ -68,6 +83,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
     return true
   }
   async function refreshChannel(channelId = state.channelId) {
+    clearScheduledRefresh(channelId)
     if (!channelId || !state.channels.some((item) => item.id === channelId)) return
     const active = refreshing.get(channelId)
     if (active) { active.again = true; return active.promise }
@@ -101,7 +117,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
             if (result !== 'unbound') { buffered.splice(buffered.indexOf(item), 1); if (result === 'ready') delta(channelId, item.event) }
             else if (!retriedUnbound) { retriedUnbound = true; refresh.again = true }
           }
-        } catch { if (version === lifecycle) patch(channelId, { loading: false, error: '群聊记录加载失败，请重新加载重试' }) }
+        } catch { if (version === lifecycle && state.channels.some((item) => item.id === channelId)) patch(channelId, { loading: false, error: '群聊记录加载失败，请重新加载重试' }) }
       } while (refresh.again && version === lifecycle)
     })().finally(() => { if (refreshing.get(channelId) === refresh) refreshing.delete(channelId) })
     return refresh.promise
@@ -110,7 +126,8 @@ export function createWorkbenchStore(api: AgentTeamApi) {
     const entry = Object.entries(state.conversations).find(([, current]) => current.runs.some((run) => run.id === event.taskRunId))
     const channelId = entry?.[0] ?? null
     if (event.type === 'delta' && (!Number.isSafeInteger(event.generation) || (channelId && disposition(channelId, event) === 'stale'))) return
-    if (event.type === 'delta' && (!channelId || !delta(channelId, event))) {
+    if (event.type === 'delta' && channelId && delta(channelId, event)) { scheduleRefresh(channelId); return }
+    if (event.type === 'delta') {
       if (buffered.length === 256) buffered.shift()
       buffered.push({ channelId, event })
     }
@@ -121,12 +138,14 @@ export function createWorkbenchStore(api: AgentTeamApi) {
     navigation++; invalidateAction(); update({ channelId }); patch(channelId, { loading: !conversation(channelId).loaded, error: '' }); await refreshChannel(channelId)
   }
   async function selectProject(projectId: string) {
+    clearScheduledRefreshes()
     const version = ++selection
     navigation++; invalidateAction(); update({ projectId, channelId: '', channels: [], error: '' })
     try { const channels = await api.channels.list(projectId); if (version !== selection) return; update({ channels }); if (channels[0]) await selectChannel(channels[0].id) }
     catch { if (version === selection) update({ error: '群聊列表加载失败，请重新选择项目重试' }) }
   }
   async function initialize() {
+    clearScheduledRefreshes()
     const version = ++lifecycle; update({ loading: true, error: '' })
     try {
       const [projects, models] = await Promise.all([api.projects.list(), api.models.list()]); if (version !== lifecycle) return
@@ -223,8 +242,9 @@ export function createWorkbenchStore(api: AgentTeamApi) {
   return {
     getSnapshot: () => state, subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     connect() {
-      const unsubscribe = api.events.onStream(onStream); const timer = setInterval(() => { void refreshChannel() }, 750); void initialize()
-      return () => { clearInterval(timer); unsubscribe(); lifecycle++; selection++; navigation++; operation++; buffered.length = 0; pendingAction = null; refreshing.clear(); previewBindings.clear() }
+      let connected = true
+      const unsubscribe = api.events.onStream((event) => { if (connected) onStream(event) }); const timer = setInterval(() => { void refreshChannel() }, 750); void initialize()
+      return () => { connected = false; clearInterval(timer); clearScheduledRefreshes(); unsubscribe(); lifecycle++; selection++; navigation++; operation++; buffered.length = 0; pendingAction = null; refreshing.clear(); previewBindings.clear() }
     },
     initialize, selectProject, selectChannel, refreshChannel,
     setModel: (modelId: string) => { invalidateAction(); update({ modelId }) },
@@ -245,6 +265,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
     updateChannel: (channel: Channel) => { if (state.channels.some((item) => item.id === channel.id)) { channelRevision++; update({ channels: state.channels.map((item) => item.id === channel.id ? channel : item) }); void refreshChannel(channel.id) } },
     async removeChannel(channelId: string) {
       const projectId = state.projectId; const version = selection; await api.channels.remove({ channelId, confirmation: 'delete_channel_records' })
+      clearScheduledRefresh(channelId)
       const revision = ++channelRevision; const conversations = { ...state.conversations }; delete conversations[channelId]
       const remaining = state.channels.filter((item) => item.id !== channelId)
       update({ conversations, channels: remaining, consent: state.consent?.channelId === channelId ? null : state.consent, channelId: state.channelId === channelId ? '' : state.channelId })

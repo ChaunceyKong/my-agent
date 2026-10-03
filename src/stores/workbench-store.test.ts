@@ -65,7 +65,7 @@ it('retains an explicitly switched Channel when a previously requested creation 
 })
 
 const cleanups: Array<() => void> = []
-afterEach(() => cleanups.splice(0).forEach((cleanup) => cleanup()))
+afterEach(() => { cleanups.splice(0).forEach((cleanup) => cleanup()); vi.useRealTimers() })
 const runFixture = (status: TaskRun['status'] = 'paused'): TaskRun => ({ id: 'run', channelId: first.id, modelConfigId: 'model', status, generation: 1, currentTurnId: null, turnCount: 1, pauseReason: null, createdAt: '', startedAt: '', finishedAt: null, errorMessage: null })
 function flow(initialRun?: TaskRun) {
   let snapshot: ChannelTaskSnapshot = { channel: first, schedulerModelConfigId: null, resumeAllowed: initialRun ? { run: true } : {}, agents: [], members: [], messages: [], runs: initialRun ? [initialRun] : [], turns: [], events: [] }
@@ -83,6 +83,132 @@ function flow(initialRun?: TaskRun) {
 }
 async function loaded(store: ReturnType<typeof createWorkbenchStore>) { await vi.waitFor(() => expect(store.getSnapshot().conversations[first.id]?.loaded).toBe(true)) }
 const modelFixture = (id: string, fallbackConfigId: string | null = null): ModelConfigSummary => ({ id, modelName: id, providerPreset: 'openai', baseUrl: 'https://example.test', hasApiKey: true, fallbackConfigId })
+
+it('shows the first bound token synchronously and coalesces a burst into one bounded snapshot read', async () => {
+  vi.useFakeTimers(); const context = flow(runFixture('running')); await loaded(context.store)
+  vi.mocked(context.api.tasks.snapshot).mockClear()
+  const token = { taskRunId: 'run', type: 'delta' as const, generation: 1, content: '片' }
+  context.emit(token)
+  expect(context.store.getSnapshot().conversations[first.id].previews[0].content).toBe('片')
+  for (let index = 0; index < 99; index++) context.emit(token)
+  expect(context.api.tasks.snapshot).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(39)
+  expect(context.api.tasks.snapshot).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(1)
+  expect(context.api.tasks.snapshot).toHaveBeenCalledTimes(1)
+  expect(context.store.getSnapshot().conversations[first.id].previews[0].content).toBe('片'.repeat(100))
+  expect(vi.getTimerCount()).toBe(1) // Existing polling fallback only.
+})
+
+it.each(['complete', 'error'] as const)('flushes %s immediately and removes the scheduled delta refresh', async (type) => {
+  vi.useFakeTimers(); const context = flow(runFixture('running')); await loaded(context.store)
+  vi.mocked(context.api.tasks.snapshot).mockClear()
+  context.emit({ taskRunId: 'run', type: 'delta', generation: 1, content: 'partial' })
+  context.get().runs[0].status = type === 'complete' ? 'completed' : 'failed'
+  context.emit({ taskRunId: 'run', type, generation: 1 })
+  expect(context.api.tasks.snapshot).toHaveBeenCalledTimes(1)
+  await vi.advanceTimersByTimeAsync(40)
+  expect(context.api.tasks.snapshot).toHaveBeenCalledTimes(1)
+  expect(context.store.getSnapshot().conversations[first.id].previews).toEqual([])
+})
+
+it('follows a terminal event with one fresh snapshot when an older snapshot is in flight', async () => {
+  vi.useFakeTimers(); const context = flow(runFixture('running')); await loaded(context.store)
+  const old = deferred<ChannelTaskSnapshot>()
+  const oldSnapshot = structuredClone(context.get())
+  vi.mocked(context.api.tasks.snapshot).mockClear().mockReturnValueOnce(old.promise)
+  context.emit({ taskRunId: 'run', type: 'delta', generation: 1, content: 'partial' })
+  await vi.advanceTimersByTimeAsync(40)
+  context.get().runs[0].status = 'completed'
+  context.emit({ taskRunId: 'run', type: 'complete', generation: 1 })
+  old.resolve(oldSnapshot)
+  await vi.advanceTimersByTimeAsync(0)
+  expect(context.api.tasks.snapshot).toHaveBeenCalledTimes(2)
+  expect(context.store.getSnapshot().conversations[first.id].runs[0].status).toBe('completed')
+  expect(context.store.getSnapshot().conversations[first.id].previews).toEqual([])
+})
+
+it('keeps hidden-channel deltas isolated through navigation and retains the 750 ms polling fallback', async () => {
+  vi.useFakeTimers(); const context = flow(runFixture('running')); await loaded(context.store)
+  vi.mocked(context.api.tasks.snapshot).mockClear()
+  context.emit({ taskRunId: 'run', type: 'delta', generation: 1, content: 'first channel' })
+  await context.store.selectChannel(second.id)
+  await vi.advanceTimersByTimeAsync(40)
+  expect(context.store.getSnapshot().channelId).toBe(second.id)
+  expect(context.store.getSnapshot().conversations[second.id].previews).toEqual([])
+  expect(context.store.getSnapshot().conversations[first.id].previews[0].content).toBe('first channel')
+  expect(vi.mocked(context.api.tasks.snapshot).mock.calls.map((args) => args[0])).toEqual([second.id, first.id])
+  await vi.advanceTimersByTimeAsync(710)
+  expect(context.api.tasks.snapshot).toHaveBeenLastCalledWith(second.id)
+  expect(context.api.tasks.snapshot).toHaveBeenCalledTimes(3)
+})
+
+it('drops stale deltas and cancels a pending refresh on cancellation without replay', async () => {
+  vi.useFakeTimers(); const context = flow(runFixture('running')); await loaded(context.store)
+  vi.mocked(context.api.tasks.snapshot).mockClear()
+  context.emit({ taskRunId: 'run', type: 'delta', generation: 0, content: 'stale' })
+  expect(vi.getTimerCount()).toBe(1)
+  context.emit({ taskRunId: 'run', type: 'delta', generation: 1, content: 'current' })
+  vi.mocked(context.api.tasks.cancel).mockImplementation(async () => { context.get().runs[0].generation++; context.get().runs[0].status = 'cancelled' })
+  await context.store.cancel()
+  context.emit({ taskRunId: 'run', type: 'delta', generation: 1, content: 'late' })
+  await vi.advanceTimersByTimeAsync(40)
+  expect(context.api.tasks.snapshot).toHaveBeenCalledTimes(1)
+  expect(context.store.getSnapshot().conversations[first.id].previews).toEqual([])
+  expect(context.api.tasks.send).not.toHaveBeenCalled()
+})
+
+it('clears timers and fences retained callbacks and in-flight results on disconnect', async () => {
+  vi.useFakeTimers(); const context = flow(runFixture('running')); await loaded(context.store)
+  const old = deferred<ChannelTaskSnapshot>()
+  vi.mocked(context.api.tasks.snapshot).mockClear().mockReturnValueOnce(old.promise)
+  const pending = context.store.refreshChannel()
+  context.emit({ taskRunId: 'run', type: 'delta', generation: 1, content: 'before disconnect' })
+  cleanups.pop()!()
+  const before = context.store.getSnapshot()
+  context.emit({ taskRunId: 'run', type: 'delta', generation: 1, content: 'late' })
+  old.resolve(structuredClone(context.get())); await pending
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(vi.getTimerCount()).toBe(0)
+  expect(context.api.tasks.snapshot).toHaveBeenCalledTimes(1)
+  expect(context.store.getSnapshot()).toBe(before)
+})
+
+it('clears scheduled reads on project changes and channel deletion without resurrecting history', async () => {
+  vi.useFakeTimers(); const context = flow(runFixture('running')); await loaded(context.store)
+  context.emit({ taskRunId: 'run', type: 'delta', generation: 1, content: 'old project' })
+  vi.mocked(context.api.channels.list).mockResolvedValueOnce([])
+  vi.mocked(context.api.tasks.snapshot).mockClear()
+  await context.store.selectProject('another')
+  await vi.advanceTimersByTimeAsync(40)
+  expect(context.api.tasks.snapshot).not.toHaveBeenCalled()
+  await context.store.selectProject('p')
+  context.emit({ taskRunId: 'run', type: 'delta', generation: 1, content: 'to delete' })
+  context.api.channels.remove = vi.fn().mockResolvedValue(undefined)
+  vi.mocked(context.api.channels.list).mockResolvedValueOnce([second])
+  vi.mocked(context.api.tasks.snapshot).mockClear()
+  await context.store.removeChannel(first.id)
+  await vi.advanceTimersByTimeAsync(40)
+  expect(context.api.tasks.snapshot).toHaveBeenCalledTimes(1)
+  expect(context.api.tasks.snapshot).toHaveBeenCalledWith(second.id)
+  expect(context.store.getSnapshot().conversations[first.id]).toBeUndefined()
+})
+
+it('does not resurrect a deleted conversation when its in-flight scheduled snapshot fails', async () => {
+  vi.useFakeTimers(); const context = flow(runFixture('running')); await loaded(context.store)
+  let reject!: (error: Error) => void
+  const failure = new Promise<ChannelTaskSnapshot>((_resolve, fail) => { reject = fail })
+  vi.mocked(context.api.tasks.snapshot).mockReturnValueOnce(failure)
+  context.emit({ taskRunId: 'run', type: 'delta', generation: 1, content: 'to delete' })
+  await vi.advanceTimersByTimeAsync(40)
+  context.api.channels.remove = vi.fn().mockResolvedValue(undefined)
+  vi.mocked(context.api.channels.list).mockResolvedValueOnce([second])
+  await context.store.removeChannel(first.id)
+  reject(new Error('channel gone'))
+  await vi.advanceTimersByTimeAsync(0)
+  expect(context.store.getSnapshot().conversations[first.id]).toBeUndefined()
+  expect(context.store.getSnapshot().channelId).toBe(second.id)
+})
 
 it.each(['send', 'interrupt', 'continue', 'assign'] as const)('uses the selected model for new %s input and the existing Run model for continuation', async (kind) => {
   const { api, store } = flow(kind === 'send' ? undefined : runFixture(kind === 'interrupt' ? 'running' : 'paused'))

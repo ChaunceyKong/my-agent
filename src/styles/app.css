@@ -113,6 +113,10 @@ h3 { font-size: 12px; font-weight: 650; }
 .chat-workspace { margin-left: auto; font-size: 10px; color: var(--muted); background: var(--subtle); padding: 3px 6px; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message-stream, .welcome-panel { flex: 1; overflow-y: auto; min-height: 0; padding: 26px 26px 18px; background: var(--subtle); }
 .welcome-panel { display: grid; place-items: center; }
+.history-navigation { display: flex; align-items: center; gap: 12px; flex-shrink: 0; padding: 6px 26px; color: var(--muted); font-size: 11px; background: var(--subtle); }
+.history-navigation span { margin-right: auto; }
+.history-row { display: flow-root; }
+.virtual-message-stream { overflow-anchor: none; }
 .empty-state { text-align: center; padding: 32px 16px; color: var(--muted); }
 .empty-icon { display: grid; place-items: center; margin: 0 auto 15px; width: 46px; height: 46px; border: 1px solid var(--border); background: var(--accent-soft); color: var(--accent); border-radius: 14px; font-size: 25px; }
 .empty-state h2 { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 10px; }

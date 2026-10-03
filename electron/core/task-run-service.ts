@@ -1,5 +1,6 @@
 import type { CeoMentionToken, TaskRun } from '../../shared/types'
 import type { Repositories } from '../database/repositories'
+import type { ExecutionGate } from './execution-gate'
 
 export interface TaskRunService {
   startTaskRun(channelId: string, modelConfigId: string, content: string, mentions?: CeoMentionToken[]): Promise<TaskRun>
@@ -11,12 +12,13 @@ export interface TaskRunService {
   onCancelled(id: string, listener: () => void): () => void
   trackEffect<T>(id: string, effect: () => Promise<T>): Promise<T>
   hasActiveEffects(id: string): boolean
+  hasAnyActiveEffects(): boolean
   pauseTaskRun(id: string, reason: string, expectedGeneration?: number): Promise<TaskRun>
   resumeTaskRun(id: string, agentId?: string): Promise<TaskRun>
   acknowledgeProcessRecovery(id: string, executionId: string): Promise<void>
 }
 
-export function createTaskRunService(repositories: Repositories, cleanupTimeoutMs = 5_000): TaskRunService {
+export function createTaskRunService(repositories: Repositories, cleanupTimeoutMs = 5_000, gate?: ExecutionGate): TaskRunService {
   const cancellationListeners = new Map<string, Set<() => void>>()
   const effects = new Map<string, Set<Promise<unknown>>>()
   const stopping = new Map<string, Promise<TaskRun>>()
@@ -38,7 +40,7 @@ export function createTaskRunService(repositories: Repositories, cleanupTimeoutM
     stopping.set(id, operation)
     try { return await operation } finally { stopping.delete(id) }
   }
-  return {
+  const service: TaskRunService = {
     startTaskRun: (channelId, modelConfigId, content, mentions) => repositories.createStartedTaskRun({
       channelId,
       modelConfigId,
@@ -66,6 +68,7 @@ export function createTaskRunService(repositories: Repositories, cleanupTimeoutM
       try { return await pending } finally { active.delete(pending); if (!active.size) effects.delete(id) }
     },
     hasActiveEffects: (id) => stopping.has(id) || !!effects.get(id)?.size,
+    hasAnyActiveEffects: () => stopping.size > 0 || effects.size > 0,
 
     onCancelled(id, listener) {
       const listeners = cancellationListeners.get(id) ?? new Set<() => void>()
@@ -90,6 +93,17 @@ export function createTaskRunService(repositories: Repositories, cleanupTimeoutM
       return run?.status === 'running' && (generation === undefined || run.generation === generation)
     },
   }
+  if (gate) {
+    service.startTaskRun = gate.protect(service.startTaskRun)
+    service.resumeTaskRun = gate.protect(service.resumeTaskRun)
+    service.trackEffect = gate.protect(service.trackEffect)
+    service.cancelTaskRun = gate.protect(service.cancelTaskRun)
+    service.pauseTaskRun = gate.protect(service.pauseTaskRun)
+    service.acknowledgeProcessRecovery = gate.protect(service.acknowledgeProcessRecovery)
+    service.finishTaskRun = gate.protect(service.finishTaskRun)
+    service.advanceGeneration = gate.protect(service.advanceGeneration)
+  }
+  return service
 }
 
 async function transition(repositories: Repositories, id: string, to: 'cancelled' | 'completed', metadata: Record<string, string>): Promise<TaskRun> {

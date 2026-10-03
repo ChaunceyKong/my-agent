@@ -260,6 +260,7 @@ export interface ModelConfigRecord extends SaveModelConfigRecordInput {
 }
 
 export interface Repositories {
+  hasUpdateBarriers(): Promise<boolean>
   getModelFallbackChain(id: string): Promise<ModelConfigRecord[]>
   bindAgentTurnModel(input: { turnId: string; configuredModelSnapshot: string; actualModelSnapshot: string; memberRevision: string; hasToolObservations?: boolean; modelRouteSnapshot?: string }): Promise<AgentTurn>
   beginTaskRunCancellation(id: string, expectedGeneration?: number): Promise<TaskRun>
@@ -350,6 +351,13 @@ export interface Repositories {
 
 export function createRepositories(client: DatabaseClient): Repositories {
   return {
+    async hasUpdateBarriers() {
+      return !!(client.db.select({ id: taskRuns.id }).from(taskRuns).where(inArray(taskRuns.status, ['queued', 'running', 'cancelling', 'paused'])).limit(1).get()
+        || client.db.select({ id: agentTurns.id }).from(agentTurns).where(inArray(agentTurns.status, ['queued', 'running', 'waiting_approval'])).limit(1).get()
+        || client.db.select({ id: toolExecutions.id }).from(toolExecutions).where(or(inArray(toolExecutions.status, ['executing', 'waiting_approval']), eq(toolExecutions.processRecoveryRequired, true))).limit(1).get()
+        || client.db.select({ id: approvalRequests.id }).from(approvalRequests).where(or(inArray(approvalRequests.status, ['pending', 'approved']), and(eq(approvalRequests.status, 'executing'), sql`${approvalRequests.toolExecutionId} IN (SELECT id FROM tool_executions WHERE status IN ('executing', 'waiting_approval'))`))).limit(1).get()
+        || client.db.select({ id: overwritePublications.executionId }).from(overwritePublications).where(sql`${overwritePublications.state} NOT IN ('completed', 'recovered')`).limit(1).get())
+    },
     async getModelFallbackChain(id) { return fallbackPath(client.db.select().from(modelConfigs).all(), id) },
     async bindAgentTurnModel(input) {
       return client.db.transaction((tx) => {

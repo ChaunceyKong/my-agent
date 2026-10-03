@@ -2,10 +2,11 @@ import type { Repositories } from '../database/repositories'
 import type { TaskRunService } from './task-run-service'
 import { executeRegisteredProcess } from './process-tool'
 import { createApprovedOverwriteService } from './approved-overwrite-service'
+import type { ExecutionGate } from './execution-gate'
 
-export function createProcessToolService(repositories: Repositories, taskRuns: TaskRunService, clock: () => Date = () => new Date()) {
-  const overwrites = createApprovedOverwriteService(repositories, clock)
-  return {
+export function createProcessToolService(repositories: Repositories, taskRuns: TaskRunService, clock: () => Date = () => new Date(), gate?: ExecutionGate) {
+  const overwrites = createApprovedOverwriteService(repositories, clock, undefined, gate)
+  const service = {
     async runApproved(approvalId: string) {
       const approval = await repositories.getApprovalRequest(approvalId)
       const execution = approval && await repositories.getToolExecution(approval.toolExecutionId)
@@ -18,6 +19,8 @@ export function createProcessToolService(repositories: Repositories, taskRuns: T
       return result
     },
   }
+  if (gate) service.runApproved = gate.protect(service.runApproved)
+  return service
   async function runApprovedEffect(approvalId: string) {
       const approval = await repositories.getApprovalRequest(approvalId)
       if (!approval || approval.status !== 'approved') throw new Error('审批请求不可用')

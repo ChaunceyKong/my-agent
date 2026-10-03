@@ -16,6 +16,9 @@ import { createRepositories } from './database/repositories'
 import { registerHandlers } from './ipc/register-handlers'
 import { createDiagnostics } from './core/diagnostics'
 import { createFatalHandler } from './core/fatal-errors'
+import { createExecutionGate } from './core/execution-gate'
+import { createUpdateService } from './core/update-service'
+import { createDesktopUpdateAdapter } from './core/update-adapter'
 
 // Honor Chromium's profile switch before opening SQLite or encrypted credentials.
 const userDataPath = app.commandLine.getSwitchValue('user-data-dir')
@@ -67,9 +70,10 @@ app.whenReady().then(async () => {
   if (!database) return
   app.once('will-quit', () => database.close())
   const repositories = createRepositories(database)
-  const taskRuns = createTaskRunService(repositories)
+  const gate = createExecutionGate()
+  const taskRuns = createTaskRunService(repositories, 5_000, gate)
   const approvals = createApprovalService(repositories)
-  const processes = createProcessToolService(repositories, taskRuns)
+  const processes = createProcessToolService(repositories, taskRuns, undefined, gate)
   const consent = createCloudConsentService(repositories)
   const modelClient = createModelClient({
     repositories,
@@ -78,9 +82,13 @@ app.whenReady().then(async () => {
     crypto: safeStorage,
     recordFailure: () => diagnostics.record('model_failed'),
   })
-  const tools = createToolEngine(repositories, approvals)
-  const runner = createSingleAgentRunner({ repositories, modelClient, taskRuns, toolEngine: tools })
-  const orchestrator = createSerialOrchestrator({ repositories, modelClient, taskRuns, runner })
+  const tools = createToolEngine(repositories, approvals, gate)
+  const runner = createSingleAgentRunner({ repositories, modelClient, taskRuns, toolEngine: tools, gate })
+  const orchestrator = createSerialOrchestrator({ repositories, modelClient, taskRuns, runner, gate })
+  const updates = createUpdateService({ gate, ...createDesktopUpdateAdapter(),
+    hasBarriers: () => repositories.hasUpdateBarriers(), hasEffects: () => taskRuns.hasAnyActiveEffects(),
+    recordFailure: () => diagnostics.record('updater_failed'),
+  })
   registerHandlers({
     ipcMain,
     dialog: { showOpenDialog: (options) => dialog.showOpenDialog(options as OpenDialogOptions) },
@@ -92,6 +100,8 @@ app.whenReady().then(async () => {
     runner,
     orchestrator,
     diagnostics,
+    gate,
+    updates,
   })
   await createWindow()
 

@@ -5,6 +5,7 @@ import { join, relative } from 'node:path'
 import type { OverwritePublication, OverwriteTargetIdentity, ToolExecution } from '../../shared/types'
 import type { Repositories } from '../database/repositories'
 import { FileToolError, resolveSafeWritePath } from './file-sandbox'
+import type { ExecutionGate } from './execution-gate'
 
 const names = (value: string, suffix: '.tmp' | '.backup') => new RegExp(`^\\.agent-team-[0-9a-f-]{36}\\${suffix}$`).test(value)
 const inode = (actual: Stats, expected: OverwriteTargetIdentity) => actual.isFile() && !actual.isSymbolicLink() && actual.dev === expected.dev && actual.ino === expected.ino
@@ -26,8 +27,8 @@ function parse(execution: ToolExecution): { path: string; content: string; old: 
 function temp(value: string | null) { try { const v = JSON.parse(value ?? '') as Record<string, unknown>; return ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every((k) => typeof v[k] === 'number') ? v as unknown as OverwriteTargetIdentity : undefined } catch { return undefined } }
 
 /** An approved replace is the sole no-delete exception. Its DB journal is committed before every FS phase; DB and FS are deliberately not claimed atomic. */
-export function createApprovedOverwriteService(repositories: Repositories, clock: () => Date = () => new Date(), fileOps: { unlink(path: string): void } = { unlink: unlinkSync }) {
-  return {
+export function createApprovedOverwriteService(repositories: Repositories, clock: () => Date = () => new Date(), fileOps: { unlink(path: string): void } = { unlink: unlinkSync }, gate?: ExecutionGate) {
+  const service = {
     async runApproved(approvalId: string): Promise<ToolExecution> {
       const claim = await repositories.claimApprovedOverwrite(approvalId, clock().toISOString(), `.agent-team-${randomUUID()}.tmp`, `.agent-team-${randomUUID()}.backup`)
       try {
@@ -48,6 +49,8 @@ export function createApprovedOverwriteService(repositories: Repositories, clock
     },
     async recoverInterruptedPublications() { for (const record of await repositories.listRecoverableOverwritePublications()) await recoverOne(record) },
   }
+  if (gate) service.runApproved = gate.protect(service.runApproved)
+  return service
   async function stage(root: string, publication: OverwritePublication, input: ReturnType<typeof parse>) {
     const target = await resolveSafeWritePath(root, input.path); if (!target.exists || !same(await lstat(target.path), input.old)) throw new FileToolError('FILE_CHANGED', '目标文件已变化')
     const parent = await lstat(target.parent); const path = join(target.parent, publication.temporaryRelativePath); const file = await open(path, 'wx', 0o600)

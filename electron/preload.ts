@@ -10,6 +10,13 @@ import type {
 } from '../shared/types'
 
 const api: AgentTeamApi = {
+  updates: {
+    status: (...args: never[]) => ipcRenderer.invoke(IpcChannel.UpdateStatus, ...args),
+    check: (...args: never[]) => ipcRenderer.invoke(IpcChannel.UpdateCheck, ...args),
+    download: (...args: never[]) => ipcRenderer.invoke(IpcChannel.UpdateDownload, ...args),
+    install: (...args: never[]) => ipcRenderer.invoke(IpcChannel.UpdateInstall, ...args),
+    cancel: (...args: never[]) => ipcRenderer.invoke(IpcChannel.UpdateCancel, ...args),
+  },
   diagnostics: {
     report: (code) => ipcRenderer.invoke(IpcChannel.DiagnosticsReport, code),
     export: () => ipcRenderer.invoke(IpcChannel.DiagnosticsExport),

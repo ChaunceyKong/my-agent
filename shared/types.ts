@@ -427,7 +427,21 @@ export interface StreamChatInput {
 
 export type RendererDiagnosticCode = 'renderer_render_failed' | 'renderer_unhandled_error' | 'renderer_unhandled_rejection'
 
+export interface UpdateStatus {
+  state: 'disabled' | 'idle' | 'checking' | 'available' | 'current' | 'downloading' | 'downloaded' | 'install-pending' | 'error'
+  reason: 'development' | 'portable' | 'unsupported' | 'unconfigured' | 'signing-unavailable' | 'busy' | 'barriers' | 'failed' | 'handoff-unconfirmed' | null
+  progress: number | null
+  cancellable: boolean
+}
+
 export interface AgentTeamApi {
+  updates: {
+    status(): Promise<UpdateStatus>
+    check(): Promise<UpdateStatus>
+    download(): Promise<UpdateStatus>
+    install(): Promise<UpdateStatus>
+    cancel(): Promise<UpdateStatus>
+  }
   diagnostics: {
     report(code: RendererDiagnosticCode): Promise<void>
     export(): Promise<{ status: 'exported' | 'cancelled' }>

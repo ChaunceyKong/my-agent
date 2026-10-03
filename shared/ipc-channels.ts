@@ -1,4 +1,9 @@
 export enum IpcChannel {
+  UpdateStatus = 'update:status',
+  UpdateCheck = 'update:check',
+  UpdateDownload = 'update:download',
+  UpdateInstall = 'update:install',
+  UpdateCancel = 'update:cancel',
   DiagnosticsReport = 'diagnostics:report',
   DiagnosticsExport = 'diagnostics:export',
   ProjectCreate = 'project:create',

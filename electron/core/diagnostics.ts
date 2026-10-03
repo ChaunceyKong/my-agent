@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { IpcChannel } from '../../shared/ipc-channels'
 import type { RendererDiagnosticCode } from '../../shared/types'
 
-export const diagnosticCodes = ['renderer_render_failed', 'renderer_unhandled_error', 'renderer_unhandled_rejection', 'ipc_failed', 'model_failed', 'startup_database_failed', 'window_load_failed', 'renderer_process_gone', 'main_uncaught_exception', 'main_unhandled_rejection', 'main_startup_failed'] as const
+export const diagnosticCodes = ['renderer_render_failed', 'renderer_unhandled_error', 'renderer_unhandled_rejection', 'ipc_failed', 'model_failed', 'startup_database_failed', 'window_load_failed', 'renderer_process_gone', 'main_uncaught_exception', 'main_unhandled_rejection', 'main_startup_failed', 'updater_failed'] as const
 export type DiagnosticCode = typeof diagnosticCodes[number]
 const rendererCodes: readonly string[] = diagnosticCodes.slice(0, 3)
 const sources: readonly string[] = ['renderer', 'main', ...Object.values(IpcChannel)]

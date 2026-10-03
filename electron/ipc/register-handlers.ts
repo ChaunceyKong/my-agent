@@ -16,6 +16,16 @@ import type { Repositories } from '../database/repositories'
 import { randomUUID } from 'node:crypto'
 import { captureModelRoute } from '../core/model-route'
 import { validRendererDiagnostic, type Diagnostics } from '../core/diagnostics'
+import type { ExecutionGate } from '../core/execution-gate'
+import type { UpdateService } from '../core/update-service'
+
+const readOnlyChannels: ReadonlySet<string> = new Set([
+  IpcChannel.DiagnosticsReport, IpcChannel.ProjectList, IpcChannel.ChannelList, IpcChannel.ModelList, IpcChannel.ModelDefaultGet,
+  IpcChannel.MessageList, IpcChannel.TaskRunList, IpcChannel.TaskRunSnapshot, IpcChannel.CloudConsentHas,
+  IpcChannel.AgentList, IpcChannel.AgentGet, IpcChannel.TemplateList, IpcChannel.TemplateGet, IpcChannel.ChannelAgentList,
+  IpcChannel.ExecutableList, IpcChannel.ToolExecutionList, IpcChannel.ApprovalList, IpcChannel.WorkspaceList,
+  IpcChannel.UpdateStatus, IpcChannel.UpdateCheck, IpcChannel.UpdateDownload, IpcChannel.UpdateInstall, IpcChannel.UpdateCancel,
+])
 
 interface IpcHandlerRegistrar {
   handle(channel: string, listener: (event: unknown, ...args: any[]) => unknown): void
@@ -36,18 +46,29 @@ export interface IpcHandlerDependencies {
   runner?: ReturnType<typeof createSingleAgentRunner>
   orchestrator?: ReturnType<typeof createSerialOrchestrator>
   diagnostics?: Diagnostics
+  gate?: ExecutionGate
+  updates?: UpdateService
 }
 
-export function registerHandlers({ ipcMain: registrar, dialog, repositories, taskRuns, modelClient, approvals, processes, runner, orchestrator, diagnostics }: IpcHandlerDependencies): void {
+export function registerHandlers({ ipcMain: registrar, dialog, repositories, taskRuns, modelClient, approvals, processes, runner, orchestrator, diagnostics, gate, updates }: IpcHandlerDependencies): void {
   const ipcMain: IpcHandlerRegistrar = { handle(channel, listener) {
     registrar.handle(channel, (event, ...args) => {
+      let release: (() => void) | undefined
       try {
+        if (!readOnlyChannels.has(channel)) release = gate?.reserve()
         const result = listener(event, ...args)
-        if (result instanceof Promise) return result.catch((error: unknown) => { diagnostics?.record('ipc_failed', channel); throw error })
+        if (result instanceof Promise) return result.catch((error: unknown) => { diagnostics?.record('ipc_failed', channel); throw error }).finally(() => release?.())
+        release?.()
         return result
-      } catch (error) { diagnostics?.record('ipc_failed', channel); throw error }
+      } catch (error) { release?.(); diagnostics?.record('ipc_failed', channel); throw error }
     })
   } }
+  for (const [channel, method] of [[IpcChannel.UpdateStatus, 'status'], [IpcChannel.UpdateCheck, 'check'], [IpcChannel.UpdateDownload, 'download'], [IpcChannel.UpdateInstall, 'install'], [IpcChannel.UpdateCancel, 'cancel']] as const) {
+    ipcMain.handle(channel, (_event, ...args: unknown[]) => {
+      if (args.length || !updates) throw new Error('更新请求无效。')
+      return updates[method]()
+    })
+  }
   ipcMain.handle(IpcChannel.DiagnosticsReport, (_event, ...args: unknown[]) => {
     if (args.length !== 1) throw new Error('诊断请求无效')
     const code = validRendererDiagnostic(args[0])
@@ -59,6 +80,7 @@ export function registerHandlers({ ipcMain: registrar, dialog, repositories, tas
     return diagnostics.export()
   })
   const startingChannels = new Set<string>()
+  const reply = gate ? gate.protect(streamReply) : streamReply
   const workspaceSelections = new Map<string, string>()
   const agents = createAgentService(repositories)
   const templates = createTemplateService(repositories)
@@ -199,7 +221,7 @@ export function registerHandlers({ ipcMain: registrar, dialog, repositories, tas
       if (enabled.length && orchestrator) void orchestrator.run({ taskRunId: run.id, projectId: channel.projectId, channelId: channel.id,
         onEvent: async (streamEvent) => { if (!sender.isDestroyed()) sender.send(IpcChannel.MessageStream, streamEvent) },
       })
-      else void streamReply(run.id, channel.projectId, input.modelConfigId, channel.id, sender, repositories, taskRuns, modelClient)
+      else void reply(run.id, channel.projectId, input.modelConfigId, channel.id, sender, repositories, taskRuns, modelClient)
       return { taskRunId: run.id }
     } finally {
       startingChannels.delete(input.channelId)
@@ -222,7 +244,7 @@ export function registerHandlers({ ipcMain: registrar, dialog, repositories, tas
       const sender = (event as { sender: StreamSender }).sender
       if (members.length && orchestrator) void orchestrator.run({ taskRunId: run.id, projectId: channel.projectId, channelId: channel.id,
         onEvent: async (streamEvent) => { if (!sender.isDestroyed()) sender.send(IpcChannel.MessageStream, streamEvent) } })
-      else void streamReply(run.id, channel.projectId, run.modelConfigId, channel.id, sender, repositories, taskRuns, modelClient)
+      else void reply(run.id, channel.projectId, run.modelConfigId, channel.id, sender, repositories, taskRuns, modelClient)
       return { taskRunId: run.id }
     } finally { startingChannels.delete(old.channelId) }
   }

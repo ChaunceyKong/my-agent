@@ -5,6 +5,7 @@ import type { TaskRunService } from './task-run-service'
 import { createToolEngine, validateToolRequest } from './tool-engine'
 import { assertContextFits, buildAgentContext, ContextBudgetError } from './context-manager'
 import { captureModelRoute } from './model-route'
+import type { ExecutionGate } from './execution-gate'
 
 const MAX_TOOL_STEPS = 4
 const TOOLS = ['list_dir', 'read_file', 'search_files', 'write_file', 'replace_file_content', 'run_process'].map((name) => ({ type: 'function' as const, function: { name: name as ToolRequest['toolName'], description: 'Use only with user-authorized project data.', parameters: { type: 'object' } } }))
@@ -22,6 +23,7 @@ export function createSingleAgentRunner(deps: {
   modelClient: ModelClient
   taskRuns: TaskRunService
   toolEngine: ReturnType<typeof createToolEngine>
+  gate?: ExecutionGate
 }) {
   const resolveAgent = async (channelId: string, agentId: string): Promise<ActiveAgent | undefined> => {
     const member = (await deps.repositories.listChannelAgents(channelId)).find((item) => item.agentId === agentId && item.isEnabled)
@@ -30,7 +32,7 @@ export function createSingleAgentRunner(deps: {
     return { agent, modelConfigId: member.modelConfigOverrideId ?? agent.modelConfigId, memberRevision: member.revision }
   }
 
-  return {
+  const service = {
     resolveAgent,
     async run(input: { taskRunId: string; projectId: string; channelId: string; turnId: string; generation: number; active: ActiveAgent; onEvent(event: StreamEvent): Promise<void> }): Promise<AgentTurnOutcome> {
       const route = await captureModelRoute(deps.repositories, input.active.modelConfigId)
@@ -187,6 +189,8 @@ export function createSingleAgentRunner(deps: {
       return { status: 'failed', reason: '工具步骤超过安全上限，任务已停止。' }
     },
   }
+  if (deps.gate) service.run = deps.gate.protect(service.run)
+  return service
 }
 
 export function sanitizeToolObservation(summary: string, result?: ListDirectoryResult | ReadTextFileResult | SearchTextFilesResult, root?: string): string {

@@ -6,6 +6,7 @@ import type { ListDirectoryResult, OverwriteTargetIdentity, ReadTextFileResult, 
 import type { Repositories, ToolContext, ToolOutcome } from '../database/repositories'
 import { FileToolError, resolveSafeWritePath } from './file-sandbox'
 import { FILE_TOOL_LIMITS, listDirectory, readTextFile, searchTextFiles } from './file-tools'
+import type { ExecutionGate } from './execution-gate'
 
 type ReadResult = ListDirectoryResult | ReadTextFileResult | SearchTextFilesResult
 export interface ToolResponse { execution: ToolExecution; result?: ReadResult }
@@ -65,8 +66,8 @@ function targetIdentity(info: Stats): OverwriteTargetIdentity {
 export function createToolEngine(repositories: Repositories, approval?: {
   request(toolExecutionId: string): Promise<unknown>
   requestOverwrite(toolExecutionId: string, targetIdentityJson: string): Promise<unknown>
-}) {
-  return {
+}, gate?: ExecutionGate) {
+  const service = {
     async execute(context: ToolContext, value: unknown): Promise<ToolResponse> {
       const request = validateToolRequest(value)
       const approvalService = approval
@@ -103,6 +104,8 @@ export function createToolEngine(repositories: Repositories, approval?: {
     },
   }
 
+  if (gate) service.execute = gate.protect(service.execute)
+  return service
   async function writeDraft(root: string, path: string, content: string, executionId: string, approvalService?: { requestOverwrite(toolExecutionId: string, targetIdentityJson: string): Promise<unknown> }): Promise<ToolExecution> {
     const target = await resolveSafeWritePath(root, path)
     if (target.exists) {

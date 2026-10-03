@@ -6,6 +6,7 @@ import type { TaskRunService } from './task-run-service'
 import { parseSpeakerDecision, speakerSelectionPrompt } from './speaker-selector'
 import { createSessionSummaryService } from './session-summary-service'
 import { captureModelRoute } from './model-route'
+import type { ExecutionGate } from './execution-gate'
 
 export function loopPauseReason(speakers: string[]): string | undefined {
   const last = speakers.slice(-3)
@@ -20,9 +21,10 @@ export function createSerialOrchestrator(deps: {
   modelClient: ModelClient
   taskRuns: TaskRunService
   runner: ReturnType<typeof createSingleAgentRunner>
+  gate?: ExecutionGate
 }) {
   const summarize = createSessionSummaryService(deps.repositories, deps.modelClient, deps.taskRuns)
-  return {
+  const service = {
     async run(input: { taskRunId: string; projectId: string; channelId: string; onEvent(event: StreamEvent): Promise<void> }): Promise<void> {
       const send = input.onEvent
       const generation = (await deps.repositories.getTaskRun(input.taskRunId))?.generation
@@ -158,4 +160,6 @@ export function createSerialOrchestrator(deps: {
       }
     },
   }
+  if (deps.gate) service.run = deps.gate.protect(service.run)
+  return service
 }

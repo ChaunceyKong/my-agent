@@ -232,3 +232,6 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .global-error-notice { flex-shrink: 0; margin: 8px 14px; }
 .global-error-notice p { margin: 6px 0; }
 .diagnostic-export { margin-top: 12px; }
+.update-settings { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.update-settings h3 { color: var(--text); margin-bottom: 6px; }
+.update-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }

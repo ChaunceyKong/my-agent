@@ -9,7 +9,7 @@ import { SettingsDialog } from './SettingsDialog'
 
 afterEach(cleanup)
 it('edits and clears a fallback, excludes self and resets the selection for a new config', async () => {
-  window.agentTeam = { diagnostics: { report: vi.fn().mockResolvedValue(undefined), export: vi.fn().mockResolvedValue({ status: 'cancelled' }) }, models: { list: vi.fn().mockResolvedValue([
+  window.agentTeam = { updates: { status: vi.fn().mockResolvedValue({ state: 'disabled', reason: 'development', progress: null, cancellable: false }), check: vi.fn(), download: vi.fn(), install: vi.fn(), cancel: vi.fn() }, diagnostics: { report: vi.fn().mockResolvedValue(undefined), export: vi.fn().mockResolvedValue({ status: 'cancelled' }) }, models: { list: vi.fn().mockResolvedValue([
     { id: 'primary', modelName: 'primary', providerPreset: 'openai', baseUrl: 'https://example.test', hasApiKey: true, fallbackConfigId: 'backup' },
     { id: 'backup', modelName: 'backup', providerPreset: 'openai', baseUrl: 'https://backup.test', hasApiKey: true },
   ]), getDefaultScheduler: vi.fn().mockResolvedValue(null) } } as unknown as AgentTeamApi

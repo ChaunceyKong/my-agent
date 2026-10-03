@@ -22,6 +22,7 @@ beforeEach(() => {
   durable = { channel, resumeAllowed: {}, schedulerModelConfigId: null, agents: [], members: [], messages: [], runs: [], turns: [], events: [] }
   unsubscribe = vi.fn()
   api = {
+    updates: { status: vi.fn().mockResolvedValue({ state: 'disabled', reason: 'development', progress: null, cancellable: false }), check: vi.fn(), download: vi.fn(), install: vi.fn(), cancel: vi.fn() },
     diagnostics: { report: vi.fn().mockResolvedValue(undefined), export: vi.fn().mockResolvedValue({ status: 'cancelled' }) },
     templates: { list: vi.fn().mockResolvedValue([]), get: vi.fn(), importTeam: vi.fn(), copyAgent: vi.fn() },
     agents: { list: vi.fn().mockResolvedValue([]), get: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn() },

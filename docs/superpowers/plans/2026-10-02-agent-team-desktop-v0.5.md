@@ -55,7 +55,7 @@ Do not label the entire v0.5 release complete merely because Task 1 or a build c
 
 ## Progress — 2026-10-02
 
-Task 1 is implemented and independently reviewed PASS at `1ca4728`. No unresolved review findings. Tasks 2–6 have not started; the next implementation scope is controlled errors and diagnostic logs. Product version remains `0.4.0` until the release configuration stage.
+Task 1 is implemented and independently reviewed PASS at `1ca4728`. Task 2 is independently reviewed PASS at `a628817`, with no unresolved findings. Tasks 3–6 have not started; the next implementation scope is measured long-conversation performance. Product version remains `0.4.0` until the release configuration stage.
 
 - Theme implementation: `68efa28`. Full single-worker unit suite 529/529, all real Electron tests 37/37, type check, build and diff check passed at that commit.
 - Visual QA found native dark placeholder contrast of 3.55:1. The scoped CSS/E2E fix `1ca4728` uses the muted token for input and textarea placeholders. Real computed-style assertions measured 5.06:1 in light and 7.73:1 in dark.
@@ -64,3 +64,14 @@ Task 1 is implemented and independently reviewed PASS at `1ca4728`. No unresolve
 - Root inspected all six regenerated light/dark settings, validation/focus and template-preview screenshots in `test-results/`; visual QA passed. Screenshots are disposable test outputs, not release artifacts. System-color changes were simulated with Chromium media emulation in the real Electron app.
 - No dependencies, IPC or database changes, no package build, and no external model requests. Original untracked user documents retained their initial SHA-256; existing `release/` artifacts were untouched.
 - Trusted update hosting and signing configuration are still pending user input; no automatic update network or publication operation was introduced.
+
+## Task 2 progress — 2026-10-03
+
+- Implementation commit: `a628817`. Main records only UTC timestamps, fixed diagnostic codes and allowlisted sources. Logs use `logs/error-YYYY-MM-DD.log`, rather than a single active `error.log`; each day is capped at 64 KiB, with seven UTC dates retained. Export reads at most seven bounded files and reconstructs allowlisted records, discarding injected fields/content instead of copying raw files.
+- Renderer has only typed code reporting and explicit native-dialog export returning exported/cancelled status, never an output path. Export cancellation writes nothing; failures show fixed guidance. Native dialogs were substituted in Electron Main for automated export tests; manual OS chooser interaction was not separately verified.
+- Friendly render/global error recovery does not replay, continue or cancel tasks. Browser offline status remains a hint and does not disable local/Ollama controls. Main fatal handling reports fixed guidance and exits; it does not claim that external processes were terminated or durable cleanup barriers resolved. Existing startup retry/exit and task recovery fences remain intact.
+- Implementation agent completed the full single-worker unit suite: 544/544. Root verified type check, build, diff check and the final complete real Electron suite: 40/40 (2.8 minutes). No external Provider requests were made; model tests use loopback fixtures.
+- The earlier full Electron run failed one new 900px recovery test because the expanded narrow-window cockpit intercepted its send click. The final test uses the normal collapse button before sending, retaining real React fault injection, reload, unchanged request count, one completed write effect and durable file assertions. The separate offline/banner test keeps the cockpit expanded and checks header/panel geometry and theme controls.
+- Independent review found and repaired two P2 issues: an unsupported Vitest assertion and banner-induced cockpit/header overlap. The reviewer independently reran scoped tests 37/37, type check and diff check. Final review PASS is locked to `19e09df..a628817`, with no unresolved findings.
+- Root visually inspected all four regenerated light/dark error-boundary and narrow-window banner screenshots; fixed guidance and controls are legible, and the cockpit no longer overlays the header. Screenshots are disposable test outputs.
+- No dependency/version changes or package builds. Original untracked user document SHA-256 values remain unchanged; existing `release/` artifacts were not modified. The entire v0.5 release is not yet complete.

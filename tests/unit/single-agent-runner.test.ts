@@ -20,6 +20,20 @@ function setup(responses: Array<string | ReturnType<typeof call>>, execution: { 
 
 const turn = { taskRunId: 'r', projectId: 'p', channelId: 'c', turnId: 't', generation: 0, active: { agent, modelConfigId: 'm', memberRevision: 'v1' } }
 
+it('provides all current group members in the actual Agent request, including disabled teammates', async () => {
+  const { runner, repositories, modelClient } = setup(['当前群聊有两位 Agent'])
+  repositories.listChannelAgents.mockResolvedValue([
+    { channelId: 'c', agentId: 'a', isEnabled: true, modelConfigOverrideId: null, revision: 'v1' },
+    { channelId: 'c', agentId: 'b', isEnabled: false, modelConfigOverrideId: null, revision: 'v2' },
+  ])
+  repositories.getAgent.mockImplementation(async (id: string) => id === 'a' ? agent : { ...agent, id: 'b', name: 'Reviewer', title: '校对', systemPrompt: 'PRIVATE_TEAMMATE_PROMPT' })
+  expect(await runner.run({ ...turn, onEvent: async () => {} })).toMatchObject({ status: 'completed' })
+  const system = modelClient.streamChat.mock.calls[0][0].messages[0].content
+  expect(system).toContain('"total":2,"enabledCount":1')
+  expect(system).toContain('"name":"Reviewer","title":"校对","isEnabled":false')
+  expect(system).not.toContain('PRIVATE_TEAMMATE_PROMPT')
+})
+
 it('executes a native tool call then completes with the follow-up response', async () => {
   const { runner, toolEngine, taskRuns } = setup([call(), '完成'])
   const outcome = await runner.run({ ...turn, onEvent: async () => {} })

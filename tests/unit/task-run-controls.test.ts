@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -63,7 +63,7 @@ it('surfaces cleanup timeout as paused and blocks resume/new send until cleanup 
 })
 
 it.each(['rejected', 'expired'])('requires explicit continuation after approval is %s and starts a fresh generation/Turn', async (decision) => {
-  const run = await start(); const turn = (await repo.startSingleMemberTurn(run.id, run.generation))!
+  const run = await start(); const turn = (await repo.startDefaultMemberTurn(run.id, run.generation))!
   let approvalNow = new Date()
   const approvals = createApprovalService(repo, () => approvalNow)
   const engine = createToolEngine(repo, approvals)
@@ -83,7 +83,7 @@ it.each(['rejected', 'expired'])('requires explicit continuation after approval 
 })
 
 it('pauses both running/cancelling after restart without replaying a claimed process', async () => {
-  const run = await start(); const turn = (await repo.startSingleMemberTurn(run.id, run.generation))!
+  const run = await start(); const turn = (await repo.startDefaultMemberTurn(run.id, run.generation))!
   await repo.saveRegisteredExecutable({ id: 'echo', absolutePath: 'C:\\tool.exe', isEnabled: true, argumentPolicyJson: '[]' })
   const approvals = createApprovalService(repo); const engine = createToolEngine(repo, approvals)
   const execution = (await engine.execute({ taskRunId: run.id, generation: run.generation, turnId: turn.id, agentId: agent.id }, { toolName: 'run_process', input: { executableId: 'echo', args: [] } })).execution
@@ -113,7 +113,7 @@ it('pauses both running/cancelling after restart without replaying a claimed pro
 })
 
 it('requires a restart marker before manual process recovery and can resume after acknowledgment', async () => {
-  const run = await start(); const turn = (await repo.startSingleMemberTurn(run.id, run.generation))!
+  const run = await start(); const turn = (await repo.startDefaultMemberTurn(run.id, run.generation))!
   await repo.saveRegisteredExecutable({ id: 'echo', absolutePath: 'C:\\tool.exe', isEnabled: true, argumentPolicyJson: '[]' })
   const approvals = createApprovalService(repo)
   const execution = (await createToolEngine(repo, approvals).execute({ taskRunId: run.id, generation: run.generation, turnId: turn.id, agentId: agent.id }, { toolName: 'run_process', input: { executableId: 'echo', args: [] } })).execution
@@ -131,7 +131,7 @@ it('requires a restart marker before manual process recovery and can resume afte
 })
 
 it.each(['disable', 'member_revision', 'default_permissions', 'registration', 'remove_member'])('preserves claimed process recovery after %s changes policy', async (change) => {
-  const run = await start(); const turn = (await repo.startSingleMemberTurn(run.id, run.generation))!
+  const run = await start(); const turn = (await repo.startDefaultMemberTurn(run.id, run.generation))!
   await repo.saveRegisteredExecutable({ id: 'echo', absolutePath: 'C:\\tool.exe', isEnabled: true, argumentPolicyJson: '[]' })
   const approvals = createApprovalService(repo)
   const execution = (await createToolEngine(repo, approvals).execute({ taskRunId: run.id, generation: run.generation, turnId: turn.id, agentId: agent.id }, { toolName: 'run_process', input: { executableId: 'echo', args: [] } })).execution
@@ -164,7 +164,7 @@ it.each(['disable', 'member_revision', 'default_permissions', 'registration', 'r
 
 it('keeps a spawned process error unresolved through policy change and cancellation until late close', async () => {
   vi.useFakeTimers()
-  const run = await start(); const turn = (await repo.startSingleMemberTurn(run.id, run.generation))!
+  const run = await start(); const turn = (await repo.startDefaultMemberTurn(run.id, run.generation))!
   await repo.saveRegisteredExecutable({ id: 'echo', absolutePath: 'C:\\tool.exe', isEnabled: true, argumentPolicyJson: '[]' })
   const approvals = createApprovalService(repo)
   const execution = (await createToolEngine(repo, approvals).execute({ taskRunId: run.id, generation: run.generation, turnId: turn.id, agentId: agent.id }, { toolName: 'run_process', input: { executableId: 'echo', args: [] } })).execution
@@ -244,8 +244,8 @@ it('enforces the Channel turn limit and pauses three same-speaker Turns', async 
   const modelClient: any = { requireCloudConsent: vi.fn().mockResolvedValue(undefined), streamChat: async (_input: any, emit: any) => { await emit({ type: 'delta', content: 'done' }); await emit({ type: 'complete' }) } }
   const runner = createSingleAgentRunner({ repositories: repo, taskRuns: tasks, modelClient, toolEngine: createToolEngine(repo) })
   await createSerialOrchestrator({ repositories: repo, taskRuns: tasks, modelClient, runner }).run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
-  expect(await repo.getTaskRun(run.id)).toMatchObject({ status: 'paused', turnCount: 1, pauseReason: 'Agent 轮次已达到群聊上限' })
-  await expect(tasks.resumeTaskRun(run.id, agent.id)).rejects.toThrow('上限')
+  expect(await repo.getTaskRun(run.id)).toMatchObject({ status: 'failed', turnCount: 1, errorMessage: 'Agent 轮次已达到群聊上限' })
+  await expect(tasks.resumeTaskRun(run.id, agent.id)).rejects.toThrow('不可继续')
 })
 
 it('pauses a 60-second tool without claiming cancellation until its effect is fenced', async () => {
@@ -275,7 +275,7 @@ it('pauses a 60-second tool without claiming cancellation until its effect is fe
 
 it('keeps a timed-out approved process unresolved until close, then permits termination', async () => {
   vi.useFakeTimers()
-  const run = await start(); const turn = (await repo.startSingleMemberTurn(run.id, run.generation))!
+  const run = await start(); const turn = (await repo.startDefaultMemberTurn(run.id, run.generation))!
   await repo.saveRegisteredExecutable({ id: 'echo', absolutePath: 'C:\\tool.exe', isEnabled: true, argumentPolicyJson: '[]' })
   const approvals = createApprovalService(repo)
   const execution = (await createToolEngine(repo, approvals).execute({ taskRunId: run.id, generation: run.generation, turnId: turn.id, agentId: agent.id }, { toolName: 'run_process', input: { executableId: 'echo', args: [] } })).execution
@@ -295,7 +295,21 @@ it('keeps a timed-out approved process unresolved until close, then permits term
   expect(await tasks.cancelTaskRun(run.id)).toMatchObject({ status: 'cancelled' })
 })
 
-it('pauses actual automatic scheduling after three consecutive same-Agent Turns', async () => {
+it('never closes an old scheduling pause across a still-pending tool approval', async () => {
+  writeFileSync(join(directory, 'existing.md'), '原文')
+  const run = await start()
+  const turn = (await repo.startDefaultMemberTurn(run.id, run.generation))!
+  const engine = createToolEngine(repo, createApprovalService(repo))
+  const waiting = await engine.execute({ taskRunId: run.id, generation: run.generation, agentId: agent.id, turnId: turn.id }, { toolName: 'write_file', input: { path: 'existing.md', content: '未批准的覆盖' } })
+  expect(waiting.execution.status).toBe('waiting_approval')
+  db.db.run(sql`UPDATE task_runs SET status = 'paused', current_turn_id = NULL, pause_reason = '自动调度不可用，请 CEO 指派下一位 Agent。' WHERE id = ${run.id}`)
+  await tasks.recoverInterruptedTaskRuns()
+  expect(await repo.getTaskRun(run.id)).toMatchObject({ status: 'paused' })
+  expect((await repo.listApprovalRequests(run.id))[0].status).toBe('pending')
+  expect(readFileSync(join(directory, 'existing.md'), 'utf8')).toBe('原文')
+})
+
+it('stops actual automatic scheduling after three consecutive same-Agent Turns', async () => {
   const second = await repo.createAgent({ name: 'Beta', avatar: null, title: '', systemPrompt: 'B', modelConfigId, defaultToolPermissions: {} })
   await repo.saveChannelAgent({ channelId, agentId: second.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
   await repo.setChannelScheduler(channelId, modelConfigId)
@@ -305,7 +319,7 @@ it('pauses actual automatic scheduling after three consecutive same-Agent Turns'
     streamChat: vi.fn(async (_input: any, emit: any) => { await emit({ type: 'delta', content: 'work' }); await emit({ type: 'complete' }) }) }
   const runner = createSingleAgentRunner({ repositories: repo, taskRuns: tasks, modelClient, toolEngine: createToolEngine(repo) })
   await createSerialOrchestrator({ repositories: repo, taskRuns: tasks, modelClient, runner }).run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
-  expect(await repo.getTaskRun(run.id)).toMatchObject({ status: 'paused', turnCount: 3, pauseReason: '同一 Agent 连续发言 3 轮，等待 CEO 处理' })
+  expect(await repo.getTaskRun(run.id)).toMatchObject({ status: 'failed', turnCount: 3, errorMessage: '同一 Agent 连续发言 3 轮，协作已停止' })
   expect(modelClient.streamChat).toHaveBeenCalledTimes(3)
   expect(modelClient.selectSpeaker).toHaveBeenCalledTimes(2)
 })

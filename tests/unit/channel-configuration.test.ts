@@ -68,7 +68,7 @@ it.each(['pending', 'approved'] as const)('rejects %s approval even with termina
 
 it('retains a nonterminal Agent Turn even if its Run already appears completed', async () => {
   const run = await start()
-  await repo.startSingleMemberTurn(run.id, run.generation)
+  await repo.startDefaultMemberTurn(run.id, run.generation)
   terminal(run)
   await expect(repo.removeChannel(channelId)).rejects.toThrow('未结束任务')
   expect(await repo.listAgentTurns(run.id)).toHaveLength(1)

@@ -10,9 +10,9 @@ import type { ExecutionGate } from './execution-gate'
 
 export function loopPauseReason(speakers: string[]): string | undefined {
   const last = speakers.slice(-3)
-  if (last.length === 3 && last.every((id) => id === last[0])) return '同一 Agent 连续发言 3 轮，等待 CEO 处理'
+  if (last.length === 3 && last.every((id) => id === last[0])) return '同一 Agent 连续发言 3 轮，协作已停止'
   const cycle = speakers.slice(-12)
-  if (cycle.length === 12 && cycle[0] !== cycle[1] && cycle.every((id, index) => id === cycle[index % 2])) return 'Agent 交替循环达到 3 次，等待 CEO 处理'
+  if (cycle.length === 12 && cycle[0] !== cycle[1] && cycle.every((id, index) => id === cycle[index % 2])) return 'Agent 交替循环达到 3 次，协作已停止'
 }
 
 /** One durable Turn at a time; every model decision is rechecked at commit. */
@@ -39,14 +39,14 @@ export function createSerialOrchestrator(deps: {
           const loopReason = loopPauseReason(turns.filter((item) => item.generation === run.generation && item.status === 'completed').map((item) => item.agentId))
           if (!run.currentTurnId && (run.turnCount >= channel.maxTurns || loopReason)) {
             const reason = loopReason ?? 'Agent 轮次已达到群聊上限'
-            await deps.repositories.pauseTaskRun(run.id, reason)
+            await deps.repositories.transitionTaskRun(run.id, 'running', 'failed', { errorMessage: reason }, { generation: run.generation })
             await send({ taskRunId: run.id, type: 'error', content: reason })
             return
           }
           let turn = run.currentTurnId ? turns.find((item) => item.id === run.currentTurnId && item.status === 'running' && item.generation === run.generation)
             : await deps.repositories.startNextMentionTurn(run.id, run.generation)
           if (run.currentTurnId && !turn) return
-          if (!turn && run.turnCount === 0) turn = await deps.repositories.startSingleMemberTurn(run.id, run.generation)
+          if (!turn && run.turnCount === 0) turn = await deps.repositories.startDefaultMemberTurn(run.id, run.generation)
           if (!turn) {
             const members = (await deps.repositories.listChannelAgents(run.channelId)).filter((item) => item.isEnabled)
             const scheduler = await deps.repositories.getEffectiveScheduler(run.channelId)
@@ -87,18 +87,24 @@ export function createSerialOrchestrator(deps: {
               } catch (error) {
                 const latest = await deps.repositories.getTaskRun(run.id)
                 if (latest?.status !== 'running' || latest.generation !== run.generation || latest.currentTurnId) return
+                // A completed reply needs no CEO handoff when routing alone fails.
+                if (turns.some((item) => item.status === 'completed')) {
+                  const completed = await deps.repositories.transitionTaskRun(run.id, 'running', 'completed', {}, { generation: run.generation, requireIdle: true })
+                  if (completed) await send({ taskRunId: run.id, type: 'complete' })
+                  return
+                }
                 const reason = error instanceof ModelInterventionError || error instanceof ModelClientError && error.interventionRequired
-                  ? error.message : '自动调度不可用，请 CEO 指派下一位 Agent。'
-                await deps.taskRuns.pauseTaskRun(run.id, reason, run.generation)
+                  ? error.message : '自动调度失败，请检查调度模型或通过 @ 选择发言成员后重试。'
+                await deps.repositories.transitionTaskRun(run.id, 'running', 'failed', { errorMessage: reason }, { generation: run.generation, requireIdle: true })
                 await send({ taskRunId: run.id, type: 'error', content: reason })
                 return
               }
-            } else if (members.length > 1) {
-              await deps.repositories.pauseTaskRun(run.id, '请 CEO 指派下一位 Agent 或配置调度模型')
-              await send({ taskRunId: run.id, type: 'error', content: '请 CEO 指派下一位 Agent 或配置调度模型。' })
+            } else if (members.length > 1 && run.turnCount === 0) {
+              await deps.repositories.pauseTaskRun(run.id, '手动发言模式，请选择发言成员')
+              await send({ taskRunId: run.id, type: 'error', content: '手动发言模式，请通过 @ 选择发言成员。' })
               return
             } else {
-              const complete = await deps.repositories.transitionTaskRun(run.id, 'running', 'completed', {})
+              const complete = await deps.repositories.transitionTaskRun(run.id, 'running', 'completed', {}, { generation: run.generation, requireIdle: true })
               if (complete) await send({ taskRunId: run.id, type: 'complete' })
               return
             }

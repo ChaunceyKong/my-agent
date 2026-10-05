@@ -39,7 +39,46 @@ beforeEach(async () => {
 afterEach(async () => { database.close(); await rm(directory, { recursive: true, force: true }) })
 
 const invoke = (name: IpcChannel, ...args: any[]) => handlers.get(name)!({ sender }, ...args)
+it('answers five current group members from real records without a model or cloud consent, and refreshes the next query', async () => {
+  const agents = []
+  for (let index = 0; index < 5; index++) {
+    const agent = await repositories.createAgent({ name: `成员${index + 1}`, title: `角色${index + 1}`, avatar: null, systemPrompt: 'PRIVATE_PROMPT', modelConfigId, defaultToolPermissions: {} })
+    agents.push(agent)
+    await repositories.saveChannelAgent({ channelId, agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  }
+  const outside = await repositories.createAgent({ name: '其他群聊独有成员', title: '', avatar: null, systemPrompt: '', modelConfigId, defaultToolPermissions: {} })
+  const other = await repositories.createChannel({ projectId, name: '其他群聊' })
+  await repositories.saveChannelAgent({ channelId: other.id, agentId: outside.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  const ask = () => invoke(IpcChannel.MessageSend, { channelId, modelConfigId, content: '当前群聊有多少位 Agent？请列出名单和启用状态。' })
+  const first = await ask()
+  expect(await repositories.getTaskRun(first.taskRunId)).toMatchObject({ status: 'completed', turnCount: 0 })
+  const reply = (await repositories.listMessages(channelId)).at(-1)!
+  expect(reply.content).toContain('**5 位 Agent**')
+  for (const agent of agents) expect(reply.content).toContain(agent.name)
+  expect(reply.content).not.toMatch(/其他群聊独有成员|PRIVATE_PROMPT/)
+  expect(reply.actualModelConfigId).toBeNull()
+  await repositories.saveChannelAgent({ channelId, agentId: agents[0].id, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  await ask()
+  expect((await repositories.listMessages(channelId)).at(-1)!.content).toContain('**4 位已启用**')
+  expect(fetchImpl).not.toHaveBeenCalled()
+})
 const send = () => invoke(IpcChannel.MessageSend, { channelId, modelConfigId, content: '你好' })
+
+it('ordinary chat includes disabled current group members but excludes Agents from other groups', async () => {
+  const agent = await repositories.createAgent({ name: '已停用作者', title: '写作', avatar: null, systemPrompt: 'PRIVATE_DISABLED_PROMPT', modelConfigId, defaultToolPermissions: {} })
+  await repositories.saveChannelAgent({ channelId, agentId: agent.id, isEnabled: false, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  const other = await repositories.createChannel({ projectId, name: '其他群聊' })
+  const outsider = await repositories.createAgent({ name: '不应外发的其他成员', title: 'PRIVATE_OTHER_ROLE', avatar: null, systemPrompt: 'PRIVATE_OTHER_PROMPT', modelConfigId, defaultToolPermissions: {} })
+  await repositories.saveChannelAgent({ channelId: other.id, agentId: outsider.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
+  await invoke(IpcChannel.CloudConsentGrant, projectId, modelConfigId, { allowToolResultUpload: true })
+  fetchImpl.mockResolvedValue(new Response('data: {"choices":[{"delta":{"content":"有一位已停用 Agent"}}]}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
+  const { taskRunId } = await send()
+  await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(IpcChannel.MessageStream, { taskRunId, generation: 0, type: 'complete' }))
+  const system = JSON.parse(fetchImpl.mock.calls[0][1].body).messages[0].content
+  expect(system).toContain('"total":1,"enabledCount":0')
+  expect(system).toContain('"name":"已停用作者","title":"写作","isEnabled":false')
+  expect(system).not.toMatch(/不应外发|PRIVATE_DISABLED_PROMPT|PRIVATE_OTHER/)
+})
 
 it('returns one ordered durable snapshot without prompts, roots, keys or event metadata', async () => {
   const agent = await repositories.createAgent({ name: 'snapshot-agent', title: 'test', avatar: '🧭', systemPrompt: 'PRIVATE_SYSTEM_PROMPT', modelConfigId, defaultToolPermissions: {} })

@@ -4,7 +4,7 @@ import { APP_VERSION } from '../../shared/app-version'
 it('keeps display/package/lock versions aligned and release targets explicit and unpublished', () => {
   const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
   const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'))
-  expect([pkg.version, lock.version, lock.packages[''].version, APP_VERSION]).toEqual(Array(4).fill('0.5.0'))
+  expect([pkg.version, lock.version, lock.packages[''].version, APP_VERSION]).toEqual(Array(4).fill('0.5.1'))
   expect(pkg.build.win.target).toEqual(['nsis', 'portable'])
   expect(pkg.build.mac.target).toEqual(['dmg', 'zip'])
   expect(pkg.build.linux.target).toEqual(['AppImage'])

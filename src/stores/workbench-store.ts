@@ -1,5 +1,6 @@
 import type { AgentSummary, AgentTeamApi, AgentTurn, CeoMentionToken, Channel, ChannelAgent, ChannelTaskSnapshot, CreateProjectRequest, Message, ModelConfigSummary, ProjectSummary, SaveModelConfigInput, StreamEvent, TaskRun } from '../../shared/types'
 import { updateMentionRanges } from '../components/chat/mention-draft'
+import { isChannelRosterQuery } from '../../shared/channel-roster-query'
 
 export interface Conversation {
   messages: Message[]; runs: TaskRun[]; turns: AgentTurn[]; events: ChannelTaskSnapshot['events']
@@ -170,6 +171,7 @@ export function createWorkbenchStore(api: AgentTeamApi) {
   function consentRequirements(action: Action, models: ModelConfigSummary[]) {
     const current = conversation(action.channelId); const channel = state.channels.find((item) => item.id === action.channelId)
     const requirements = new Map<string, string[]>()
+    if (['send', 'interrupt'].includes(action.kind) && isChannelRosterQuery(action.content, action.mentions)) return requirements
     const add = (id: string, purpose: string) => {
       const visited = new Set<string>(); let candidate: string | null = id
       while (candidate) {
@@ -182,11 +184,11 @@ export function createWorkbenchStore(api: AgentTeamApi) {
       }
     }
     const enabled = current.members.filter((member) => member.isEnabled)
-    if (!enabled.length) add(action.modelConfigId, '普通对话：当前输入、历史消息、既有摘要')
+    if (!enabled.length) add(action.modelConfigId, '普通对话：当前输入、历史消息、既有摘要、当前群聊 Agent 成员名单与启用状态')
     for (const member of enabled) {
       const agent = current.agents.find((item) => item.id === member.agentId)
       if (!agent) throw new Error('群聊成员状态无效，请刷新后重试')
-      add(member.modelConfigOverrideId ?? agent.modelConfigId, `Agent ${agent.name}：角色提示、当前输入、完成的历史与摘要、任务状态、获准的脱敏工具结果`)
+      add(member.modelConfigOverrideId ?? agent.modelConfigId, `Agent ${agent.name}：角色提示、当前输入、完成的历史与摘要、任务状态、当前群聊 Agent 成员名单与启用状态、获准的脱敏工具结果`)
     }
     if (current.schedulerModelConfigId && enabled.length) {
       if (channel?.speakerMode === 'automatic' && enabled.length > 1) add(current.schedulerModelConfigId, '自动选人：已启用成员 ID、名称、角色、完整当前 CEO 目标、最近完成的 Agent 消息（最多 3000 字）')

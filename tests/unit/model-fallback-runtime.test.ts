@@ -290,7 +290,7 @@ it('pauses a pinned tool continuation when live capabilities disappear, without 
   const run = (await repositories.getTaskRun(input.taskRunId))!
   const agent = await repositories.createAgent({ name: 'Local reader', title: 'reader', avatar: null, systemPrompt: 'Inspect authorized data', modelConfigId: local.id, defaultToolPermissions: { read_file: true } })
   const member = await repositories.saveChannelAgent({ channelId: run.channelId, agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
-  const turn = (await repositories.startSingleMemberTurn(run.id, run.generation))!
+  const turn = (await repositories.startDefaultMemberTurn(run.id, run.generation))!
   let metadataCalls = 0
   fetchImpl.mockImplementation((url) => {
     if (String(url).endsWith('/api/show')) return new Response(JSON.stringify({ capabilities: ++metadataCalls === 1 ? ['completion', 'tools'] : ['completion'] }), { headers: { 'content-type': 'application/json' } })

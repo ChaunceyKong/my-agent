@@ -189,6 +189,8 @@ test('all four templates import 19 editable default-denied roles and repeat name
   await configureFallback(desktop, provider)
   const { page } = desktop
   await page.getByRole('tab', { name: 'Agent', exact: true }).click()
+  await page.getByRole('button', { name: '＋ 添加 Agent', exact: true }).click()
+  await page.getByRole('button', { name: '推荐实例', exact: true }).click()
   await expect(page.getByRole('region', { name: 'Agent 模板市场', exact: true })).toBeVisible()
   await page.getByLabel('模板导入模型', { exact: true }).selectOption({ label: 'primary-v04' })
   const teams = await page.evaluate(() => window.agentTeam.templates.list())
@@ -196,6 +198,9 @@ test('all four templates import 19 editable default-denied roles and repeat name
   for (const team of teams) {
     await page.getByRole('button', { name: `导入团队：${team.name}`, exact: true }).click()
     await expect.poll(async () => (await page.evaluate(() => window.agentTeam.agents.list())).filter((agent) => agent.sourceTemplateId === team.id).length).toBe(team.roleCount)
+    await page.getByRole('button', { name: '＋ 添加 Agent', exact: true }).click()
+    await page.getByRole('button', { name: '推荐实例', exact: true }).click()
+    await page.getByLabel('模板导入模型', { exact: true }).selectOption({ label: 'primary-v04' })
   }
   let state = await snapshot(page)
   expect(state.agents).toHaveLength(19)
@@ -218,10 +223,12 @@ test('preview copy edits persist without mutating catalog and paused import reje
   await configureFallback(desktop, provider)
   const { page } = desktop
   await page.getByRole('tab', { name: 'Agent', exact: true }).click()
+  await page.getByRole('button', { name: '＋ 添加 Agent', exact: true }).click()
+  await page.getByRole('button', { name: '推荐实例', exact: true }).click()
   const catalog = await page.evaluate(() => window.agentTeam.templates.get('media'))
   await page.getByLabel('模板导入模型', { exact: true }).selectOption({ label: 'primary-v04' })
   await page.getByRole('button', { name: `预览模板：${catalog.name}`, exact: true }).click()
-  const preview = page.getByRole('dialog', { name: `模板预览：${catalog.name}`, exact: true })
+  const preview = page.getByRole('region', { name: `模板预览：${catalog.name}`, exact: true })
   for (const role of catalog.roles) await expect(preview).toContainText(role.systemPrompt)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.screenshot({ path: 'test-results/v04-template-preview.png', fullPage: true })
@@ -245,6 +252,8 @@ test('preview copy edits persist without mutating catalog and paused import reje
   await desktop.restart()
   await expect.poll(async () => (await snapshot(desktop.page)).runs.at(-1)?.status).toBe('paused')
   await desktop.page.getByRole('tab', { name: 'Agent', exact: true }).click()
+  await desktop.page.getByRole('button', { name: '＋ 添加 Agent', exact: true }).click()
+  await desktop.page.getByRole('button', { name: '推荐实例', exact: true }).click()
   await desktop.page.getByRole('button', { name: `导入团队：${catalog.name}`, exact: true }).click()
   await expect(desktop.page.getByRole('alert')).toContainText('任务')
   expect(await desktop.page.evaluate(() => window.agentTeam.agents.list())).toHaveLength(1)

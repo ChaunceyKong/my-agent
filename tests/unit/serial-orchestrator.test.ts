@@ -45,7 +45,7 @@ beforeEach(async () => {
 afterEach(() => { database.close(); rmSync(directory, { recursive: true, force: true }) })
 
 const tokens = () => [{ agentId: first.id, start: 0, end: 6, text: '@Alpha' }, { agentId: second.id, start: 7, end: 12, text: '@Beta' }]
-it.each(['current_goal', 'latest_agent'])('pauses a scheduler whose configured context cannot fit %s plus output reserve', async (requiredInput) => {
+it.each(['current_goal', 'latest_agent'])('stops routing whose configured context cannot fit %s without asking for approval', async (requiredInput) => {
   database.db.run(sql`UPDATE model_configs SET context_window = 2048, max_output_tokens = 512 WHERE id = ${modelConfigId}`)
   await repositories.setChannelScheduler(channelId, modelConfigId)
   await repositories.recordCloudConsent(projectId, modelConfigId)
@@ -61,7 +61,7 @@ it.each(['current_goal', 'latest_agent'])('pauses a scheduler whose configured c
     await repositories.completeAgentTurn(turn.id, '文'.repeat(600))
   }
   await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
-  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused' })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: requiredInput === 'current_goal' ? 'failed' : 'completed' })
   expect(fetch).not.toHaveBeenCalled()
   expect(await repositories.listAgentTurns(run.id)).toHaveLength(requiredInput === 'current_goal' ? 0 : 1)
 })
@@ -96,9 +96,9 @@ it('persists two enabled members and runs structured CEO mentions in textual ord
   expect((await repositories.listMessages(channelId)).map((message) => [message.agentId, message.content])).toEqual([
     [null, '@Alpha @Beta please collaborate'], [first.id, 'A finished'], [second.id, 'B finished'],
   ])
-  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused', turnCount: 2 })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'completed', turnCount: 2 })
   expect(modelClient.streamChat).toHaveBeenCalledTimes(2)
-  expect(events.at(-1)).toMatchObject({ type: 'error' })
+  expect(events.at(-1)).toMatchObject({ type: 'complete' })
 })
 
 it('rejects forged, disabled and overlapping mention tokens without creating a Run', async () => {
@@ -111,18 +111,17 @@ it('rejects forged, disabled and overlapping mention tokens without creating a R
   expect(await repositories.listTaskRuns(channelId)).toEqual([])
 })
 
-it('pauses an unassigned multi-member run without guessing the first Agent', async () => {
+it('uses the first enabled member in automatic mode without a scheduler and allows the next question', async () => {
   const { orchestrator, modelClient } = setup(async (_system, emit) => {
     await emit({ taskRunId: 'ignored', type: 'delta', content: 'single reply' })
     await emit({ taskRunId: 'ignored', type: 'complete' })
   })
   const unassigned = await taskRuns.startTaskRun(channelId, modelConfigId, 'who should answer?')
   await orchestrator.run({ taskRunId: unassigned.id, projectId, channelId, onEvent: async () => {} })
-  expect(await repositories.getTaskRun(unassigned.id)).toMatchObject({ status: 'paused', turnCount: 0 })
-  expect(modelClient.streamChat).not.toHaveBeenCalled()
-  await expect(taskRuns.startTaskRun(channelId, modelConfigId, 'new')).rejects.toThrow('继续或结束')
-  // The pending paused Run must be explicitly ended before another can start.
-  // Task 5 adds the public continuation/termination workflow.
+  expect(await repositories.getTaskRun(unassigned.id)).toMatchObject({ status: 'completed', turnCount: 1 })
+  expect((await repositories.listAgentTurns(unassigned.id))[0].agentId).toBe(first.id)
+  expect(modelClient.streamChat).toHaveBeenCalledTimes(1)
+  await expect(taskRuns.startTaskRun(channelId, modelConfigId, 'new')).resolves.toMatchObject({ status: 'running' })
 })
 
 it('preserves one-member automatic reply without a CEO mention', async () => {
@@ -245,19 +244,22 @@ it('routes IPC structured mentions to the serial orchestrator without selecting 
   expect(modelClient.requireCloudConsent).not.toHaveBeenCalled() // Each Turn checks its own model when it starts.
 })
 
-it('persists an unassigned IPC send before safely pausing a multi-member Run', async () => {
-  const { orchestrator, modelClient } = setup(async () => {})
+it('persists an unassigned IPC send and completes the default member reply', async () => {
+  const { orchestrator, modelClient } = setup(async (_system, emit) => {
+    await emit({ type: 'delta', content: '默认成员已回复', taskRunId: 'ignored' })
+    await emit({ type: 'complete', taskRunId: 'ignored' })
+  })
   const handlers = new Map<string, (event: unknown, ...args: any[]) => unknown>()
   registerHandlers({ ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
     dialog: { showOpenDialog: vi.fn() }, repositories, taskRuns, modelClient, orchestrator })
   const send = vi.fn()
   const { taskRunId } = await handlers.get(IpcChannel.MessageSend)!({ sender: { isDestroyed: () => false, send } },
     { channelId, modelConfigId, content: '请团队讨论，但暂不指定发言人' }) as { taskRunId: string }
-  await vi.waitFor(async () => expect(await repositories.getTaskRun(taskRunId)).toMatchObject({ status: 'paused', turnCount: 0 }))
-  expect((await repositories.listMessages(channelId)).map((message) => message.content)).toEqual(['请团队讨论，但暂不指定发言人'])
-  expect(await repositories.listAgentTurns(taskRunId)).toEqual([])
-  expect(modelClient.streamChat).not.toHaveBeenCalled()
-  expect(send).toHaveBeenCalledWith(IpcChannel.MessageStream, expect.objectContaining({ taskRunId, type: 'error' }))
+  await vi.waitFor(async () => expect(await repositories.getTaskRun(taskRunId)).toMatchObject({ status: 'completed', turnCount: 1 }))
+  expect((await repositories.listMessages(channelId)).map((message) => message.content)).toEqual(['请团队讨论，但暂不指定发言人', '默认成员已回复'])
+  expect(await repositories.listAgentTurns(taskRunId)).toHaveLength(1)
+  expect(modelClient.streamChat).toHaveBeenCalledTimes(1)
+  expect(send).toHaveBeenCalledWith(IpcChannel.MessageStream, expect.objectContaining({ taskRunId, type: 'complete' }))
 })
 
 it('routes 0-to-1 membership changes during delayed send consent through the Agent orchestrator', async () => {
@@ -317,7 +319,7 @@ it('serially follows a completed Agent handoff without parsing partial messages'
   await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
   expect((await repositories.listAgentTurns(run.id)).map((turn) => turn.agentId)).toEqual([first.id, second.id])
   expect(modelClient.streamChat).toHaveBeenCalledTimes(2)
-  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused' })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'completed' })
 })
 
 it('uses a configured scheduler and validates each decision before starting a Turn', async () => {
@@ -351,13 +353,58 @@ it('uses a configured scheduler and validates each decision before starting a Tu
   expect((await repositories.listTaskRunEvents(run.id)).filter((event) => event.eventType === 'speaker_decided').map((event) => event.displayReason)).toEqual(['Assign Alpha', 'Done'])
 })
 
+it('completes an existing reply when the next-speaker model fails, without another approval or a guessed speaker', async () => {
+  await repositories.setChannelScheduler(channelId, modelConfigId)
+  const { orchestrator, modelClient } = setup(async (_system, emit) => {
+    await emit({ taskRunId: 'ignored', type: 'delta', content: '问题已经回答' })
+    await emit({ taskRunId: 'ignored', type: 'complete' })
+  })
+  modelClient.selectSpeaker = vi.fn().mockRejectedValue(new Error('provider unavailable'))
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, '@Alpha answer', [tokens()[0]])
+  const events: StreamEvent[] = []
+  await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async (event) => { events.push(event) } })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'completed', turnCount: 1 })
+  expect((await repositories.listMessages(channelId)).at(-1)?.content).toBe('问题已经回答')
+  expect(events.at(-1)?.type).toBe('complete')
+  expect(await repositories.listApprovalRequests(run.id)).toEqual([])
+  await expect(taskRuns.startTaskRun(channelId, modelConfigId, 'next question')).resolves.toMatchObject({ status: 'running' })
+})
+
+it('cannot auto-complete across an active turn or pending CEO mention', async () => {
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, '@Alpha answer', [tokens()[0]])
+  expect(await repositories.transitionTaskRun(run.id, 'running', 'completed', {}, { generation: run.generation, requireIdle: true })).toBeUndefined()
+  await repositories.startNextMentionTurn(run.id, run.generation)
+  expect(await repositories.transitionTaskRun(run.id, 'running', 'completed', {}, { generation: run.generation, requireIdle: true })).toBeUndefined()
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'running', turnCount: 1 })
+})
+
+it('closes only idle legacy scheduling pauses on upgrade without replaying the completed reply', async () => {
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, '@Alpha answer', [tokens()[0]])
+  const turn = (await repositories.startNextMentionTurn(run.id, run.generation))!
+  await repositories.completeAgentTurn(turn.id, '旧版已完成的回复')
+  await taskRuns.pauseTaskRun(run.id, '自动调度不可用，请 CEO 指派下一位 Agent。')
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused' })
+  await taskRuns.recoverInterruptedTaskRuns()
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'completed', pauseReason: null })
+  expect((await repositories.listMessages(channelId)).filter((message) => message.origin === 'agent')).toHaveLength(1)
+  await expect(taskRuns.startTaskRun(channelId, modelConfigId, 'next question')).resolves.toMatchObject({ status: 'running' })
+})
+
+it('keeps a legacy scheduling pause unresolved when it still contains a pending CEO assignment', async () => {
+  const run = await taskRuns.startTaskRun(channelId, modelConfigId, '@Alpha answer', [tokens()[0]])
+  await repositories.pauseTaskRun(run.id, '请 CEO 指派下一位 Agent 或配置调度模型')
+  await taskRuns.recoverInterruptedTaskRuns()
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused' })
+  expect(await repositories.listAgentTurns(run.id)).toEqual([])
+})
+
 it('rejects unsafe scheduler reason before persisting a decision', async () => {
   await repositories.setChannelScheduler(channelId, modelConfigId)
   const { orchestrator, modelClient } = setup(async () => {})
   modelClient.selectSpeaker = vi.fn().mockResolvedValue(JSON.stringify({ nextSpeaker: first.id, reason: 'hidden\u202Econtrol' }))
   const run = await taskRuns.startTaskRun(channelId, modelConfigId, 'Choose')
   await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
-  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused', turnCount: 0 })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'failed', turnCount: 0 })
   expect((await repositories.listTaskRunEvents(run.id)).filter((event) => event.eventType === 'speaker_decided')).toEqual([])
 })
 
@@ -369,13 +416,13 @@ it('normalizes display reason whitespace and rejects oversized reasons', async (
   expect(() => parseSpeakerDecision(JSON.stringify({ nextSpeaker: first.id, reason: 'x'.repeat(201) }), members, agents)).toThrow()
 })
 
-it.each(['not-json', JSON.stringify({ nextSpeaker: 'unknown', reason: 'bad' }), JSON.stringify({ nextSpeaker: null, reason: '' })])('pauses invalid scheduler output: %s', async (decision) => {
+it.each(['not-json', JSON.stringify({ nextSpeaker: 'unknown', reason: 'bad' }), JSON.stringify({ nextSpeaker: null, reason: '' })])('fails invalid initial scheduling without requiring CEO intervention: %s', async (decision) => {
   await repositories.setChannelScheduler(channelId, modelConfigId)
   const { orchestrator, modelClient } = setup(async () => {})
   modelClient.selectSpeaker = vi.fn().mockResolvedValue(decision)
   const run = await taskRuns.startTaskRun(channelId, modelConfigId, 'Choose')
   await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
-  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused', turnCount: 0 })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'failed', turnCount: 0 })
 })
 
 it('fences a scheduler decision when membership changes during the model call', async () => {
@@ -388,7 +435,7 @@ it('fences a scheduler decision when membership changes during the model call', 
   })
   const run = await taskRuns.startTaskRun(channelId, modelConfigId, 'Choose')
   await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
-  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused', turnCount: 0 })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'failed', turnCount: 0 })
   expect(await repositories.listAgentTurns(run.id)).toEqual([])
 })
 
@@ -401,14 +448,14 @@ it('does not let a null scheduler decision discard pending CEO mentions', async 
   expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'running', turnCount: 0 })
 })
 
-it('pauses repeated Agent handoff suggestions after three alternating cycles', async () => {
+it('stops repeated Agent handoff suggestions after three alternating cycles without blocking new questions', async () => {
   const { orchestrator, modelClient } = setup(async (system, emit) => {
     await emit({ taskRunId: 'ignored', type: 'delta', content: system.includes('Prompt A') ? '@Beta' : '@Alpha' })
     await emit({ taskRunId: 'ignored', type: 'complete' })
   })
   const run = await taskRuns.startTaskRun(channelId, modelConfigId, '@Alpha begin', [tokens()[0]])
   await orchestrator.run({ taskRunId: run.id, projectId, channelId, onEvent: async () => {} })
-  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused', turnCount: 12, pauseReason: 'Agent 交替循环达到 3 次，等待 CEO 处理' })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'failed', turnCount: 12, errorMessage: 'Agent 交替循环达到 3 次，协作已停止' })
   expect(modelClient.streamChat).toHaveBeenCalledTimes(12)
 })
 

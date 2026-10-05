@@ -161,7 +161,7 @@ it('disables resume during a pending approval while keeping the Run running', as
 })
 it.each(['approved effect', 'rejected approval', 'expired approval'])('enables explicit continue and assign after Main confirms %s is terminal', async () => {
   team(); durable.runs = [run({ currentTurnId: 'turn-1', turnCount: 1 })]; durable.turns = [turn({ status: 'waiting_approval' })]; durable.resumeAllowed = { 'run-1': true }
-  render(<App />); await ready(); expect(screen.getByRole('button', { name: '继续当前任务' })).toBeEnabled(); expect(screen.getByLabelText('CEO 任务控制')).toHaveTextContent('等待 CEO 继续')
+  render(<App />); await ready(); expect(screen.getByRole('button', { name: '继续当前任务' })).toBeEnabled(); expect(screen.getByLabelText('CEO 任务控制')).toHaveTextContent('审批已处理，可继续任务')
   await userEvent.selectOptions(screen.getByLabelText('下一位 Agent'), 'a2'); expect(screen.getByRole('button', { name: '指派并继续' })).toBeEnabled()
 })
 it('does not grant process recovery until manual stop and verification is checked', async () => {

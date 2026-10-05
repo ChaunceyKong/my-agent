@@ -88,6 +88,17 @@ function schedulerId(tx: Transaction, override: string | null): string | null {
   return override ?? tx.select().from(modelSettings).where(eq(modelSettings.id, 1)).get()?.schedulerModelConfigId ?? null
 }
 
+function isIdleTask(tx: Transaction, run: TaskRun): boolean {
+  return !run.currentTurnId
+    && !tx.select().from(mentionQueue).where(and(eq(mentionQueue.taskRunId, run.id), eq(mentionQueue.status, 'pending'))).get()
+    && !tx.select().from(agentTurns).where(and(eq(agentTurns.taskRunId, run.id), inArray(agentTurns.status, ['queued', 'running', 'waiting_approval']))).get()
+    && !tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), or(inArray(toolExecutions.status, ['executing', 'waiting_approval']), eq(toolExecutions.processRecoveryRequired, true)))).get()
+    && !tx.select({ id: approvalRequests.id }).from(approvalRequests).innerJoin(toolExecutions, eq(approvalRequests.toolExecutionId, toolExecutions.id))
+      .where(and(eq(toolExecutions.taskRunId, run.id), inArray(approvalRequests.status, ['pending', 'approved', 'executing']))).get()
+    && !tx.select({ id: overwritePublications.executionId }).from(overwritePublications).innerJoin(toolExecutions, eq(overwritePublications.executionId, toolExecutions.id))
+      .where(and(eq(toolExecutions.taskRunId, run.id), inArray(overwritePublications.state, ['preparing', 'staged', 'publishing', 'effect_claimed', 'published', 'cleanup_pending', 'needs_recovery']))).get()
+}
+
 function appendEvent(tx: Transaction, run: TaskRun, eventType: TaskRunEventType, refs: { agentId?: string; messageId?: string; toolExecutionId?: string; metadata?: EventMetadata; displayReason?: string } = {}): TaskRunEvent {
   const last = tx.select({ seq: taskRunEvents.seq }).from(taskRunEvents)
     .where(eq(taskRunEvents.taskRunId, run.id)).orderBy(sql`${taskRunEvents.seq} DESC`).limit(1).get()
@@ -319,12 +330,12 @@ export interface Repositories {
   validateStartedTaskRun(input: StartTaskRunInput): Promise<void>
   getTaskRun(id: string): Promise<TaskRun | undefined>
   listTaskRuns(channelId: string): Promise<TaskRun[]>
-  transitionTaskRun(id: string, from: 'running', to: 'completed' | 'failed' | 'cancelled', metadata: Record<string, string>, guard?: { generation: number; modelSnapshot?: string; actualModelConfigId?: string; actualModelSnapshot?: string; requireNoEnabledMembers?: boolean; modelRouteSnapshot?: string }): Promise<TaskRun | undefined>
+  transitionTaskRun(id: string, from: 'running', to: 'completed' | 'failed' | 'cancelled', metadata: Record<string, string>, guard?: { generation: number; modelSnapshot?: string; actualModelConfigId?: string; actualModelSnapshot?: string; requireNoEnabledMembers?: boolean; modelRouteSnapshot?: string; requireIdle?: boolean }): Promise<TaskRun | undefined>
   recoverRunningTaskRuns(): Promise<number>
   appendTaskRunEvent(id: string, generation: number, eventType: TaskRunEventType, refs?: { agentId?: string; messageId?: string; toolExecutionId?: string; metadata?: EventMetadata; displayReason?: string }): Promise<TaskRunEvent>
   listTaskRunEvents(id: string): Promise<TaskRunEvent[]>
   startNextMentionTurn(taskRunId: string, generation: number): Promise<AgentTurn | undefined>
-  startSingleMemberTurn(taskRunId: string, generation: number): Promise<AgentTurn | undefined>
+  startDefaultMemberTurn(taskRunId: string, generation: number): Promise<AgentTurn | undefined>
   commitSpeakerDecision(input: { taskRunId: string; generation: number; modelConfigId: string; configuredModelConfigId?: string; configuredModelSnapshot?: string; modelSnapshot?: string; memberRevisions: Record<string, string>; nextSpeaker: string | null; reason: string; modelRouteSnapshot?: string }): Promise<AgentTurn | null>
   markAgentTurnWaiting(id: string, toolExecutionId: string): Promise<AgentTurn>
   pauseTaskRun(id: string, reason: string): Promise<TaskRun>
@@ -1059,12 +1070,13 @@ export function createRepositories(client: DatabaseClient): Repositories {
       from: 'running',
       to: 'completed' | 'failed' | 'cancelled',
       metadata: Record<string, string>,
-      guard?: { generation: number; modelSnapshot?: string; actualModelConfigId?: string; actualModelSnapshot?: string; requireNoEnabledMembers?: boolean; modelRouteSnapshot?: string },
+      guard?: { generation: number; modelSnapshot?: string; actualModelConfigId?: string; actualModelSnapshot?: string; requireNoEnabledMembers?: boolean; modelRouteSnapshot?: string; requireIdle?: boolean },
     ): Promise<TaskRun | undefined> {
       const timestamp = new Date().toISOString()
       return client.db.transaction((tx) => {
         const current = tx.select().from(taskRuns).where(eq(taskRuns.id, id)).get()
         if (!current || current.status !== from) return undefined
+        if (guard?.requireIdle && !isIdleTask(tx, current)) return undefined
         if (guard && (current.generation !== guard.generation
           || (guard.modelRouteSnapshot !== undefined && JSON.stringify(fallbackPath(tx.select().from(modelConfigs).all(), current.modelConfigId)) !== guard.modelRouteSnapshot)
           || (guard.modelSnapshot !== undefined && JSON.stringify(tx.select().from(modelConfigs).where(eq(modelConfigs.id, current.modelConfigId)).get()) !== guard.modelSnapshot)
@@ -1091,6 +1103,7 @@ export function createRepositories(client: DatabaseClient): Repositories {
         tx.update(agentTurns).set({ status: 'cancelled', finishedAt: timestamp })
           .where(and(eq(agentTurns.taskRunId, id), inArray(agentTurns.status, ['queued', 'running', 'waiting_approval']))).run()
         invalidateTools(tx, next)
+        tx.update(mentionQueue).set({ status: 'cancelled' }).where(and(eq(mentionQueue.taskRunId, id), eq(mentionQueue.status, 'pending'))).run()
         if (to === 'completed' && metadata.result !== undefined) {
           const reply = tx.insert(messages).values({
             id: randomUUID(), channelId: next.channelId, taskRunId: next.id,
@@ -1228,6 +1241,17 @@ export function createRepositories(client: DatabaseClient): Repositories {
           tx.insert(auditEvents).values({ id: randomUUID(), channelId: run.channelId, taskRunId: run.id,
             eventType: 'process_recovery_required', metadataJson: JSON.stringify({ toolExecutionId: execution.id }), createdAt: timestamp }).run()
         }
+        // Old routing-only pauses must not keep the next ordinary message blocked.
+        const legacyPauses = tx.select().from(taskRuns).where(and(eq(taskRuns.status, 'paused'),
+          inArray(taskRuns.pauseReason, ['自动调度不可用，请 CEO 指派下一位 Agent。', '请 CEO 指派下一位 Agent 或配置调度模型']))).all()
+        for (const run of legacyPauses) {
+          if (!isIdleTask(tx, run)) continue
+          const answered = !!tx.select().from(agentTurns).where(and(eq(agentTurns.taskRunId, run.id), eq(agentTurns.status, 'completed'))).get()
+          const next = tx.update(taskRuns).set({ status: answered ? 'completed' : 'failed', generation: run.generation + 1,
+            pauseReason: null, finishedAt: timestamp, errorMessage: answered ? null : '旧版会话未能安排发言，请重新发送问题' })
+            .where(eq(taskRuns.id, run.id)).returning().get()!
+          appendEvent(tx, next, answered ? 'task_completed' : 'task_failed')
+        }
         return runningRuns.length
       })
     },
@@ -1258,13 +1282,16 @@ export function createRepositories(client: DatabaseClient): Repositories {
         return turn
       })
     },
-    async startSingleMemberTurn(taskRunId, generation) {
+    async startDefaultMemberTurn(taskRunId, generation) {
       return client.db.transaction((tx) => {
         const run = tx.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).get()
         if (!run || run.status !== 'running' || run.generation !== generation || run.currentTurnId || run.turnCount !== 0) throw new Error('任务轮次不可开始')
-        const enabled = tx.select().from(channelAgents).where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.isEnabled, true))).all()
-        if (enabled.length !== 1) return undefined
-        const decision = appendEvent(tx, run, 'speaker_decided', { agentId: enabled[0].agentId, metadata: { reason: 'manual_selection' } })
+        const enabled = tx.select({ agentId: channelAgents.agentId }).from(channelAgents).innerJoin(agents, eq(channelAgents.agentId, agents.id))
+          .where(and(eq(channelAgents.channelId, run.channelId), eq(channelAgents.isEnabled, true))).orderBy(asc(agents.createdAt), asc(agents.id)).all()
+        const channel = tx.select().from(channels).where(eq(channels.id, run.channelId)).get()!
+        if (!enabled.length || (enabled.length > 1 && (channel.speakerMode !== 'automatic' || schedulerId(tx, channel.schedulerModelConfigId)))) return undefined
+        const decision = appendEvent(tx, run, 'speaker_decided', { agentId: enabled[0].agentId, metadata: { reason: 'manual_selection' },
+          displayReason: enabled.length > 1 ? '未配置调度模型，由第一位已启用 Agent 回复' : undefined })
         return selectedTurn(tx, run, enabled[0].agentId, decision.seq)
       })
     },
@@ -1289,7 +1316,6 @@ export function createRepositories(client: DatabaseClient): Repositories {
           || tx.select().from(approvalRequests).innerJoin(toolExecutions, eq(approvalRequests.toolExecutionId, toolExecutions.id))
             .where(and(eq(toolExecutions.taskRunId, run.id), inArray(approvalRequests.status, ['pending', 'approved']))).get()) throw new Error('任务仍有待处理事项')
         if (input.nextSpeaker === null) {
-          if (tx.select().from(toolExecutions).where(and(eq(toolExecutions.taskRunId, run.id), inArray(toolExecutions.toolName, ['write_file', 'replace_file_content', 'run_process']), eq(toolExecutions.status, 'completed'))).get()) throw new Error('任务有待验收产物')
           appendEvent(tx, run, 'speaker_decided', { metadata: { reason: 'automatic_complete', configuredModelConfigId: configuredId, actualModelConfigId: actual.id }, displayReason: input.reason })
           tx.update(taskRuns).set({ status: 'completed', finishedAt: new Date().toISOString() }).where(eq(taskRuns.id, run.id)).run()
           appendEvent(tx, run, 'task_completed')

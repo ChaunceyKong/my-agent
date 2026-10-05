@@ -84,6 +84,16 @@ function flow(initialRun?: TaskRun) {
 async function loaded(store: ReturnType<typeof createWorkbenchStore>) { await vi.waitFor(() => expect(store.getSnapshot().conversations[first.id]?.loaded).toBe(true)) }
 const modelFixture = (id: string, fallbackConfigId: string | null = null): ModelConfigSummary => ({ id, modelName: id, providerPreset: 'openai', baseUrl: 'https://example.test', hasApiKey: true, fallbackConfigId })
 
+it('sends a roster-only question locally without requesting cloud consent', async () => {
+  const context = flow(); await loaded(context.store)
+  vi.mocked(context.api.consent.has).mockResolvedValue(false)
+  context.store.setDraft('请列出当前群聊 Agent 成员名单')
+  await context.store.send()
+  expect(context.api.tasks.send).toHaveBeenCalledWith(expect.objectContaining({ content: '请列出当前群聊 Agent 成员名单' }))
+  expect(context.api.consent.has).not.toHaveBeenCalled()
+  expect(context.store.getSnapshot().consent).toBeNull()
+})
+
 it('shows the first bound token synchronously and coalesces a burst into one bounded snapshot read', async () => {
   vi.useFakeTimers(); const context = flow(runFixture('running')); await loaded(context.store)
   vi.mocked(context.api.tasks.snapshot).mockClear()

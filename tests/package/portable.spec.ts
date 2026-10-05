@@ -11,7 +11,7 @@ test('real portable launcher self-extracts, persists isolated SQLite/theme, and 
   const userData = join(root, 'user-data'); const runtimeTemp = join(root, 'runtime-temp')
   await mkdir(userData); await mkdir(runtimeTemp)
   const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined && !['ELECTRON_RUN_AS_NODE', 'ELECTRON_RENDERER_URL', 'PORTABLE_EXECUTABLE_DIR', 'PORTABLE_EXECUTABLE_FILE'].includes(entry[0])))
-  const executable = resolve('release/win-v0.5.0/Agent Team Desktop 0.5.0.exe')
+  const executable = resolve('release/win-v0.5.1/Agent Team Desktop 0.5.1.exe')
   let launcher: ChildProcess | undefined; let browser: Browser | undefined; let exited: Promise<void> | undefined
   async function waitForExit() {
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -49,7 +49,7 @@ test('real portable launcher self-extracts, persists isolated SQLite/theme, and 
     expect(runtimeRelative).not.toBe('..'); expect(runtimeRelative).not.toBe('')
     expect(runtimeRelative.startsWith(`..${sep}`)).toBe(false)
     expect(processEvidence.ExecutablePath.toLowerCase()).not.toBe(executable.toLowerCase())
-    await expect(page.getByText('v0.5.0', { exact: true })).toBeVisible()
+    await expect(page.getByText('v0.5.1', { exact: true })).toBeVisible()
     const initial = await page.evaluate(async () => ({ projects: await window.agentTeam.projects.list(), require: typeof (window as unknown as { require?: unknown }).require,
       updates: await Promise.all(Object.values(window.agentTeam.updates).map((action) => action())) }))
     expect(initial.projects).toEqual([]); expect(initial.require).toBe('undefined')

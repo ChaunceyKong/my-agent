@@ -90,7 +90,8 @@ it('follows new output only near bottom and never truncates an oversized bubble'
   view.rerender(<MessageStream conversation={{ ...conversation, previews: [{ ...message(31, long), status: 'streaming' }] }} />)
   expect(log.scrollHeight - log.scrollTop - log.clientHeight).toBe(0)
   expect(log.querySelector('.message-bubble')?.parentElement).not.toBeNull()
-  expect(log.querySelector('[data-history-row="message:m31"] .message-bubble')!.textContent).toBe(long)
+  // Markdown removes the final paragraph newline; all 300 content lines must remain.
+  expect(log.querySelector('[data-history-row="message:m31"] .message-bubble')!.textContent).toBe(long.trimEnd())
   expect(log.querySelector('[data-history-row="message:m31"]')!.getBoundingClientRect().height).toBe(3000)
 })
 

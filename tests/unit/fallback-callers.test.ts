@@ -55,7 +55,7 @@ async function enableAgent() {
 async function startTurn() {
   await enableAgent()
   const run = await taskRuns.startTaskRun(channelId, primaryId, 'inspect')
-  const turn = await repositories.startSingleMemberTurn(run.id, run.generation)
+  const turn = await repositories.startDefaultMemberTurn(run.id, run.generation)
   const active = { agent, modelConfigId: primaryId, memberRevision: (await repositories.listChannelAgents(channelId))[0].revision }
   return { taskRunId: run.id, projectId, channelId, turnId: turn!.id, generation: run.generation, active }
 }
@@ -241,7 +241,7 @@ it.each(['exhausted', 'missing fallback consent'])('pauses a summary for %s and 
   expect(await repositories.getLatestSessionSummary(channelId)).toEqual(prior)
 })
 
-it.each(['speaker', 'summary'].flatMap((consumer) => ['401', 'deadline', 'ollama'].map((failure) => ({ consumer, failure }))))('preserves the controlled $failure pause reason from a real $consumer request', async ({ consumer, failure }) => {
+it.each(['speaker', 'summary'].flatMap((consumer) => ['401', 'deadline', 'ollama'].map((failure) => ({ consumer, failure }))))('preserves the controlled $failure error from a real $consumer request', async ({ consumer, failure }) => {
   if (failure === 'ollama') await repositories.updateModelConfig(primaryId, { ...(await repositories.getModelConfig(primaryId))!, providerPreset: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', encryptedApiKey: '' })
   await enableAgent(); await repositories.setChannelScheduler(channelId, primaryId)
   if (consumer === 'speaker') {
@@ -268,7 +268,7 @@ it.each(['speaker', 'summary'].flatMap((consumer) => ['401', 'deadline', 'ollama
   if (failure === 'deadline') await vi.advanceTimersByTimeAsync(120000)
   await pending
   const reason = failure === '401' ? '模型服务拒绝凭证，请检查 API 密钥配置' : failure === 'ollama' ? '请先启动 Ollama 服务' : '模型调用超过 120 秒，请重试'
-  expect(await repositories.getTaskRun(run.id)).toMatchObject({ status: 'paused', pauseReason: reason })
+  expect(await repositories.getTaskRun(run.id)).toMatchObject(consumer === 'speaker' ? { status: 'failed', errorMessage: reason } : { status: 'paused', pauseReason: reason })
   expect(reason).not.toContain('secret')
   expect(fetchImpl).toHaveBeenCalledTimes(failure === 'deadline' ? 4 : 1)
   if (consumer === 'summary') expect(await repositories.getLatestSessionSummary(channelId)).toBeUndefined()

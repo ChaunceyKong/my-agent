@@ -23,7 +23,7 @@ async function turnFixture(repo: Repositories) {
     defaultToolPermissions: { read_file: true, write_file: true, run_process: true } })
   const member = await repo.saveChannelAgent({ channelId: channel.id, agentId: agent.id, isEnabled: true, modelConfigOverrideId: null, toolPermissionsOverride: null })
   const run = await repo.createStartedTaskRun({ channelId: channel.id, modelConfigId: primary.id, content: 'goal' })
-  const turn = (await repo.startSingleMemberTurn(run.id, run.generation))!
+  const turn = (await repo.startDefaultMemberTurn(run.id, run.generation))!
   return { project, channel, primary, backup, agent, member, run, turn }
 }
 
